@@ -1,4 +1,5 @@
 """Authentication helpers for AgentLock Cloud."""
+
 from __future__ import annotations
 
 

@@ -1,4 +1,5 @@
 """Crypto primitives for agentlock."""
+
 from agentlock.crypto.canonical import canonical_cbor, canonical_cbor_decode
 from agentlock.crypto.hashing import (
     ATEP_DOMAIN,

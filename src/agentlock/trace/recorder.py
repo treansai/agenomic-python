@@ -1,4 +1,5 @@
 """In-memory accumulator for one agent run."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

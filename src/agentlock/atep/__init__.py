@@ -1,4 +1,5 @@
 """ATEP — Attested Tamper-Evident Provenance log."""
+
 from agentlock.atep.clock import Hlc
 from agentlock.atep.event import (
     AtepEvent,

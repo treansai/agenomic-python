@@ -3,6 +3,7 @@
 Lazy: ``openai`` is imported inside :func:`instrument_openai`. The module
 itself is safe to import without ``openai`` installed.
 """
+
 from __future__ import annotations
 
 import time
@@ -23,11 +24,7 @@ def _hash_request_body(payload: dict[str, Any]) -> str:
 
 def _hash_response_body(response: Any) -> str:
     try:
-        data = (
-            response.model_dump()
-            if hasattr(response, "model_dump")
-            else dict(response)
-        )
+        data = response.model_dump() if hasattr(response, "model_dump") else dict(response)
     except Exception:
         data = {"repr": repr(response)}
     return blake3_hex(canonical_cbor(data))

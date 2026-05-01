@@ -1,4 +1,5 @@
 """Tests for BLAKE3 hashing primitives."""
+
 from __future__ import annotations
 
 from agentlock.crypto.hashing import (

@@ -3,6 +3,7 @@
 Used for all hashing and signing of ATEP events and attestations.
 Reproducible bit-for-bit on every platform.
 """
+
 from __future__ import annotations
 
 from typing import Any

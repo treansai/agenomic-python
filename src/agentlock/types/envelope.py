@@ -1,4 +1,5 @@
 """Trace envelope — single agent run wire format."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone

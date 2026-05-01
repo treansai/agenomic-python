@@ -1,4 +1,5 @@
 """ATEP local exporter — convert envelopes into signed ATEP interaction events."""
+
 from __future__ import annotations
 
 import logging

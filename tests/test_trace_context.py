@@ -1,4 +1,5 @@
 """Tests for trace context propagation."""
+
 from __future__ import annotations
 
 from agentlock.trace.context import (

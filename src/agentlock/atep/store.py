@@ -1,4 +1,5 @@
 """Filesystem-backed ATEP store for one agent."""
+
 from __future__ import annotations
 
 import json
@@ -69,9 +70,7 @@ class AtepStore:
             data = json.loads(manifest_path.read_text(encoding="utf-8"))
             existing = data.get("agent_id")
             if existing and existing != agent_id:
-                raise AtepError(
-                    f"store at {root} belongs to {existing!r}, not {agent_id!r}"
-                )
+                raise AtepError(f"store at {root} belongs to {existing!r}, not {agent_id!r}")
         else:
             manifest_path.write_text(
                 json.dumps({"agent_id": agent_id, "schema_version": 1}, indent=2),
@@ -103,9 +102,7 @@ class AtepStore:
     def append_event(self, event: AtepEvent) -> Path:
         """Write a single-event segment for this event. Returns the segment path."""
         if event.header.agent_id != self.agent_id:
-            raise AtepError(
-                f"event agent_id {event.header.agent_id!r} != store {self.agent_id!r}"
-            )
+            raise AtepError(f"event agent_id {event.header.agent_id!r} != store {self.agent_id!r}")
         path = self._next_segment_path(event.header.stream)
         with SegmentWriter(path) as w:
             w.append(event)

@@ -1,4 +1,5 @@
 """Trace decorator + recorder + envelope builder."""
+
 from agentlock.trace.context import (
     current_recorder,
     reset_current_recorder,

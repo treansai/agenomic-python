@@ -1,4 +1,5 @@
 """Context-variable based propagation of the current TraceRecorder."""
+
 from __future__ import annotations
 
 import contextvars
@@ -6,8 +7,8 @@ from typing import Optional
 
 from agentlock.trace.recorder import TraceRecorder
 
-_current_recorder: contextvars.ContextVar[Optional[TraceRecorder]] = (
-    contextvars.ContextVar("agentlock_recorder", default=None)
+_current_recorder: contextvars.ContextVar[Optional[TraceRecorder]] = contextvars.ContextVar(
+    "agentlock_recorder", default=None
 )
 
 

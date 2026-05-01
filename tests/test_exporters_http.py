@@ -1,4 +1,5 @@
 """Tests for the batched HTTP exporter."""
+
 from __future__ import annotations
 
 import pytest

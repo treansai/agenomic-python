@@ -1,4 +1,5 @@
 """ATEP local: produce a signed event log fully offline."""
+
 from __future__ import annotations
 
 import tempfile

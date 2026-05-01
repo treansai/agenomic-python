@@ -5,6 +5,7 @@ Wire format: 16 bytes little-endian
     logical     : u32
     node_id     : u32
 """
+
 from __future__ import annotations
 
 import struct

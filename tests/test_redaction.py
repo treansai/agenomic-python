@@ -1,4 +1,5 @@
 """Tests for redaction engine."""
+
 from __future__ import annotations
 
 import copy
@@ -29,9 +30,7 @@ def test_hash_deterministic() -> None:
 
 
 def test_truncate_string() -> None:
-    e = RedactionEngine(
-        [RedactionRule(path="a", mode=RedactionMode.TRUNCATE, truncate_length=3)]
-    )
+    e = RedactionEngine([RedactionRule(path="a", mode=RedactionMode.TRUNCATE, truncate_length=3)])
     assert e.apply({"a": "abcdefg"}) == {"a": "abc"}
 
 
@@ -41,9 +40,7 @@ def test_truncate_requires_length() -> None:
 
 
 def test_truncate_non_string_passes_through() -> None:
-    e = RedactionEngine(
-        [RedactionRule(path="a", mode=RedactionMode.TRUNCATE, truncate_length=2)]
-    )
+    e = RedactionEngine([RedactionRule(path="a", mode=RedactionMode.TRUNCATE, truncate_length=2)])
     assert e.apply({"a": 12345}) == {"a": 12345}
 
 
@@ -61,9 +58,7 @@ def test_wildcard_segment_list() -> None:
 
 def test_recursive_wildcard() -> None:
     e = RedactionEngine([RedactionRule(path="**.email", mode=RedactionMode.MASK)])
-    out = e.apply(
-        {"a": {"email": "x"}, "deep": {"more": {"email": "y"}}, "z": {"name": "n"}}
-    )
+    out = e.apply({"a": {"email": "x"}, "deep": {"more": {"email": "y"}}, "z": {"name": "n"}})
     assert out == {
         "a": {"email": "***"},
         "deep": {"more": {"email": "***"}},
@@ -87,6 +82,7 @@ def test_input_not_mutated() -> None:
 
 def test_hash_unhashable_raises() -> None:
     e = RedactionEngine([RedactionRule(path="a", mode=RedactionMode.HASH)])
+
     # bytes is not JSON-serializable by default — but we use default=str so falls back.
     # Use a non-serializable object to force the failure.
     class NotJson:

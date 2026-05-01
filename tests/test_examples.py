@@ -1,4 +1,5 @@
 """Smoke-test the offline examples by invoking them."""
+
 from __future__ import annotations
 
 import subprocess
@@ -29,6 +30,5 @@ def test_example_runs(script: str) -> None:
         timeout=60,
     )
     assert result.returncode == 0, (
-        f"{script} exited {result.returncode}\nstdout:\n{result.stdout}\n"
-        f"stderr:\n{result.stderr}"
+        f"{script} exited {result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )

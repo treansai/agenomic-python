@@ -1,4 +1,5 @@
 """Multi-exporter — fan out each envelope to several exporters."""
+
 from __future__ import annotations
 
 import logging

@@ -4,6 +4,7 @@ Requires `pip install agentlock[langgraph]`. This example uses a tiny
 mock-shaped graph object so it runs without LangGraph itself; replace with
 a real ``StateGraph`` once installed.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace

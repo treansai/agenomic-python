@@ -1,4 +1,5 @@
 """Tests for HLC."""
+
 from __future__ import annotations
 
 from agentlock.atep.clock import Hlc

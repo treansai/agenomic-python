@@ -1,4 +1,5 @@
 """Async HTTP client for AgentLock Cloud."""
+
 from __future__ import annotations
 
 import asyncio
@@ -60,26 +61,20 @@ class AgentLockClient:
     async def whoami(self) -> dict[str, Any]:
         return await self._request("GET", "/v1/whoami")
 
-    async def upload_traces(
-        self, envelopes: list[TraceEnvelope]
-    ) -> dict[str, Any]:
+    async def upload_traces(self, envelopes: list[TraceEnvelope]) -> dict[str, Any]:
         body = {
             "traces": [e.model_dump(mode="json", exclude_none=True) for e in envelopes],
         }
         return await self._request("POST", "/v1/traces", json=body)
 
-    async def upload_bundle(
-        self, agent_id: str, archive_path: Path
-    ) -> dict[str, Any]:
+    async def upload_bundle(self, agent_id: str, archive_path: Path) -> dict[str, Any]:
         archive_path = Path(archive_path)
         body = await asyncio.to_thread(archive_path.read_bytes)
         files = {"bundle": (archive_path.name, body, "application/octet-stream")}
         data = {"agent_id": agent_id}
         return await self._request("POST", "/v1/bundles", data=data, files=files)
 
-    async def upload_atep_segment(
-        self, agent_id: str, segment_path: Path
-    ) -> dict[str, Any]:
+    async def upload_atep_segment(self, agent_id: str, segment_path: Path) -> dict[str, Any]:
         segment_path = Path(segment_path)
         body = await asyncio.to_thread(segment_path.read_bytes)
         files = {"segment": (segment_path.name, body, "application/octet-stream")}
@@ -128,9 +123,7 @@ class AgentLockClient:
                 continue
 
             if response.status_code == 401:
-                raise AuthenticationError(
-                    f"authentication failed: {response.text}"
-                )
+                raise AuthenticationError(f"authentication failed: {response.text}")
             if response.status_code in _RETRY_STATUS:
                 if attempt >= self._retry.max_retries:
                     raise CloudError(
@@ -142,13 +135,9 @@ class AgentLockClient:
                 await asyncio.sleep(delay)
                 continue
             if 400 <= response.status_code < 500:
-                raise CloudError(
-                    f"client error {response.status_code}: {response.text}"
-                )
+                raise CloudError(f"client error {response.status_code}: {response.text}")
             if response.status_code >= 500:
-                raise CloudError(
-                    f"server error {response.status_code}: {response.text}"
-                )
+                raise CloudError(f"server error {response.status_code}: {response.text}")
             try:
                 payload: dict[str, Any] = response.json()
             except ValueError:

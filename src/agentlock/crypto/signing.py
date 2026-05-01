@@ -1,4 +1,5 @@
 """ed25519 signing and verifying keys with file-mode safety."""
+
 from __future__ import annotations
 
 import logging
@@ -42,9 +43,7 @@ class SigningKey:
         self.key_id = key_id
 
     @classmethod
-    def from_pem_file(
-        cls, path: Path, key_id: Optional[str] = None
-    ) -> SigningKey:
+    def from_pem_file(cls, path: Path, key_id: Optional[str] = None) -> SigningKey:
         """Load a PKCS#8 PEM private key from disk.
 
         Warns if file mode is not 0600 on POSIX systems.
@@ -144,9 +143,7 @@ class VerifyingKey:
         return cls(key, kid)
 
     @classmethod
-    def from_pem_file(
-        cls, path: Path, key_id: Optional[str] = None
-    ) -> VerifyingKey:
+    def from_pem_file(cls, path: Path, key_id: Optional[str] = None) -> VerifyingKey:
         return cls.from_pem(Path(path).read_text(encoding="ascii"), key_id)
 
     def verify(self, signature: bytes, message: bytes) -> bool:

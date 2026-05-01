@@ -19,6 +19,7 @@ Layout::
     CRC32                      4 B
     MAGIC_TAIL     "PETA"      4 B
 """
+
 from __future__ import annotations
 
 import struct
@@ -47,10 +48,7 @@ def _merkle_root(leaves: list[bytes]) -> bytes:
     while len(layer) > 1:
         if len(layer) % 2 == 1:
             layer.append(layer[-1])
-        layer = [
-            blake3_bytes(layer[i] + layer[i + 1])
-            for i in range(0, len(layer), 2)
-        ]
+        layer = [blake3_bytes(layer[i] + layer[i + 1]) for i in range(0, len(layer), 2)]
     return layer[0]
 
 
@@ -176,9 +174,7 @@ class SegmentReader:
         crc_stored = struct.unpack("<I", self._data[-8:-4])[0]
         crc_actual = zlib.crc32(body)
         if crc_stored != crc_actual:
-            raise AtepError(
-                f"CRC mismatch: stored={crc_stored:08x} actual={crc_actual:08x}"
-            )
+            raise AtepError(f"CRC mismatch: stored={crc_stored:08x} actual={crc_actual:08x}")
 
     def _parse_header(self) -> None:
         h = self._data[:HEADER_LEN]

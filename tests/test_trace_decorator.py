@@ -1,4 +1,5 @@
 """Tests for the @trace_agent_run decorator."""
+
 from __future__ import annotations
 
 import asyncio
@@ -98,9 +99,7 @@ def test_recorder_visible_inside_with_export() -> None:
 
 def test_redaction_applied_to_input() -> None:
     exp = CollectExporter()
-    redaction = RedactionEngine(
-        [RedactionRule(path="kwargs.password", mode=RedactionMode.MASK)]
-    )
+    redaction = RedactionEngine([RedactionRule(path="kwargs.password", mode=RedactionMode.MASK)])
 
     @trace_agent_run("agent://a/b", exporter=exp, redaction=redaction)
     def login(*, user: str, password: str) -> dict[str, str]:

@@ -9,6 +9,7 @@ Commands::
     agentlock-py traces summarize <traces.jsonl>
     agentlock-py keys generate <out.pem>
 """
+
 from __future__ import annotations
 
 import argparse

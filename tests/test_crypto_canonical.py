@@ -1,4 +1,5 @@
 """Tests for canonical CBOR encoding."""
+
 from __future__ import annotations
 
 from agentlock.crypto.canonical import canonical_cbor, canonical_cbor_decode

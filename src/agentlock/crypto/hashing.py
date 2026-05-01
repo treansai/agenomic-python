@@ -3,6 +3,7 @@
 Domain separators MUST match `agentlock-cli` and `agentlock-cloud`
 byte-for-byte. Do not change without bumping schema versions.
 """
+
 from __future__ import annotations
 
 import blake3

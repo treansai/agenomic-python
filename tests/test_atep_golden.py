@@ -5,6 +5,7 @@ The golden fixture is the wire-format anchor for `agentlock-python`,
 wire format changed (regenerate the fixture and bump the schema version)
 or one of the implementations diverged.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

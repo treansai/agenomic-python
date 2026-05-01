@@ -1,4 +1,5 @@
 """Tests for the OpenAI integration. Uses a mock client so `openai` is not required."""
+
 from __future__ import annotations
 
 import sys

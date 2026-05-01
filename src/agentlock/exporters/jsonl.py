@@ -1,4 +1,5 @@
 """JSONL exporter — one trace envelope per line, append-only."""
+
 from __future__ import annotations
 
 from pathlib import Path

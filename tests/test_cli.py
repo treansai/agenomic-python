@@ -1,4 +1,5 @@
 """Tests for agentlock-py CLI."""
+
 from __future__ import annotations
 
 import json

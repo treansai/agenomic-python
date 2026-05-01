@@ -1,4 +1,5 @@
 """Trace primitives — model calls, tool calls, input/output payloads."""
+
 from __future__ import annotations
 
 from enum import Enum

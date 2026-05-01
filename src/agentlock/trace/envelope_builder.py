@@ -1,4 +1,5 @@
 """Helper that assembles a TraceEnvelope from a recorder + final output."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -29,9 +30,7 @@ def build_envelope(
         trace_input = TraceInput(payload_inline={"redacted": True})
 
     if capture_output:
-        payload_out = (
-            redaction.apply(raw_output) if redaction is not None else raw_output
-        )
+        payload_out = redaction.apply(raw_output) if redaction is not None else raw_output
         trace_output = TraceOutput(payload_inline=payload_out)
     else:
         trace_output = TraceOutput(payload_inline={"redacted": True})

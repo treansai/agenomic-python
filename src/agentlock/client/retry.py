@@ -1,4 +1,5 @@
 """Retry policy used by the cloud client."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -17,4 +18,4 @@ class RetryPolicy:
     base_delay: float = 0.2
 
     def delay_for(self, attempt: int) -> float:
-        return float(self.base_delay * (2 ** attempt))
+        return float(self.base_delay * (2**attempt))

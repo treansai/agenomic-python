@@ -2,6 +2,7 @@
 
 Requires `pip install agentlock[openai]` and an OPENAI_API_KEY in your env.
 """
+
 from __future__ import annotations
 
 import os

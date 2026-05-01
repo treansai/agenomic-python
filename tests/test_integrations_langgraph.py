@@ -1,4 +1,5 @@
 """Tests for LangGraph integration with a mocked StateGraph."""
+
 from __future__ import annotations
 
 import sys
@@ -17,9 +18,7 @@ def test_module_imports_without_langgraph() -> None:
 
 
 def test_instrument_records_tool_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(
-        sys.modules, "langgraph", SimpleNamespace(graph=SimpleNamespace())
-    )
+    monkeypatch.setitem(sys.modules, "langgraph", SimpleNamespace(graph=SimpleNamespace()))
 
     def my_node(state: dict[str, Any]) -> dict[str, Any]:
         return {"out": state["in"] * 2}
@@ -48,9 +47,7 @@ def test_instrument_raises_without_langgraph(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_instrument_no_recorder_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(
-        sys.modules, "langgraph", SimpleNamespace(graph=SimpleNamespace())
-    )
+    monkeypatch.setitem(sys.modules, "langgraph", SimpleNamespace(graph=SimpleNamespace()))
     fake_graph = SimpleNamespace(nodes={"f": lambda s: s})
     instrument_langgraph(fake_graph)
     assert fake_graph.nodes["f"]({"x": 1}) == {"x": 1}

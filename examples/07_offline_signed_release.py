@@ -1,4 +1,5 @@
 """Full offline flow: traced runs -> ATEP store -> signed release attestation."""
+
 from __future__ import annotations
 
 import hashlib

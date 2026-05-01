@@ -1,4 +1,5 @@
 """Tests for ATEP signed events."""
+
 from __future__ import annotations
 
 import ulid

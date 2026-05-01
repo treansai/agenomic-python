@@ -1,4 +1,5 @@
 """Tests for the ATEP local exporter."""
+
 from __future__ import annotations
 
 from pathlib import Path

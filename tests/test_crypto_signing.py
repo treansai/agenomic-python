@@ -1,4 +1,5 @@
 """Tests for ed25519 signing/verifying."""
+
 from __future__ import annotations
 
 import logging

@@ -1,4 +1,5 @@
 """Tests for AgentLockClient."""
+
 from __future__ import annotations
 
 import pytest
@@ -40,9 +41,7 @@ async def test_whoami_sends_auth_header(httpx_mock: HTTPXMock) -> None:
 
 @pytest.mark.asyncio
 async def test_upload_traces_sends_json(httpx_mock: HTTPXMock) -> None:
-    httpx_mock.add_response(
-        url=f"{ENDPOINT}/v1/traces", json={"accepted": 1}
-    )
+    httpx_mock.add_response(url=f"{ENDPOINT}/v1/traces", json={"accepted": 1})
     client = AgentLockClient(ENDPOINT, "k")
     res = await client.upload_traces([_env()])
     assert res == {"accepted": 1}
@@ -73,9 +72,7 @@ async def test_429_with_retry_after(httpx_mock: HTTPXMock) -> None:
         headers={"Retry-After": "0"},
     )
     httpx_mock.add_response(url=f"{ENDPOINT}/v1/whoami", json={"id": "u"})
-    client = AgentLockClient(
-        ENDPOINT, "k", retry_policy=RetryPolicy(max_retries=2, base_delay=0)
-    )
+    client = AgentLockClient(ENDPOINT, "k", retry_policy=RetryPolicy(max_retries=2, base_delay=0))
     res = await client.whoami()
     assert res == {"id": "u"}
     await client.aclose()
@@ -83,9 +80,7 @@ async def test_429_with_retry_after(httpx_mock: HTTPXMock) -> None:
 
 @pytest.mark.asyncio
 async def test_401_no_retry(httpx_mock: HTTPXMock) -> None:
-    httpx_mock.add_response(
-        url=f"{ENDPOINT}/v1/whoami", status_code=401, text="bad token"
-    )
+    httpx_mock.add_response(url=f"{ENDPOINT}/v1/whoami", status_code=401, text="bad token")
     client = AgentLockClient(ENDPOINT, "k")
     with pytest.raises(AuthenticationError):
         await client.whoami()
@@ -101,9 +96,7 @@ async def test_503_retried_then_raises(httpx_mock: HTTPXMock) -> None:
         text="x",
         is_reusable=True,
     )
-    client = AgentLockClient(
-        ENDPOINT, "k", retry_policy=RetryPolicy(max_retries=2, base_delay=0)
-    )
+    client = AgentLockClient(ENDPOINT, "k", retry_policy=RetryPolicy(max_retries=2, base_delay=0))
     with pytest.raises(CloudError):
         await client.whoami()
     # 1 initial + 2 retries
@@ -113,9 +106,7 @@ async def test_503_retried_then_raises(httpx_mock: HTTPXMock) -> None:
 
 @pytest.mark.asyncio
 async def test_400_no_retry(httpx_mock: HTTPXMock) -> None:
-    httpx_mock.add_response(
-        url=f"{ENDPOINT}/v1/whoami", status_code=400, text="bad"
-    )
+    httpx_mock.add_response(url=f"{ENDPOINT}/v1/whoami", status_code=400, text="bad")
     client = AgentLockClient(ENDPOINT, "k")
     with pytest.raises(CloudError):
         await client.whoami()
@@ -126,6 +117,7 @@ async def test_400_no_retry(httpx_mock: HTTPXMock) -> None:
 @pytest.mark.asyncio
 async def test_user_agent_default() -> None:
     from agentlock._version import __version__
+
     client = AgentLockClient(ENDPOINT, "k")
     ua = client._client.headers["User-Agent"]
     assert __version__ in ua

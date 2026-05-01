@@ -1,4 +1,5 @@
 """Public type primitives for agentlock."""
+
 from agentlock.types.attestation import ReleaseAttestation
 from agentlock.types.envelope import TraceEnvelope
 from agentlock.types.identifiers import (

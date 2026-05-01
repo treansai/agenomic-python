@@ -1,4 +1,5 @@
 """Tests for type primitives and exception hierarchy."""
+
 from __future__ import annotations
 
 import pytest

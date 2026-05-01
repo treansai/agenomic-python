@@ -1,4 +1,5 @@
 """Typed identifiers used across the SDK."""
+
 from __future__ import annotations
 
 import re

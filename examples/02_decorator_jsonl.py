@@ -1,4 +1,5 @@
 """Decorator + JSONL exporter: trace each call to a function."""
+
 from __future__ import annotations
 
 import tempfile

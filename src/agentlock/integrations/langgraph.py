@@ -1,4 +1,5 @@
 """LangGraph integration — lazy-imported wrapper for state-graph nodes."""
+
 from __future__ import annotations
 
 import time

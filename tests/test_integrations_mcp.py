@@ -1,4 +1,5 @@
 """Tests for MCP helper."""
+
 from __future__ import annotations
 
 from agentlock.integrations.mcp import trace_mcp_call

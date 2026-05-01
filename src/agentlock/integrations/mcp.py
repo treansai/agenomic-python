@@ -3,6 +3,7 @@
 Unlike OpenAI/Anthropic/LangGraph, MCP doesn't have a single SDK to wrap —
 call :func:`trace_mcp_call` after invoking your MCP client.
 """
+
 from __future__ import annotations
 
 from typing import Optional

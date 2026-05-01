@@ -1,4 +1,5 @@
 """Minimal trace: build an envelope by hand, write to stdout."""
+
 from __future__ import annotations
 
 import ulid

@@ -1,4 +1,5 @@
 """Tests for envelope_builder."""
+
 from __future__ import annotations
 
 from agentlock.redaction import RedactionEngine, RedactionMode, RedactionRule

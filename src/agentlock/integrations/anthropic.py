@@ -1,4 +1,5 @@
 """Anthropic integration — lazy-imported wrapper for messages.create."""
+
 from __future__ import annotations
 
 import time
@@ -19,11 +20,7 @@ def _hash_request(payload: dict[str, Any]) -> str:
 
 def _hash_response(response: Any) -> str:
     try:
-        data = (
-            response.model_dump()
-            if hasattr(response, "model_dump")
-            else dict(response)
-        )
+        data = response.model_dump() if hasattr(response, "model_dump") else dict(response)
     except Exception:
         data = {"repr": repr(response)}
     return blake3_hex(canonical_cbor(data))

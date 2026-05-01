@@ -1,4 +1,5 @@
 """@trace_agent_run decorator — sync and async."""
+
 from __future__ import annotations
 
 import asyncio
@@ -49,9 +50,7 @@ def _export_safe(exporter: Optional[Exporter], envelope: Any) -> None:
             asyncio.run(coro)
 
 
-async def _export_safe_async(
-    exporter: Optional[Exporter], envelope: Any
-) -> None:
+async def _export_safe_async(exporter: Optional[Exporter], envelope: Any) -> None:
     if exporter is None:
         return
     try:
