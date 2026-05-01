@@ -11,7 +11,7 @@ from agentlock.trace.context import current_recorder
 from agentlock.types.trace import CallStatus, ToolCall
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from langgraph.graph import StateGraph
+    pass
 
 
 def _hash(data: Any) -> str:
@@ -22,7 +22,7 @@ def _hash(data: Any) -> str:
     return blake3_hex(blob)
 
 
-def instrument_langgraph(graph: StateGraph) -> StateGraph:
+def instrument_langgraph(graph: Any) -> Any:
     """Wrap each node in a LangGraph state graph so executions emit a ToolCall.
 
     Lazy-imports ``langgraph``. Raises ImportError with a helpful message

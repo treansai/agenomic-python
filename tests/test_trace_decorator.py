@@ -53,6 +53,40 @@ def test_async_captures_input_output() -> None:
     assert exp.envelopes[0].final_output.payload_inline == {"answer": "hey"}
 
 
+def test_async_exception_captured() -> None:
+    exp = CollectExporter()
+
+    @trace_agent_run("agent://acme/demo", exporter=exp)
+    async def boom() -> None:
+        raise RuntimeError("nope")
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(boom())
+    assert len(exp.envelopes) == 1
+    assert "RuntimeError: nope" in (exp.envelopes[0].error or "")
+
+
+def test_async_with_async_exporter() -> None:
+    class AsyncExporter:
+        def __init__(self) -> None:
+            self.envelopes: list[Any] = []
+
+        async def export(self, envelope: Any) -> None:
+            await asyncio.sleep(0)
+            self.envelopes.append(envelope)
+
+        def close(self) -> None: ...
+
+    exp = AsyncExporter()
+
+    @trace_agent_run("agent://acme/demo", exporter=exp)  # type: ignore[arg-type]
+    async def handle() -> int:
+        return 42
+
+    asyncio.run(handle())
+    assert len(exp.envelopes) == 1
+
+
 def test_exception_recorded_and_reraised() -> None:
     exp = CollectExporter()
 

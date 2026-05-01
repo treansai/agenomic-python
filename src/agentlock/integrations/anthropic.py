@@ -76,7 +76,7 @@ def instrument_anthropic(client: Anthropic) -> Anthropic:
             )
         return response
 
-    client.messages.create = wrapped
+    setattr(client.messages, "create", wrapped)  # noqa: B010
     return client
 
 
@@ -123,7 +123,7 @@ def instrument_anthropic_async(client: AsyncAnthropic) -> AsyncAnthropic:
             )
         return response
 
-    client.messages.create = wrapped
+    setattr(client.messages, "create", wrapped)  # noqa: B010
     return client
 
 

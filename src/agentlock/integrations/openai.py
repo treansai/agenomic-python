@@ -85,7 +85,7 @@ def instrument_openai(client: OpenAI) -> OpenAI:
             )
         return response
 
-    client.chat.completions.create = wrapped
+    setattr(client.chat.completions, "create", wrapped)  # noqa: B010
     return client
 
 
@@ -137,7 +137,7 @@ def instrument_openai_async(client: AsyncOpenAI) -> AsyncOpenAI:
             )
         return response
 
-    client.chat.completions.create = wrapped
+    setattr(client.chat.completions, "create", wrapped)  # noqa: B010
     return client
 
 
