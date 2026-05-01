@@ -1,182 +1,70 @@
-# AgentLock Python SDK
+# agentlock-python
 
-`agentlock-python` is a lightweight, open-source SDK for instrumenting Python AI agents and
-emitting AgentLock-compatible traces. It is designed to be safe to inspect, easy to extend,
-and usable without any hosted dependency in local-only mode.
+[![CI](https://github.com/agentlock/agentlock-python/actions/workflows/ci.yml/badge.svg)](https://github.com/agentlock/agentlock-python/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/agentlock.svg)](https://pypi.org/project/agentlock/)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-## Features
+Python SDK for [AgentLock](https://agentlock.dev) — agent-native versioning, tracing, and ATEP signed event logs.
 
-- Manual trace creation with typed models and a trace recorder
-- Decorator-based instrumentation for sync and async agent entrypoints
-- JSONL export for offline inspection and replay
-- HTTP ingestion client with optional local-only mode
-- PII redaction hooks with dotted-path targeting
-- Local validation of trace event payloads
-- OpenAI, Anthropic, and LangGraph integration placeholders that do not require those packages
+Works fully offline. Cloud upload is optional.
 
-## Installation
+## Install
 
 ```bash
-python3 -m pip install agentlock-python
+pip install agentlock
 ```
 
-For local development:
+Optional integrations:
 
 ```bash
-python3 -m pip install -e ".[dev]"
+pip install "agentlock[openai]"      # OpenAI auto-instrumentation
+pip install "agentlock[anthropic]"   # Anthropic auto-instrumentation
+pip install "agentlock[langgraph]"   # LangGraph state-graph tracing
+pip install "agentlock[all]"         # Everything
 ```
 
-## Basic Usage
+## Quickstart
 
 ```python
-from agentlock import AgentLockClient, TraceRecorder
+from agentlock.trace.decorator import trace_agent_run
+from agentlock.exporters.jsonl import JsonlExporter
 
-client = AgentLockClient()
+with JsonlExporter("traces.jsonl") as exporter:
 
-trace = TraceRecorder(
-    agent_id="claims-agent",
-    release="dev",
-    input={"claim_id": "clm_123", "amount": 249.0},
-)
-trace.add_model_call(
-    name="gpt-4.1-mini",
-    provider="openai",
-    request={"prompt": "Review claim"},
-    response={"decision": "approve"},
-    input_tokens=24,
-    output_tokens=8,
-)
-trace.add_tool_call(
-    name="claim_history_lookup",
-    input={"claim_id": "clm_123"},
-    output={"previous_claims": 0},
-)
+    @trace_agent_run(agent_id="agent://acme/demo", exporter=exporter)
+    def handle(query: str) -> dict:
+        return {"answer": query.upper()}
 
-envelope = trace.complete(final_output={"decision": "approve"})
-client.emit_trace(envelope)
+    handle("hello")
 ```
 
-## Decorator Instrumentation
+That writes a signed-ready `TraceEnvelope` to `traces.jsonl`. No network. No
+account required.
 
-```python
-from agentlock import AgentLockClient, Redactor, trace_agent_run
+## What's in the box
 
-client = AgentLockClient()
-redactor = Redactor(
-    redact=["customer.email", "customer.phone"],
-    mode="mask",
-)
+- `@trace_agent_run` decorator (sync + async) with contextvar-based propagation
+- `TraceEnvelope` pydantic v2 models compatible with `agentlock-spec`
+- ATEP segment writer/reader with BLAKE3 causal hashes and ed25519 signatures
+- Boundary redaction (REMOVE / MASK / HASH / TRUNCATE) with dotted paths
+- Exporters: JSONL, ATEP local, HTTP batched, multi fan-out
+- Optional, lazy-imported integrations: OpenAI, Anthropic, LangGraph, MCP
+- Async-first cloud client with idempotency keys + retry
 
-@trace_agent_run(
-    agent_id="claims-agent",
-    release="dev",
-    client=client,
-    redactor=redactor,
-)
-def handle_claim(payload, trace=None):
-    if trace is not None:
-        trace.add_tool_call(
-            name="policy_lookup",
-            input={"policy_id": payload["policy_id"]},
-            output={"active": True},
-        )
-    return {"decision": "approve", "claim_id": payload["claim_id"]}
-```
+## Documentation
 
-The decorator:
+- [Quickstart](docs/quickstart.md)
+- [Tracing](docs/tracing.md) · [Decorator](docs/decorator.md)
+- [ATEP](docs/atep.md) · [Redaction](docs/redaction.md)
+- [Integrations](docs/integrations.md) · [Cloud upload](docs/cloud-upload.md)
+- [Non-determinism disclaimer](docs/non-determinism.md)
 
-- Generates `trace_id` and `run_id`
-- Captures input and final output hashes
-- Records success or failure
-- Emits the resulting trace through `AgentLockClient`
-- Applies configured redaction before raw payloads are persisted
+## Examples
 
-## JSONL Export
+See [`examples/`](examples/) — minimal trace, decorator + JSONL, ATEP local,
+OpenAI traced, LangGraph traced, cloud upload, and a full offline signed
+release.
 
-```python
-from agentlock import AgentLockClient
+## License
 
-client = AgentLockClient()
-client.export_jsonl("traces.jsonl", client.local_traces)
-```
-
-Each line is a standalone JSON document representing one `TraceEnvelope`.
-
-## HTTP Ingestion
-
-`AgentLockClient` works in local-only mode when `endpoint` is omitted.
-
-```python
-from agentlock import AgentLockClient
-
-client = AgentLockClient(
-    api_key="agentlock_test_key",
-    endpoint="https://ingest.example.com/v1/traces",
-)
-```
-
-When an endpoint is configured, traces are sent with `POST` using `httpx`. The API key is
-attached as a bearer token.
-
-## Redaction
-
-Redaction is path-based and supports `remove`, `mask`, and `hash` modes.
-
-```python
-from agentlock import Redactor
-
-redactor = Redactor(
-    redact=[
-        "customer.email",
-        "customer.phone",
-        "payment.card.number",
-    ],
-    mode="hash",
-)
-
-safe_payload = redactor.redact(
-    {
-        "customer": {
-            "email": "casey@example.com",
-            "phone": "+1-555-0100",
-        }
-    }
-)
-```
-
-You can also provide `RedactionRule` objects for per-field modes.
-
-## LangGraph Integration
-
-Deep LangGraph instrumentation is planned. The current `instrument_langgraph(...)` helper is a
-minimal wrapper around graph-like objects that expose `invoke(...)` or `ainvoke(...)`, and it
-does not require the `langgraph` package to be installed just to import the SDK.
-
-## Schema Compatibility
-
-The SDK emits `TraceEnvelope` payloads containing:
-
-- `trace_id`
-- `run_id`
-- `agent_id`
-- `release`
-- `timestamp`
-- `input`
-- `model_calls`
-- `tool_calls`
-- `final_output`
-- `labels`
-- `metadata`
-
-Additional typed event models are included for richer local validation and downstream
-compatibility:
-
-- `AgentRun`
-- `TraceEvent`
-- `ModelCall`
-- `ToolCall`
-- `MemoryAccess`
-- `PolicyCheck`
-- `HumanFeedback`
-- `RunCompleted`
-- `TraceEnvelope`
+Apache-2.0. See [LICENSE](LICENSE).
