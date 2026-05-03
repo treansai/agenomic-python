@@ -1,57 +1,84 @@
+"""HTTP exporter — async batched delivery to AgentLock Cloud."""
+
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+import logging
+from typing import TYPE_CHECKING, Optional
 
-import httpx
+from agentlock.exporters.base import Exporter
+from agentlock.types.envelope import TraceEnvelope
 
-from agentlock.models import TraceEnvelope, validate_trace_envelope
+if TYPE_CHECKING:
+    from agentlock.client.client import AgentLockClient
+
+logger = logging.getLogger("agentlock.exporters.http")
 
 
-class HTTPTraceExporter:
+class HttpExporter(Exporter):
+    """Asynchronous HTTP exporter with batching.
+
+    Buffers envelopes and forwards via :class:`AgentLockClient.upload_traces`
+    when the buffer hits ``batch_size`` or ``batch_interval_ms`` elapses,
+    whichever comes first. ``close()`` flushes the queue and waits for
+    in-flight requests.
+
+    Example:
+        >>> from agentlock.client.client import AgentLockClient  # doctest: +SKIP
+        >>> client = AgentLockClient("https://cloud.example", "key")  # doctest: +SKIP
+        >>> exp = HttpExporter(client)  # doctest: +SKIP
+    """
+
     def __init__(
         self,
-        endpoint: str,
-        api_key: str | None = None,
-        timeout: float = 10.0,
-        transport: httpx.BaseTransport | None = None,
-        async_transport: httpx.AsyncBaseTransport | None = None,
+        client: AgentLockClient,
+        *,
+        batch_size: int = 100,
+        batch_interval_ms: int = 5000,
     ) -> None:
-        if not endpoint:
-            msg = "endpoint is required for HTTP export"
-            raise ValueError(msg)
-        self.endpoint = endpoint
-        self.api_key = api_key
-        self.timeout = timeout
-        self.transport = transport
-        self.async_transport = async_transport
+        self.client = client
+        self.batch_size = batch_size
+        self.batch_interval = batch_interval_ms / 1000.0
+        self._queue: list[TraceEnvelope] = []
+        self._lock = asyncio.Lock()
+        self._flush_task: Optional[asyncio.Task[None]] = None
+        self._closed = False
 
-    def export(self, trace: TraceEnvelope | dict[str, Any]) -> httpx.Response:
-        envelope = validate_trace_envelope(trace)
-        with httpx.Client(timeout=self.timeout, transport=self.transport) as client:
-            response = client.post(
-                self.endpoint,
-                headers=self._headers(),
-                json=envelope.model_dump(mode="json"),
-            )
-            response.raise_for_status()
-            return response
+    def export(self, envelope: TraceEnvelope) -> None:
+        """Non-blocking enqueue.
 
-    async def export_async(self, trace: TraceEnvelope | dict[str, Any]) -> httpx.Response:
-        envelope = validate_trace_envelope(trace)
-        async with httpx.AsyncClient(
-            timeout=self.timeout,
-            transport=self.async_transport,
-        ) as client:
-            response = await client.post(
-                self.endpoint,
-                headers=self._headers(),
-                json=envelope.model_dump(mode="json"),
-            )
-            response.raise_for_status()
-            return response
+        If a running event loop exists, schedule a flush check; otherwise the
+        envelope sits until ``await flush()`` or ``aclose()`` is called.
+        """
+        if self._closed:
+            raise RuntimeError("HttpExporter is closed")
+        self._queue.append(envelope)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if len(self._queue) >= self.batch_size:
+            loop.create_task(self.flush())
 
-    def _headers(self) -> dict[str, str]:
-        headers = {"content-type": "application/json"}
-        if self.api_key:
-            headers["authorization"] = f"Bearer {self.api_key}"
-        return headers
+    async def flush(self) -> None:
+        async with self._lock:
+            if not self._queue:
+                return
+            batch, self._queue = self._queue, []
+        try:
+            await self.client.upload_traces(batch)
+        except Exception:
+            logger.exception("upload_traces failed for %d envelopes", len(batch))
+
+    async def aclose(self) -> None:
+        self._closed = True
+        await self.flush()
+
+    def close(self) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.aclose())
+            return
+        # Inside an event loop — schedule the flush; caller should await it.
+        asyncio.ensure_future(self.aclose())

@@ -1,85 +1,144 @@
+"""OpenAI integration — lazy-imported wrapper for chat completions.
+
+Lazy: ``openai`` is imported inside :func:`instrument_openai`. The module
+itself is safe to import without ``openai`` installed.
+"""
+
 from __future__ import annotations
 
-from time import perf_counter
-from typing import Any
+import time
+from typing import TYPE_CHECKING, Any
 
-from agentlock.tracing import TraceRecorder
-from agentlock.utils import to_jsonable
+from agentlock.crypto.canonical import canonical_cbor
+from agentlock.crypto.hashing import blake3_hex
+from agentlock.trace.context import current_recorder
+from agentlock.types.trace import CallStatus, ModelCall
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from openai import AsyncOpenAI, OpenAI
 
 
-class OpenAIClientWrapper:
-    def __init__(
-        self,
-        client: Any,
-        trace: TraceRecorder,
-        default_model: str | None = None,
-    ) -> None:
-        self.client = client
-        self.trace = trace
-        self.default_model = default_model
+def _hash_request_body(payload: dict[str, Any]) -> str:
+    return blake3_hex(canonical_cbor(payload))
 
-    def responses_create(self, *args: Any, **kwargs: Any) -> Any:
-        target = getattr(getattr(self.client, "responses", None), "create", None)
-        if target is None:
-            msg = "Wrapped client does not expose responses.create(...)"
-            raise AttributeError(msg)
-        return self._invoke(
-            target=target,
-            request_args=args,
-            request_kwargs=kwargs,
-            model_name=kwargs.get("model") or self.default_model or "openai.responses",
-        )
 
-    def chat_completions_create(self, *args: Any, **kwargs: Any) -> Any:
-        chat = getattr(self.client, "chat", None)
-        completions = getattr(chat, "completions", None)
-        target = getattr(completions, "create", None)
-        if target is None:
-            msg = "Wrapped client does not expose chat.completions.create(...)"
-            raise AttributeError(msg)
-        return self._invoke(
-            target=target,
-            request_args=args,
-            request_kwargs=kwargs,
-            model_name=kwargs.get("model") or self.default_model or "openai.chat",
-        )
+def _hash_response_body(response: Any) -> str:
+    try:
+        data = response.model_dump() if hasattr(response, "model_dump") else dict(response)
+    except Exception:
+        data = {"repr": repr(response)}
+    return blake3_hex(canonical_cbor(data))
 
-    def _invoke(
-        self,
-        target: Any,
-        request_args: tuple[Any, ...],
-        request_kwargs: dict[str, Any],
-        model_name: str,
-    ) -> Any:
-        started = perf_counter()
-        request_payload = {"args": request_args, "kwargs": request_kwargs}
+
+def instrument_openai(client: OpenAI) -> OpenAI:
+    """Wrap an OpenAI client so ``chat.completions.create`` records ModelCalls.
+
+    Lazy-imports ``openai``. Raises ImportError with a helpful message if the
+    package is not installed.
+
+    Example:
+        >>> # client = instrument_openai(OpenAI())  # doctest: +SKIP
+    """
+    try:
+        import openai  # noqa: F401
+    except ImportError as e:
+        raise ImportError(
+            "openai not installed. Install with: pip install agentlock[openai]"
+        ) from e
+
+    original = client.chat.completions.create
+
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        recorder = current_recorder()
+        model = kwargs.get("model", "")
+        prompt_hash = _hash_request_body({"model": model, **kwargs})
+        started = time.perf_counter()
+        status = CallStatus.SUCCESS
         try:
-            response = target(*request_args, **request_kwargs)
-        except Exception as exc:
-            self.trace.add_model_call(
-                name=model_name,
-                provider="openai",
-                request=request_payload,
-                response={"error": type(exc).__name__},
-                latency_ms=(perf_counter() - started) * 1000,
-                success=False,
-            )
+            response = original(*args, **kwargs)
+        except Exception:
+            status = CallStatus.ERROR
+            if recorder is not None:
+                recorder.record_model_call(
+                    ModelCall(
+                        provider="openai",
+                        model=model,
+                        prompt_hash=prompt_hash,
+                        latency_ms=int((time.perf_counter() - started) * 1000),
+                        status=status,
+                    )
+                )
             raise
-
-        self.trace.add_model_call(
-            name=model_name,
-            provider="openai",
-            request=request_payload,
-            response=to_jsonable(response),
-            latency_ms=(perf_counter() - started) * 1000,
-            success=True,
-        )
+        latency = int((time.perf_counter() - started) * 1000)
+        if recorder is not None:
+            recorder.record_model_call(
+                ModelCall(
+                    provider="openai",
+                    model=model,
+                    fingerprint=getattr(response, "system_fingerprint", None),
+                    temperature=kwargs.get("temperature"),
+                    prompt_hash=prompt_hash,
+                    output_hash=_hash_response_body(response),
+                    latency_ms=latency,
+                    status=status,
+                )
+            )
         return response
 
+    setattr(client.chat.completions, "create", wrapped)  # noqa: B010
+    return client
 
-def instrument_openai_client(
-    client: Any,
-    trace: TraceRecorder,
-    default_model: str | None = None,
-) -> OpenAIClientWrapper:
-    return OpenAIClientWrapper(client=client, trace=trace, default_model=default_model)
+
+def instrument_openai_async(client: AsyncOpenAI) -> AsyncOpenAI:
+    """Wrap an AsyncOpenAI client. See :func:`instrument_openai`."""
+    try:
+        import openai  # noqa: F401
+    except ImportError as e:
+        raise ImportError(
+            "openai not installed. Install with: pip install agentlock[openai]"
+        ) from e
+
+    original = client.chat.completions.create
+
+    async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        recorder = current_recorder()
+        model = kwargs.get("model", "")
+        prompt_hash = _hash_request_body({"model": model, **kwargs})
+        started = time.perf_counter()
+        status = CallStatus.SUCCESS
+        try:
+            response = await original(*args, **kwargs)
+        except Exception:
+            status = CallStatus.ERROR
+            if recorder is not None:
+                recorder.record_model_call(
+                    ModelCall(
+                        provider="openai",
+                        model=model,
+                        prompt_hash=prompt_hash,
+                        latency_ms=int((time.perf_counter() - started) * 1000),
+                        status=status,
+                    )
+                )
+            raise
+        latency = int((time.perf_counter() - started) * 1000)
+        if recorder is not None:
+            recorder.record_model_call(
+                ModelCall(
+                    provider="openai",
+                    model=model,
+                    fingerprint=getattr(response, "system_fingerprint", None),
+                    temperature=kwargs.get("temperature"),
+                    prompt_hash=prompt_hash,
+                    output_hash=_hash_response_body(response),
+                    latency_ms=latency,
+                    status=status,
+                )
+            )
+        return response
+
+    setattr(client.chat.completions, "create", wrapped)  # noqa: B010
+    return client
+
+
+__all__ = ["instrument_openai", "instrument_openai_async"]
