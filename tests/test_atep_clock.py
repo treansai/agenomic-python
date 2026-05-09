@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agentlock.atep.clock import Hlc
+from agenomic.atep.clock import Hlc
 
 
 def test_le_bytes_roundtrip() -> None:

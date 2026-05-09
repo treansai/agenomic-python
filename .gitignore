@@ -21,9 +21,9 @@ htmlcov/
 .coverage.*
 coverage.xml
 
-# AgentLock
+# Agenomic
 *.atep
-.agentlock/
+.agenomic/
 
 # IDE
 .idea/

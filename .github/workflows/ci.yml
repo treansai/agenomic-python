@@ -29,7 +29,7 @@ jobs:
       - name: Mypy
         run: mypy src
       - name: Pytest
-        run: pytest -v --cov=agentlock --cov-fail-under=85
+        run: pytest -v --cov=agenomic --cov-fail-under=85
       - name: Run offline examples
         if: matrix.os != 'windows-latest'
         run: |

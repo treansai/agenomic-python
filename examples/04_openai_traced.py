@@ -1,15 +1,15 @@
 """OpenAI integration: model calls auto-recorded on TraceRecorder.
 
-Requires `pip install agentlock[openai]` and an OPENAI_API_KEY in your env.
+Requires `pip install agenomic[openai]` and an OPENAI_API_KEY in your env.
 """
 
 from __future__ import annotations
 
 import os
 
-from agentlock.exporters.jsonl import JsonlExporter
-from agentlock.integrations.openai import instrument_openai
-from agentlock.trace.decorator import trace_agent_run
+from agenomic.exporters.jsonl import JsonlExporter
+from agenomic.integrations.openai import instrument_openai
+from agenomic.trace.decorator import trace_agent_run
 
 
 def main() -> None:

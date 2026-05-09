@@ -7,12 +7,12 @@ from typing import Any
 
 import pytest
 
-from agentlock.exporters.base import Exporter
-from agentlock.redaction import RedactionEngine, RedactionMode, RedactionRule
-from agentlock.trace.context import current_recorder
-from agentlock.trace.decorator import trace_agent_run
-from agentlock.types.envelope import TraceEnvelope
-from agentlock.types.trace import ModelCall
+from agenomic.exporters.base import Exporter
+from agenomic.redaction import RedactionEngine, RedactionMode, RedactionRule
+from agenomic.trace.context import current_recorder
+from agenomic.trace.decorator import trace_agent_run
+from agenomic.types.envelope import TraceEnvelope
+from agenomic.types.trace import ModelCall
 
 
 class CollectExporter(Exporter):

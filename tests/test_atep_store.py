@@ -7,11 +7,11 @@ from pathlib import Path
 import pytest
 import ulid
 
-from agentlock.atep.clock import Hlc
-from agentlock.atep.event import AtepEvent, EventHeader, StreamId
-from agentlock.atep.store import AtepStore
-from agentlock.crypto.signing import SigningKey
-from agentlock.exceptions import AtepError
+from agenomic.atep.clock import Hlc
+from agenomic.atep.event import AtepEvent, EventHeader, StreamId
+from agenomic.atep.store import AtepStore
+from agenomic.crypto.signing import SigningKey
+from agenomic.exceptions import AtepError
 
 
 def _event(sk: SigningKey, stream: StreamId, seq: int) -> AtepEvent:

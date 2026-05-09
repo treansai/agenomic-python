@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from agentlock.trace.context import (
+from agenomic.trace.context import (
     current_recorder,
     reset_current_recorder,
     set_current_recorder,
 )
-from agentlock.trace.recorder import TraceRecorder
+from agenomic.trace.recorder import TraceRecorder
 
 
 def test_default_is_none() -> None:

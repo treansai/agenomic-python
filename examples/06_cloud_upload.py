@@ -1,4 +1,4 @@
-"""Upload a JSONL file of envelopes to AgentLock Cloud."""
+"""Upload a JSONL file of envelopes to Agenomic Cloud."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import os
 import sys
 from pathlib import Path
 
-from agentlock.client.client import AgentLockClient
-from agentlock.types.envelope import TraceEnvelope
+from agenomic.client.client import AgenomicClient
+from agenomic.types.envelope import TraceEnvelope
 
 
 async def upload(path: Path, endpoint: str, api_key: str) -> None:
@@ -20,7 +20,7 @@ async def upload(path: Path, endpoint: str, api_key: str) -> None:
             if not line:
                 continue
             envs.append(TraceEnvelope.model_validate(json.loads(line)))
-    client = AgentLockClient(endpoint, api_key)
+    client = AgenomicClient(endpoint, api_key)
     try:
         result = await client.upload_traces(envs)
         print(json.dumps(result, indent=2))
@@ -29,10 +29,10 @@ async def upload(path: Path, endpoint: str, api_key: str) -> None:
 
 
 def main() -> int:
-    endpoint = os.environ.get("AGENTLOCK_ENDPOINT")
-    api_key = os.environ.get("AGENTLOCK_API_KEY")
+    endpoint = os.environ.get("AGENOMIC_ENDPOINT")
+    api_key = os.environ.get("AGENOMIC_API_KEY")
     if not endpoint or not api_key:
-        print("AGENTLOCK_ENDPOINT and AGENTLOCK_API_KEY must be set", file=sys.stderr)
+        print("AGENOMIC_ENDPOINT and AGENOMIC_API_KEY must be set", file=sys.stderr)
         return 1
     if len(sys.argv) < 2:
         print("usage: 06_cloud_upload.py <traces.jsonl>", file=sys.stderr)

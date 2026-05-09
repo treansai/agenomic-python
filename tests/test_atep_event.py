@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import ulid
 
-from agentlock.atep.clock import Hlc
-from agentlock.atep.event import AtepEvent, EventHeader, StreamId
-from agentlock.crypto.signing import SigningKey
+from agenomic.atep.clock import Hlc
+from agenomic.atep.event import AtepEvent, EventHeader, StreamId
+from agenomic.crypto.signing import SigningKey
 
 
 def _hdr(seq: int = 0, parents: list[bytes] | None = None) -> EventHeader:

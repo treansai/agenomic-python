@@ -9,9 +9,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agentlock.integrations.openai import instrument_openai
-from agentlock.trace.context import set_current_recorder
-from agentlock.trace.recorder import TraceRecorder
+from agenomic.integrations.openai import instrument_openai
+from agenomic.trace.context import set_current_recorder
+from agenomic.trace.recorder import TraceRecorder
 
 
 def _fake_client() -> Any:
@@ -27,7 +27,7 @@ def _fake_client() -> Any:
 
 def test_module_imports_without_openai() -> None:
     # Importing the module is allowed even if openai is missing.
-    import agentlock.integrations.openai as mod  # noqa: F401
+    import agenomic.integrations.openai as mod  # noqa: F401
 
 
 def test_instrument_records_model_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,5 +62,5 @@ def test_instrument_passes_through_response(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_instrument_raises_without_openai(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "openai", None)
-    with pytest.raises(ImportError, match="agentlock\\[openai\\]"):
+    with pytest.raises(ImportError, match="agenomic\\[openai\\]"):
         instrument_openai(_fake_client())

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agentlock.atep.event import StreamId
-from agentlock.atep.store import AtepStore
-from agentlock.crypto.signing import SigningKey
-from agentlock.exporters.atep_local import AtepLocalExporter
-from agentlock.types.envelope import TraceEnvelope
-from agentlock.types.trace import TraceInput, TraceOutput
+from agenomic.atep.event import StreamId
+from agenomic.atep.store import AtepStore
+from agenomic.crypto.signing import SigningKey
+from agenomic.exporters.atep_local import AtepLocalExporter
+from agenomic.types.envelope import TraceEnvelope
+from agenomic.types.trace import TraceInput, TraceOutput
 
 
 def _env(i: int) -> TraceEnvelope:

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentlock.exporters.base import Exporter
-from agentlock.exporters.multi import MultiExporter
-from agentlock.types.envelope import TraceEnvelope
-from agentlock.types.trace import TraceInput, TraceOutput
+from agenomic.exporters.base import Exporter
+from agenomic.exporters.multi import MultiExporter
+from agenomic.types.envelope import TraceEnvelope
+from agenomic.types.trace import TraceInput, TraceOutput
 
 
 class Boom(Exporter):

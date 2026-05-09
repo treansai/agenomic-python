@@ -20,7 +20,7 @@ echo "==> mypy"
 mypy src
 
 echo "==> pytest"
-pytest --cov=agentlock --cov-fail-under=85
+pytest --cov=agenomic --cov-fail-under=85
 
 echo "==> example: minimal trace"
 $PY examples/01_minimal_trace.py > /dev/null
@@ -38,15 +38,15 @@ echo "==> example: offline signed release"
 $PY examples/07_offline_signed_release.py > /dev/null
 
 echo "==> CLI: keys generate"
-agentlock-py keys generate "$WORK/key.pem"
+agenomic-py keys generate "$WORK/key.pem"
 
 echo "==> CLI: atep verify (golden)"
-agentlock-py atep verify \
+agenomic-py atep verify \
   tests/fixtures/golden_atep_segments/golden_v1.atep \
   --public-key tests/fixtures/golden_atep_segments/golden_pub.pem
 
 echo "==> CLI: atep inspect (golden)"
-agentlock-py atep inspect tests/fixtures/golden_atep_segments/golden_v1.atep > /dev/null
+agenomic-py atep inspect tests/fixtures/golden_atep_segments/golden_v1.atep > /dev/null
 
 echo
 echo "All checks passed."

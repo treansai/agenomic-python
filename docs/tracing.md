@@ -4,7 +4,7 @@ A `TraceEnvelope` represents one agent run. Fields:
 
 | field             | type                | meaning                                |
 | ----------------- | ------------------- | -------------------------------------- |
-| `schema_version`  | `str`               | always `agentlock-trace/v0.1`          |
+| `schema_version`  | `str`               | always `agenomic-trace/v0.1`          |
 | `trace_id`        | `str`               | parent trace correlation ID            |
 | `run_id`          | `str`               | unique ID of this run                  |
 | `agent_id`        | `agent://org/name`  | logical agent identity                 |
@@ -26,7 +26,7 @@ While a run is in progress, `TraceRecorder` accumulates `model_calls`,
 `contextvar` and accessible from anywhere inside the wrapped function:
 
 ```python
-from agentlock.trace.context import current_recorder
+from agenomic.trace.context import current_recorder
 
 rec = current_recorder()
 if rec is not None:

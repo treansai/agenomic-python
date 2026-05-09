@@ -29,7 +29,7 @@ jobs:
       contents: write
     environment:
       name: pypi
-      url: https://pypi.org/p/agentlock
+      url: https://pypi.org/p/agenomic
     steps:
       - uses: actions/download-artifact@v4
         with:

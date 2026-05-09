@@ -4,8 +4,8 @@ ATEP is the **Attested Tamper-Evident Provenance** log format. It captures
 the full history of an agent — identity, capabilities, knowledge, policy,
 runtime, interactions, governance — as a chain of signed events.
 
-`agentlock-python` produces ATEP segments that are bit-for-bit compatible
-with `agentlock-cli` (Rust) and `agentlock-cloud`.
+`agenomic-python` produces ATEP segments that are bit-for-bit compatible
+with `agenomic-cli` (Rust) and `agenomic-cloud`.
 
 ## Concepts
 
@@ -31,7 +31,7 @@ with `agentlock-cli` (Rust) and `agentlock-cloud`.
 
 ## Wire format
 
-See [`src/agentlock/atep/segment.py`](../src/agentlock/atep/segment.py)
+See [`src/agenomic/atep/segment.py`](../src/agenomic/atep/segment.py)
 for the canonical layout. CRC32 over everything before the trailing
 `PETA` magic protects against truncation. The 32-byte Merkle root over
 event causal hashes protects against per-event tampering.

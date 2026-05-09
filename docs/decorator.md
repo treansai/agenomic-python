@@ -1,7 +1,7 @@
 # `@trace_agent_run` reference
 
 ```python
-from agentlock.trace.decorator import trace_agent_run
+from agenomic.trace.decorator import trace_agent_run
 ```
 
 ```python
