@@ -42,9 +42,7 @@ def instrument_openai(client: OpenAI) -> OpenAI:
     try:
         import openai  # noqa: F401
     except ImportError as e:
-        raise ImportError(
-            "openai not installed. Install with: pip install agenomic[openai]"
-        ) from e
+        raise ImportError("openai not installed. Install with: pip install agenomic[openai]") from e
 
     original = client.chat.completions.create
 
@@ -94,9 +92,7 @@ def instrument_openai_async(client: AsyncOpenAI) -> AsyncOpenAI:
     try:
         import openai  # noqa: F401
     except ImportError as e:
-        raise ImportError(
-            "openai not installed. Install with: pip install agenomic[openai]"
-        ) from e
+        raise ImportError("openai not installed. Install with: pip install agenomic[openai]") from e
 
     original = client.chat.completions.create
 
