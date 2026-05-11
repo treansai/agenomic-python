@@ -1,7 +1,7 @@
 """Cross-implementation compatibility test against the golden ATEP fixture.
 
-The golden fixture is the wire-format anchor for `agentlock-python`,
-`agentlock-cli` and `agentlock-cloud`. If this test breaks, either the
+The golden fixture is the wire-format anchor for `agenomic-python`,
+`agenomic-cli` and `agenomic-cloud`. If this test breaks, either the
 wire format changed (regenerate the fixture and bump the schema version)
 or one of the implementations diverged.
 """
@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agentlock.atep.clock import Hlc
-from agentlock.atep.event import StreamId
-from agentlock.atep.segment import SegmentReader
-from agentlock.crypto.signing import VerifyingKey
+from agenomic.atep.clock import Hlc
+from agenomic.atep.event import StreamId
+from agenomic.atep.segment import SegmentReader
+from agenomic.crypto.signing import VerifyingKey
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "golden_atep_segments"
 GOLDEN_SEGMENT = FIXTURE_DIR / "golden_v1.atep"

@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 from pytest_httpx import HTTPXMock
 
-from agentlock.client.client import AgentLockClient
-from agentlock.exporters.http import HttpExporter
-from agentlock.types.envelope import TraceEnvelope
-from agentlock.types.trace import TraceInput, TraceOutput
+from agenomic.client.client import AgenomicClient
+from agenomic.exporters.http import HttpExporter
+from agenomic.types.envelope import TraceEnvelope
+from agenomic.types.trace import TraceInput, TraceOutput
 
 ENDPOINT = "https://cloud.example.com"
 
@@ -26,7 +26,7 @@ def _env(i: int) -> TraceEnvelope:
 @pytest.mark.asyncio
 async def test_flush_sends_all(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(url=f"{ENDPOINT}/v1/traces", json={"accepted": 3})
-    client = AgentLockClient(ENDPOINT, "k")
+    client = AgenomicClient(ENDPOINT, "k")
     exp = HttpExporter(client, batch_size=10, batch_interval_ms=0)
     for i in range(3):
         exp.export(_env(i))
@@ -41,7 +41,7 @@ async def test_flush_sends_all(httpx_mock: HTTPXMock) -> None:
 @pytest.mark.asyncio
 async def test_aclose_flushes(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(url=f"{ENDPOINT}/v1/traces", json={"accepted": 1})
-    client = AgentLockClient(ENDPOINT, "k")
+    client = AgenomicClient(ENDPOINT, "k")
     exp = HttpExporter(client)
     exp.export(_env(0))
     await exp.aclose()
@@ -51,7 +51,7 @@ async def test_aclose_flushes(httpx_mock: HTTPXMock) -> None:
 
 @pytest.mark.asyncio
 async def test_flush_empty_is_noop() -> None:
-    client = AgentLockClient(ENDPOINT, "k")
+    client = AgenomicClient(ENDPOINT, "k")
     exp = HttpExporter(client)
     await exp.flush()
     await client.aclose()

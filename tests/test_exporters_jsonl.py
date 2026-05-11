@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agentlock.exporters.jsonl import JsonlExporter
-from agentlock.types.envelope import TraceEnvelope
-from agentlock.types.trace import TraceInput, TraceOutput
+from agenomic.exporters.jsonl import JsonlExporter
+from agenomic.types.envelope import TraceEnvelope
+from agenomic.types.trace import TraceInput, TraceOutput
 
 
 def _env(i: int) -> TraceEnvelope:

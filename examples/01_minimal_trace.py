@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import ulid
 
-from agentlock.types.envelope import TraceEnvelope
-from agentlock.types.trace import TraceInput, TraceOutput
+from agenomic.types.envelope import TraceEnvelope
+from agenomic.types.trace import TraceInput, TraceOutput
 
 
 def main() -> None:

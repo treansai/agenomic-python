@@ -5,14 +5,14 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from agentlock.atep.store import AtepStore
-from agentlock.crypto.signing import SigningKey
-from agentlock.exporters.atep_local import AtepLocalExporter
-from agentlock.trace.decorator import trace_agent_run
+from agenomic.atep.store import AtepStore
+from agenomic.crypto.signing import SigningKey
+from agenomic.exporters.atep_local import AtepLocalExporter
+from agenomic.trace.decorator import trace_agent_run
 
 
 def main() -> None:
-    workdir = Path(tempfile.mkdtemp(prefix="agentlock-atep-"))
+    workdir = Path(tempfile.mkdtemp(prefix="agenomic-atep-"))
     key_path = workdir / "key.pem"
     pub_path = workdir / "key.pem.pub"
     sk = SigningKey.generate()

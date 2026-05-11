@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agentlock.crypto.hashing import (
+from agenomic.crypto.hashing import (
     ATEP_DOMAIN,
     LEAF_DOMAIN,
     blake3_bytes,

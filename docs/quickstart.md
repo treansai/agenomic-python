@@ -3,14 +3,14 @@
 Install:
 
 ```bash
-pip install agentlock
+pip install agenomic
 ```
 
 Decorate any function and write traces to a JSONL file — fully offline:
 
 ```python
-from agentlock.trace.decorator import trace_agent_run
-from agentlock.exporters.jsonl import JsonlExporter
+from agenomic.trace.decorator import trace_agent_run
+from agenomic.exporters.jsonl import JsonlExporter
 
 with JsonlExporter("traces.jsonl") as exporter:
 
@@ -22,19 +22,19 @@ with JsonlExporter("traces.jsonl") as exporter:
 ```
 
 Each call appends one signed-ready `TraceEnvelope` JSON line to `traces.jsonl`.
-Verify with `agentlock-py` (this package) or `agentlock-cli` (Rust).
+Verify with `agenomic-py` (this package) or `agenomic-cli` (Rust).
 
 ## Optional integrations
 
 ```bash
-pip install "agentlock[openai]"      # OpenAI auto-instrumentation
-pip install "agentlock[anthropic]"   # Anthropic auto-instrumentation
-pip install "agentlock[langgraph]"   # LangGraph state-graph tracing
-pip install "agentlock[all]"         # Everything
+pip install "agenomic[openai]"      # OpenAI auto-instrumentation
+pip install "agenomic[anthropic]"   # Anthropic auto-instrumentation
+pip install "agenomic[langgraph]"   # LangGraph state-graph tracing
+pip install "agenomic[all]"         # Everything
 ```
 
 The integrations import their underlying SDKs lazily, so importing
-`agentlock.integrations.openai` is safe even without `openai` installed.
+`agenomic.integrations.openai` is safe even without `openai` installed.
 
 ## Next
 

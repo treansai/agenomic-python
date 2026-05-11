@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from agentlock.exceptions import (
-    AgentLockError,
+from agenomic.exceptions import (
+    AgenomicError,
     AtepError,
     AuthenticationError,
     CloudError,
@@ -14,7 +14,7 @@ from agentlock.exceptions import (
     RedactionError,
     ValidationError,
 )
-from agentlock.types import (
+from agenomic.types import (
     CallStatus,
     ModelCall,
     ToolCall,
@@ -77,8 +77,8 @@ def test_envelope_round_trip() -> None:
         RedactionError,
     ],
 )
-def test_all_exceptions_inherit_agentlock_error(exc_cls: type[Exception]) -> None:
-    assert issubclass(exc_cls, AgentLockError)
+def test_all_exceptions_inherit_agenomic_error(exc_cls: type[Exception]) -> None:
+    assert issubclass(exc_cls, AgenomicError)
 
 
 def test_authentication_error_is_cloud_error() -> None:

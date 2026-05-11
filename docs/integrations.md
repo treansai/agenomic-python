@@ -1,19 +1,19 @@
 # Integrations
 
-`agentlock-python` ships first-party integrations for OpenAI, Anthropic,
+`agenomic-python` ships first-party integrations for OpenAI, Anthropic,
 LangGraph, and MCP — all **optional and lazy-imported**. You can
-`import agentlock.integrations.openai` without `openai` installed; the
+`import agenomic.integrations.openai` without `openai` installed; the
 import error only raises when you call `instrument_openai()`.
 
 ## OpenAI
 
 ```bash
-pip install "agentlock[openai]"
+pip install "agenomic[openai]"
 ```
 
 ```python
 from openai import OpenAI
-from agentlock.integrations.openai import instrument_openai
+from agenomic.integrations.openai import instrument_openai
 
 client = instrument_openai(OpenAI())
 ```
@@ -24,12 +24,12 @@ Wraps `chat.completions.create` (sync + async) so each call records a
 ## Anthropic
 
 ```bash
-pip install "agentlock[anthropic]"
+pip install "agenomic[anthropic]"
 ```
 
 ```python
 from anthropic import Anthropic
-from agentlock.integrations.anthropic import instrument_anthropic
+from agenomic.integrations.anthropic import instrument_anthropic
 
 client = instrument_anthropic(Anthropic())
 ```
@@ -37,12 +37,12 @@ client = instrument_anthropic(Anthropic())
 ## LangGraph
 
 ```bash
-pip install "agentlock[langgraph]"
+pip install "agenomic[langgraph]"
 ```
 
 ```python
 from langgraph.graph import StateGraph
-from agentlock.integrations.langgraph import instrument_langgraph
+from agenomic.integrations.langgraph import instrument_langgraph
 
 graph = instrument_langgraph(StateGraph(...))
 ```
@@ -55,7 +55,7 @@ MCP doesn't ship a single SDK we can wrap. Call `trace_mcp_call` after
 invoking your MCP client:
 
 ```python
-from agentlock.integrations.mcp import trace_mcp_call
+from agenomic.integrations.mcp import trace_mcp_call
 
 result = mcp_client.call("search", {"q": "x"})
 trace_mcp_call("server-1", "search", {"q": "x"}, result)

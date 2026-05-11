@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from agentlock.redaction import RedactionEngine, RedactionMode, RedactionRule
-from agentlock.trace.envelope_builder import build_envelope
-from agentlock.trace.recorder import TraceRecorder
-from agentlock.types.trace import ModelCall
+from agenomic.redaction import RedactionEngine, RedactionMode, RedactionRule
+from agenomic.trace.envelope_builder import build_envelope
+from agenomic.trace.recorder import TraceRecorder
+from agenomic.types.trace import ModelCall
 
 
 def test_build_with_redaction() -> None:

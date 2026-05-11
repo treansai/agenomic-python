@@ -1,6 +1,6 @@
 """LangGraph state graph traced into JSONL.
 
-Requires `pip install agentlock[langgraph]`. This example uses a tiny
+Requires `pip install agenomic[langgraph]`. This example uses a tiny
 mock-shaped graph object so it runs without LangGraph itself; replace with
 a real ``StateGraph`` once installed.
 """
@@ -10,9 +10,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from agentlock.exporters.jsonl import JsonlExporter
-from agentlock.integrations.langgraph import instrument_langgraph
-from agentlock.trace.decorator import trace_agent_run
+from agenomic.exporters.jsonl import JsonlExporter
+from agenomic.integrations.langgraph import instrument_langgraph
+from agenomic.trace.decorator import trace_agent_run
 
 
 def upper(state: dict[str, Any]) -> dict[str, Any]:

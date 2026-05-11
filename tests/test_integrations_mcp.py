@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from agentlock.integrations.mcp import trace_mcp_call
-from agentlock.trace.context import set_current_recorder
-from agentlock.trace.recorder import TraceRecorder
-from agentlock.types.trace import CallStatus
+from agenomic.integrations.mcp import trace_mcp_call
+from agenomic.trace.context import set_current_recorder
+from agenomic.trace.recorder import TraceRecorder
+from agenomic.types.trace import CallStatus
 
 
 def test_no_recorder_is_noop() -> None:

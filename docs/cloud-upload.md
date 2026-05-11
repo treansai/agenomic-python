@@ -1,12 +1,12 @@
 # Cloud upload
 
-Uploading to AgentLock Cloud is **optional**. Everything else in the SDK
+Uploading to Agenomic Cloud is **optional**. Everything else in the SDK
 works fully offline.
 
 ```python
-from agentlock.client.client import AgentLockClient
+from agenomic.client.client import AgenomicClient
 
-client = AgentLockClient("https://cloud.example.com", api_key="sk-...")
+client = AgenomicClient("https://cloud.example.com", api_key="sk-...")
 
 await client.upload_traces(envelopes)
 await client.upload_atep_segment("agent://acme/demo", segment_path)
@@ -40,5 +40,5 @@ header value overrides the exponential delay.
 
 ## Sync wrapper
 
-When async is not feasible, use `SyncAgentLockClient`. It wraps each
+When async is not feasible, use `SyncAgenomicClient`. It wraps each
 method with `asyncio.run`. Prefer the async client whenever possible.

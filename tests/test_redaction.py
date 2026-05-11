@@ -6,8 +6,8 @@ import copy
 
 import pytest
 
-from agentlock.exceptions import RedactionError
-from agentlock.redaction import RedactionEngine, RedactionMode, RedactionRule
+from agenomic.exceptions import RedactionError
+from agenomic.redaction import RedactionEngine, RedactionMode, RedactionRule
 
 
 def test_remove_leaf() -> None:

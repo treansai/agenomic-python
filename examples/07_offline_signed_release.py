@@ -7,12 +7,12 @@ import json
 import tempfile
 from pathlib import Path
 
-from agentlock.atep.store import AtepStore
-from agentlock.crypto.hashing import LEAF_DOMAIN, hash_with_domain
-from agentlock.crypto.signing import SigningKey
-from agentlock.exporters.atep_local import AtepLocalExporter
-from agentlock.trace.decorator import trace_agent_run
-from agentlock.types.attestation import ReleaseAttestation
+from agenomic.atep.store import AtepStore
+from agenomic.crypto.hashing import LEAF_DOMAIN, hash_with_domain
+from agenomic.crypto.signing import SigningKey
+from agenomic.exporters.atep_local import AtepLocalExporter
+from agenomic.trace.decorator import trace_agent_run
+from agenomic.types.attestation import ReleaseAttestation
 
 
 def _bundle_hash(directory: Path) -> str:
@@ -27,7 +27,7 @@ def _bundle_hash(directory: Path) -> str:
 
 
 def main() -> None:
-    workdir = Path(tempfile.mkdtemp(prefix="agentlock-release-"))
+    workdir = Path(tempfile.mkdtemp(prefix="agenomic-release-"))
     bundle_dir = workdir / "bundle"
     bundle_dir.mkdir()
     (bundle_dir / "system_prompt.md").write_text("Be helpful.\n")

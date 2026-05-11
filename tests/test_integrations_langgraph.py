@@ -8,13 +8,13 @@ from typing import Any
 
 import pytest
 
-from agentlock.integrations.langgraph import instrument_langgraph
-from agentlock.trace.context import set_current_recorder
-from agentlock.trace.recorder import TraceRecorder
+from agenomic.integrations.langgraph import instrument_langgraph
+from agenomic.trace.context import set_current_recorder
+from agenomic.trace.recorder import TraceRecorder
 
 
 def test_module_imports_without_langgraph() -> None:
-    import agentlock.integrations.langgraph as mod  # noqa: F401
+    import agenomic.integrations.langgraph as mod  # noqa: F401
 
 
 def test_instrument_records_tool_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -42,7 +42,7 @@ def test_instrument_records_tool_call(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_instrument_raises_without_langgraph(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "langgraph", None)
-    with pytest.raises(ImportError, match="agentlock\\[langgraph\\]"):
+    with pytest.raises(ImportError, match="agenomic\\[langgraph\\]"):
         instrument_langgraph(SimpleNamespace(nodes={}))
 
 

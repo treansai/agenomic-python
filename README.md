@@ -1,33 +1,33 @@
-# agentlock-python
+# agenomic-python
 
-[![CI](https://github.com/agentlock/agentlock-python/actions/workflows/ci.yml/badge.svg)](https://github.com/agentlock/agentlock-python/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/agentlock.svg)](https://pypi.org/project/agentlock/)
+[![CI](https://github.com/agenomic/agenomic-python/actions/workflows/ci.yml/badge.svg)](https://github.com/agenomic/agenomic-python/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/agenomic.svg)](https://pypi.org/project/agenomic/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-Python SDK for [AgentLock](https://agentlock.dev) — agent-native versioning, tracing, and ATEP signed event logs.
+Python SDK for [Agenomic](https://agenomic.dev) — agent-native versioning, tracing, and ATEP signed event logs.
 
 Works fully offline. Cloud upload is optional.
 
 ## Install
 
 ```bash
-pip install agentlock
+pip install agenomic
 ```
 
 Optional integrations:
 
 ```bash
-pip install "agentlock[openai]"      # OpenAI auto-instrumentation
-pip install "agentlock[anthropic]"   # Anthropic auto-instrumentation
-pip install "agentlock[langgraph]"   # LangGraph state-graph tracing
-pip install "agentlock[all]"         # Everything
+pip install "agenomic[openai]"      # OpenAI auto-instrumentation
+pip install "agenomic[anthropic]"   # Anthropic auto-instrumentation
+pip install "agenomic[langgraph]"   # LangGraph state-graph tracing
+pip install "agenomic[all]"         # Everything
 ```
 
 ## Quickstart
 
 ```python
-from agentlock.trace.decorator import trace_agent_run
-from agentlock.exporters.jsonl import JsonlExporter
+from agenomic.trace.decorator import trace_agent_run
+from agenomic.exporters.jsonl import JsonlExporter
 
 with JsonlExporter("traces.jsonl") as exporter:
 
@@ -44,7 +44,7 @@ account required.
 ## What's in the box
 
 - `@trace_agent_run` decorator (sync + async) with contextvar-based propagation
-- `TraceEnvelope` pydantic v2 models compatible with `agentlock-spec`
+- `TraceEnvelope` pydantic v2 models compatible with `agenomic-spec`
 - ATEP segment writer/reader with BLAKE3 causal hashes and ed25519 signatures
 - Boundary redaction (REMOVE / MASK / HASH / TRUNCATE) with dotted paths
 - Exporters: JSONL, ATEP local, HTTP batched, multi fan-out

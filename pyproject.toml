@@ -3,13 +3,13 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "agentlock"
+name = "agenomic"
 version = "0.1.0"
-description = "Python SDK for AgentLock — agent-native versioning, tracing, and ATEP signed event logs."
+description = "Python SDK for Agenomic — agent-native versioning, tracing, and ATEP signed event logs."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
-authors = [{ name = "AgentLock contributors" }]
+authors = [{ name = "Agenomic contributors" }]
 keywords = ["agent", "llm", "versioning", "tracing", "atep", "ai-act", "compliance"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -50,15 +50,15 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://agentlock.dev"
-Source = "https://github.com/agentlock/agentlock-python"
-Issues = "https://github.com/agentlock/agentlock-python/issues"
+Homepage = "https://agenomic.dev"
+Source = "https://github.com/agenomic/agenomic-python"
+Issues = "https://github.com/agenomic/agenomic-python/issues"
 
 [project.scripts]
-agentlock-py = "agentlock.cli.__main__:main"
+agenomic-py = "agenomic.cli.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agentlock"]
+packages = ["src/agenomic"]
 
 [tool.ruff]
 line-length = 100
@@ -89,4 +89,4 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --cov=agentlock --cov-report=term-missing"
+addopts = "-ra --strict-markers --cov=agenomic --cov-report=term-missing"

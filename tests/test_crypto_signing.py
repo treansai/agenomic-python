@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from agentlock.crypto.signing import SigningKey, VerifyingKey
-from agentlock.exceptions import CryptoError
+from agenomic.crypto.signing import SigningKey, VerifyingKey
+from agenomic.exceptions import CryptoError
 
 
 def test_sign_verify_roundtrip() -> None:
@@ -49,7 +49,7 @@ def test_pem_file_mode_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture)
     pem_path = tmp_path / "loose.pem"
     sk.write_pem_file(pem_path)
     os.chmod(pem_path, 0o644)
-    with caplog.at_level(logging.WARNING, logger="agentlock.crypto.signing"):
+    with caplog.at_level(logging.WARNING, logger="agenomic.crypto.signing"):
         SigningKey.from_pem_file(pem_path)
     assert any("insecure file mode" in r.message for r in caplog.records)
 

@@ -4,8 +4,8 @@ Redaction runs at the SDK boundary, **before any export**. Pass a
 `RedactionEngine` to the decorator:
 
 ```python
-from agentlock.redaction import RedactionEngine, RedactionMode, RedactionRule
-from agentlock.trace.decorator import trace_agent_run
+from agenomic.redaction import RedactionEngine, RedactionMode, RedactionRule
+from agenomic.trace.decorator import trace_agent_run
 
 engine = RedactionEngine([
     RedactionRule(path="kwargs.password", mode=RedactionMode.MASK),

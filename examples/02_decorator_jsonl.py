@@ -5,12 +5,12 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from agentlock.exporters.jsonl import JsonlExporter
-from agentlock.trace.decorator import trace_agent_run
+from agenomic.exporters.jsonl import JsonlExporter
+from agenomic.trace.decorator import trace_agent_run
 
 
 def main() -> None:
-    out = Path(tempfile.gettempdir()) / "agentlock-traces.jsonl"
+    out = Path(tempfile.gettempdir()) / "agenomic-traces.jsonl"
     out.unlink(missing_ok=True)
     with JsonlExporter(out) as exporter:
 
