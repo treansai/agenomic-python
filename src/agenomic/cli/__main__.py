@@ -7,7 +7,7 @@ Commands::
     agenomic-py atep verify <segment.atep> --public-key <key.pem>
     agenomic-py atep inspect <segment.atep>
     agenomic-py traces summarize <traces.jsonl>
-    agenomic-py keys generate <out.pem>
+    agenomic-py keys generate <out.pem> -
 """
 
 from __future__ import annotations
