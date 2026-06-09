@@ -45,6 +45,8 @@ account required.
 
 - `@trace_agent_run` decorator (sync + async) with contextvar-based propagation
 - `TraceEnvelope` pydantic v2 models compatible with `agenomic-spec`
+- `WorkflowSpec` / `SystemSpec` pydantic v2 models for the v0.2 workflow and
+  multi-agent system manifests (RFC 0009), with step-graph and role checks
 - ATEP segment writer/reader with BLAKE3 causal hashes and ed25519 signatures
 - Boundary redaction (REMOVE / MASK / HASH / TRUNCATE) with dotted paths
 - Exporters: JSONL, ATEP local, HTTP batched, multi fan-out
