@@ -23,6 +23,8 @@ coverage.xml
 
 # Agenomic
 *.atep
+# … except the committed golden wire-format anchors (see scripts/make_golden_fixture.py)
+!tests/fixtures/golden_atep_segments/*.atep
 .agenomic/
 
 # IDE
