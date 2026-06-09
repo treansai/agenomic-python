@@ -8,4 +8,12 @@ The bytes here MUST be readable by:
 - `agenomic-cli` (Rust)
 - `agenomic-cloud` (Rust)
 
-If the wire format changes, regenerate fixtures and bump the schema version.
+If the wire format changes, regenerate fixtures and bump the schema version:
+
+```sh
+python scripts/make_golden_fixture.py
+```
+
+The script writes `golden_v1.atep` and the matching `golden_pub.pem`
+(the private key is generated fresh and discarded) — always commit the
+two files together.
