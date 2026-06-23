@@ -28,9 +28,7 @@ def v03_errors() -> Callable[[dict[str, Any]], list[str]]:
     registry = Registry().with_resource(
         registry_schema["$id"], Resource.from_contents(registry_schema)
     )
-    validator = Draft202012Validator(
-        schema, registry=registry, format_checker=FormatChecker()
-    )
+    validator = Draft202012Validator(schema, registry=registry, format_checker=FormatChecker())
 
     def _errors(trace: dict[str, Any]) -> list[str]:
         return [f"{e.json_path}: {e.message}" for e in validator.iter_errors(trace)]

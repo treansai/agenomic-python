@@ -94,7 +94,9 @@ def merkle_root(event_hashes: list[str]) -> str:
     if not event_hashes:
         return "blake3-merkle-v1:" + blake3_hex(_EMPTY_DOMAIN)
     nodes = [
-        blake3_bytes(_LEAF_DOMAIN + str(i).rjust(16, "0").encode("ascii") + b"\x00" + _hash_to_bytes(h))
+        blake3_bytes(
+            _LEAF_DOMAIN + str(i).rjust(16, "0").encode("ascii") + b"\x00" + _hash_to_bytes(h)
+        )
         for i, h in enumerate(event_hashes)
     ]
     while len(nodes) > 1:
