@@ -37,7 +37,8 @@ openai = ["openai>=1.40"]
 anthropic = ["anthropic>=0.34"]
 langgraph = ["langgraph>=0.2"]
 mcp = ["mcp>=1.0"]
-all = ["openai>=1.40", "anthropic>=0.34", "langgraph>=0.2", "mcp>=1.0"]
+otel = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
+all = ["openai>=1.40", "anthropic>=0.34", "langgraph>=0.2", "mcp>=1.0", "opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -47,6 +48,9 @@ dev = [
     "mypy>=1.11",
     "hypothesis>=6.110",
     "freezegun>=1.5",
+    "jsonschema>=4.18",
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
 ]
 
 [project.urls]

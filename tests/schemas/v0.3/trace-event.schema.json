@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agenomic.dev/spec/v0.3/trace-event.schema.json",
+  "title": "Agenomic Canonical Run Trace (v0.3)",
+  "description": "Canonical four-level run trace: run metadata, signed append-only event stream, causal execution graph, and evidence package. Hash rule: event_hash = BLAKE3(canonical_json(event_sans_event_hash) || prev_event_hash), where canonical_json is JCS (RFC 8785); run_merkle_root = blake3-merkle-v1(event_hash_0..n) using RFC 0002 leaf/node domain separation and odd-node duplication. This reuses ATEP's BLAKE3 and causal conventions for intra-run trace integrity rather than defining a divergent algorithm.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["spec_version","run_id","agent","llm","components","input","output","events","execution_graph","risk_scores","compliance_checks","alignment_checks","environment_snapshot","integrity"],
+  "properties": {
+    "spec_version": {"const":"agenomic/v0.3"},
+    "run_id": {"type":"string","minLength":1},
+    "parent_run_id": {"type":"string","minLength":1},
+    "replay_of_run_id": {"type":"string","minLength":1},
+    "agent": {"type":"object","additionalProperties":false,"required":["agent_id","agent_version","genome_version","runtime"],"properties":{"agent_id":{"type":"string","pattern":"^agent://[a-z0-9-]+/[a-z0-9-]+$"},"agent_version":{"type":"string","minLength":1},"genome_version":{"$ref":"#/$defs/sha256Uri"},"runtime":{"type":"object","additionalProperties":false,"required":["name","version","adapter_version"],"properties":{"name":{"type":"string","minLength":1},"version":{"type":"string","minLength":1},"adapter_version":{"type":"string","minLength":1}}}}},
+    "llm": {"type":"object","additionalProperties":false,"required":["provider","model","model_version","temperature","top_p","seed"],"properties":{"provider":{"type":"string","minLength":1},"model":{"type":"string","minLength":1},"model_version":{"type":"string","minLength":1},"temperature":{"type":"number","minimum":0,"maximum":2},"top_p":{"type":"number","minimum":0,"maximum":1},"seed":{"type":"integer"}}},
+    "components": {"type":"object","additionalProperties":false,"required":["prompt_version","policy_version","memory_version","knowledge_version","tool_versions"],"properties":{"prompt_version":{"$ref":"#/$defs/sha256Uri"},"policy_version":{"$ref":"#/$defs/sha256Uri"},"memory_version":{"$ref":"#/$defs/sha256Uri"},"knowledge_version":{"$ref":"#/$defs/sha256Uri"},"tool_versions":{"type":"object","additionalProperties":{"$ref":"#/$defs/sha256Uri"}}}},
+    "input":{"$ref":"#/$defs/ioPayload"},
+    "output":{"allOf":[{"$ref":"#/$defs/ioPayload"},{"type":"object","required":["semantic_signature"],"properties":{"semantic_signature":{"type":"string","minLength":1}}}]},
+    "events":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/event"}},
+    "execution_graph":{"type":"object","additionalProperties":false,"required":["nodes","edges"],"properties":{"nodes":{"type":"array","items":{"type":"object","additionalProperties":true,"required":["id","kind"],"properties":{"id":{"type":"string","minLength":1},"kind":{"type":"string","minLength":1}}}},"edges":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["from","to","type"],"properties":{"from":{"type":"string","minLength":1},"to":{"type":"string","minLength":1},"type":{"enum":["caused_by","used","produced","authorized_by","delegated_to","observed","violated","checked_by","supported_by"]}}}}}},
+    "risk_scores":{"type":"array","items":{"$ref":"#/$defs/namedScore"}},
+    "compliance_checks":{"type":"array","items":{"$ref":"#/$defs/check"}},
+    "alignment_checks":{"type":"array","items":{"$ref":"#/$defs/check"}},
+    "environment_snapshot":{"type":"object","additionalProperties":true},
+    "integrity":{"type":"object","additionalProperties":false,"required":["run_merkle_root","signed_by","signature"],"properties":{"run_merkle_root":{"$ref":"#/$defs/merkleHash"},"signed_by":{"type":"string","minLength":1},"signature":{"type":"string","minLength":1}}}
+  },
+  "$defs": {
+    "blake3Hash":{"type":"string","pattern":"^blake3:[0-9a-f]{64}$"},
+    "merkleHash":{"type":"string","pattern":"^blake3-merkle-v1:[0-9a-f]{64}$"},
+    "contentHash":{"type":"string","pattern":"^(sha256|blake3):[0-9a-f]{64}$"},
+    "sha256Uri":{"type":"string","pattern":"^sha256:[0-9a-f]{64}$"},
+    "ioPayload":{"type":"object","additionalProperties":true,"required":["hash","redacted_payload","classification"],"properties":{"hash":{"$ref":"#/$defs/contentHash"},"redacted_payload":{},"classification":{"type":"array","items":{"type":"string"}}}},
+    "namedScore":{"type":"object","additionalProperties":true,"required":["name","score"],"properties":{"name":{"type":"string"},"score":{"type":"number","minimum":0,"maximum":1}}},
+    "check":{"type":"object","additionalProperties":true,"required":["status"],"properties":{"status":{"enum":["pass","fail","warning","not_applicable"]}}},
+    "event":{"type":"object","additionalProperties":true,"required":["event_id","type","timestamp","actor","payload_hash","prev_event_hash","event_hash"],"properties":{"event_id":{"type":"string","minLength":1},"type":{"$ref":"https://agenomic.dev/spec/v0.3/event-type-registry.json#/$defs/eventType"},"timestamp":{"type":"string","format":"date-time"},"actor":{"type":"object","required":["kind","id"],"properties":{"kind":{"enum":["system","agent","human","tool"]},"id":{"type":"string","minLength":1}}},"payload_hash":{"$ref":"#/$defs/contentHash"},"prev_event_hash":{"$ref":"#/$defs/blake3Hash"},"event_hash":{"$ref":"#/$defs/blake3Hash"},"provenance":{"type":"object","properties":{"used":{"type":"array","items":{"type":"string"}},"evidence_units":{"type":"array","items":{"type":"string"}}}},"side_inputs":{"type":"object","properties":{"captured":{"type":"boolean"},"external_api_snapshot_ref":{"type":"string"},"rng_state":{"type":"string"}}},"risk_score":{"type":"number","minimum":0,"maximum":1},"policy_checks":{"type":"array","items":{"type":"object","additionalProperties":true}},"signature":{"type":"string"}}}
+  }
+}

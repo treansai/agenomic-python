@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from agenomic.crypto.canonical import canonical_cbor
@@ -11,7 +12,7 @@ from agenomic.trace.context import current_recorder
 from agenomic.types.trace import CallStatus, ToolCall
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    pass
+    from agenomic.canonical.recorder import CanonicalRun
 
 
 def _hash(data: Any) -> str:
@@ -93,4 +94,61 @@ def instrument_langgraph(graph: Any) -> Any:
     return graph
 
 
-__all__ = ["instrument_langgraph"]
+def instrument_langgraph_canonical(
+    graph: Any,
+    run: CanonicalRun,
+    *,
+    llm_nodes: Iterable[str] = (),
+) -> Any:
+    """Auto-instrument a LangGraph state graph into **canonical v0.3** events
+    on `run`, with no manual instrumentation in the nodes themselves.
+
+    Each node execution maps to a canonical event: a node named in `llm_nodes`
+    emits ``llm.requested`` + ``llm.responded`` (the dynamic *Agent Decision
+    Graph*); every other node emits ``tool.call.proposed`` +
+    ``tool.call.executed`` (the deterministic *Workflow Graph*). A raising node
+    emits ``error.raised`` and re-raises.
+
+    Works on the duck-typed ``graph.nodes`` mapping (each node's ``runnable`` or
+    the node itself), so it drives both real compiled LangGraph graphs and
+    lightweight test graphs.
+
+    Example:
+        >>> # graph = instrument_langgraph_canonical(compiled, run, llm_nodes=["agent"])  # doctest: +SKIP
+    """
+    nodes = getattr(graph, "nodes", None)
+    if not isinstance(nodes, dict):
+        raise TypeError("graph has no `.nodes` mapping to instrument")
+    llm_set = set(llm_nodes)
+
+    for name, node in list(nodes.items()):
+        original = getattr(node, "runnable", None) or node
+        if not callable(original):
+            continue
+
+        def wrapped(
+            state: Any,
+            *,
+            _name: str = name,
+            _original: Any = original,
+            _is_llm: bool = name in llm_set,
+        ) -> Any:
+            try:
+                result = _original(state)
+            except Exception as exc:
+                run.log_error(message=str(exc), kind=type(exc).__name__)
+                raise
+            if _is_llm:
+                run.log_llm(prompt=state, response=result)
+            else:
+                run.log_tool_call(tool=_name, arguments=state, result=result)
+            return result
+
+        if hasattr(node, "runnable"):
+            node.runnable = wrapped
+        else:
+            nodes[name] = wrapped
+    return graph
+
+
+__all__ = ["instrument_langgraph", "instrument_langgraph_canonical"]
