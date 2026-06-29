@@ -76,6 +76,7 @@ class Client:
             with self._http() as http:
                 response = http.get(path)
                 response.raise_for_status()
-                return response.json()
+                data: dict[str, Any] = response.json()
+                return data
         except httpx.HTTPError as exc:
             raise CloudError(f"GET {path} failed: {exc}") from exc

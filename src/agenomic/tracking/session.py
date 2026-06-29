@@ -104,7 +104,7 @@ class TrackingSession:
         return self._emit(event_type, **fields)
 
     @contextlib.contextmanager
-    def step(self, name: str) -> Iterator["TrackingSession"]:
+    def step(self, name: str) -> Iterator[TrackingSession]:
         """Run a block as a workflow step.
 
         Emits ``agent.step.started`` on entry and ``agent.step.completed`` on
@@ -186,13 +186,16 @@ class TrackingSession:
                 "report() requires cloud mode; in local mode export with to_jsonl() "
                 "and run `agenomic track report`"
             )
-        return self._client._get(f"/v1/tracking/sessions/{self.session_id}/report")
+        report: dict[str, Any] = self._client._get(
+            f"/v1/tracking/sessions/{self.session_id}/report"
+        )
+        return report
 
     def to_jsonl(self) -> str:
         """Serialize buffered local events as JSONL (one event per line)."""
         return "".join(json.dumps(event) + "\n" for event in self._events)
 
-    def __enter__(self) -> "TrackingSession":
+    def __enter__(self) -> TrackingSession:
         return self
 
     def __exit__(self, *_exc: Any) -> None:

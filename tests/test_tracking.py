@@ -51,9 +51,8 @@ def test_local_mode_buffers_spec_shaped_events() -> None:
 def test_step_emits_agent_failed_on_exception() -> None:
     client = Client()
     session = client.tracking.start(agent="agent://acme/a")
-    with pytest.raises(ValueError):
-        with session.step("classify"):
-            raise ValueError("boom")
+    with pytest.raises(ValueError), session.step("classify"):
+        raise ValueError("boom")
     assert session.events[-1]["type"] == "agent.failed"
     assert session.events[-1]["metadata"] == {"status": "error"}
 
