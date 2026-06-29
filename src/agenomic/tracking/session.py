@@ -20,6 +20,8 @@ from typing import Any, Iterator, Optional
 
 import ulid
 
+from agenomic.exceptions import CloudError
+
 SPEC_VERSION = "agenomic/v0.3"
 
 #: The runtime event vocabulary (a superset of the v0.3 event-type registry).
@@ -175,9 +177,11 @@ class TrackingSession:
         """Finalize the session. Idempotent."""
         if self._stopped:
             return
-        self._stopped = True
+        # Mark stopped only after a successful stop so a failed cloud POST stays
+        # retryable and the remote session isn't orphaned.
         if self.cloud:
             self._client._post(f"/v1/tracking/sessions/{self.session_id}/stop", {})
+        self._stopped = True
 
     def report(self) -> dict[str, Any]:
         """Fetch the tracking report (cloud mode only)."""
@@ -235,7 +239,9 @@ class TrackingResource:
                 body["tracking_config"] = tracking_config
             response = self._client._post("/v1/tracking/sessions", body)
             session = response.get("session", response) if isinstance(response, dict) else {}
-            session_id = session.get("session_id") or ulid.new().str
+            session_id = session.get("session_id")
+            if not isinstance(session_id, str) or not session_id:
+                raise CloudError("tracking start response did not include a session_id")
         else:
             session_id = ulid.new().str
         return TrackingSession(self._client, session_id, agent, environment)

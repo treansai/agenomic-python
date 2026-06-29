@@ -132,3 +132,41 @@ def test_cloud_error_is_wrapped(httpx_mock) -> None:
     client = Client(base_url="https://api.test")
     with pytest.raises(CloudError):
         client.tracking.start(agent="agent://a/b")
+
+
+def test_cloud_start_without_session_id_raises(httpx_mock) -> None:
+    from agenomic.exceptions import CloudError
+
+    httpx_mock.add_response(
+        method="POST",
+        url="https://api.test/v1/tracking/sessions",
+        json={"session": {}},
+    )
+    client = Client(base_url="https://api.test")
+    with pytest.raises(CloudError):
+        client.tracking.start(agent="agent://a/b")
+
+
+def test_cloud_stop_stays_retryable_on_failure(httpx_mock) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url="https://api.test/v1/tracking/sessions",
+        json={"session": {"session_id": "s1"}},
+    )
+    # first stop fails, second succeeds
+    httpx_mock.add_response(
+        method="POST",
+        url="https://api.test/v1/tracking/sessions/s1/stop",
+        status_code=503,
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url="https://api.test/v1/tracking/sessions/s1/stop",
+        json={},
+    )
+    client = Client(base_url="https://api.test")
+    session = client.tracking.start(agent="agent://a/b")
+    with pytest.raises(Exception):
+        session.stop()
+    # not marked stopped → retry issues another request and succeeds
+    session.stop()
