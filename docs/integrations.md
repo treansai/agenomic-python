@@ -34,6 +34,25 @@ from agenomic.integrations.anthropic import instrument_anthropic
 client = instrument_anthropic(Anthropic())
 ```
 
+## Hugging Face
+
+Built on `httpx` — no extra is required to instrument. The bundled
+`HuggingFaceClient` resolves Hub metadata and runs inference; wrapping it
+records a `ModelCall(provider="huggingface", model=...)` on success and error,
+without ever logging the token.
+
+```python
+from agenomic.providers.huggingface import HuggingFaceClient, HuggingFaceConfig
+from agenomic.integrations.huggingface import instrument_huggingface
+
+client = instrument_huggingface(HuggingFaceClient(HuggingFaceConfig.from_env()))
+client.generate_text("gpt2", "hello")
+```
+
+For inference functions you call yourself, use `trace_huggingface_call`. See
+[the Hugging Face provider guide](providers/huggingface.md) for setup, env
+vars, and security details.
+
 ## LangGraph
 
 ```bash
