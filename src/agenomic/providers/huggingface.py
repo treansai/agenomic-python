@@ -105,9 +105,7 @@ def _reject_inline_credentials(url: str) -> None:
     """Raise if ``url`` embeds inline ``user:pass@host`` credentials."""
     parts = urlsplit(url)
     if parts.username or parts.password:
-        raise HuggingFaceError(
-            "endpoint URL must not contain inline credentials (user:pass@host)"
-        )
+        raise HuggingFaceError("endpoint URL must not contain inline credentials (user:pass@host)")
 
 
 def _redact_endpoint(url: str) -> str:
@@ -265,9 +263,7 @@ class HuggingFaceClient:
         data.pop("auth", None)
         return data
 
-    def resolve_model_metadata(
-        self, model_id: str, revision: str = "main"
-    ) -> ModelMetadata:
+    def resolve_model_metadata(self, model_id: str, revision: str = "main") -> ModelMetadata:
         """Resolve Hub metadata for ``model_id`` at ``revision``.
 
         Reads ``id``, ``sha`` (resolved commit), ``pipeline_tag`` (task) and
@@ -278,9 +274,7 @@ class HuggingFaceClient:
             with self._client() as http:
                 response = http.get(url, headers=self.config.auth_header())
         except httpx.HTTPError as exc:
-            raise HuggingFaceError(
-                self._safe(f"model metadata request failed: {exc}")
-            ) from None
+            raise HuggingFaceError(self._safe(f"model metadata request failed: {exc}")) from None
         self._raise_for_status(response, context=f"model {model_id}@{revision}")
         data: dict[str, Any] = response.json()
         return ModelMetadata(
@@ -291,15 +285,11 @@ class HuggingFaceClient:
             private=bool(data.get("private", False)),
         )
 
-    def _inference(
-        self, model: str, payload: dict[str, Any], *, context: str
-    ) -> Any:
+    def _inference(self, model: str, payload: dict[str, Any], *, context: str) -> Any:
         url = f"{self.config.inference_base}/models/{model}"
         try:
             with self._client() as http:
-                response = http.post(
-                    url, headers=self.config.auth_header(), json=payload
-                )
+                response = http.post(url, headers=self.config.auth_header(), json=payload)
         except httpx.HTTPError as exc:
             raise HuggingFaceError(self._safe(f"{context} request failed: {exc}")) from None
         self._raise_for_status(response, context=context)

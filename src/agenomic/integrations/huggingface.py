@@ -90,9 +90,7 @@ def trace_huggingface_call(
     and trace metadata; they are not forwarded unless present in ``call_kwargs``.
     The token never enters the recorded call.
     """
-    prompt_hash = _hash_request(
-        {"model": model, "inputs": prompt, "parameters": parameters or {}}
-    )
+    prompt_hash = _hash_request({"model": model, "inputs": prompt, "parameters": parameters or {}})
     started = time.perf_counter()
     try:
         response = fn(**call_kwargs)
@@ -130,9 +128,7 @@ def instrument_huggingface(client: HuggingFaceClient) -> HuggingFaceClient:
     original_generate = client.generate_text
     original_embeddings = client.embeddings
 
-    def generate_text(
-        model: str, prompt: str, parameters: Optional[dict[str, Any]] = None
-    ) -> Any:
+    def generate_text(model: str, prompt: str, parameters: Optional[dict[str, Any]] = None) -> Any:
         prompt_hash = _hash_request(
             {"model": model, "inputs": prompt, "parameters": parameters or {}}
         )
