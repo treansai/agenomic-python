@@ -12,6 +12,7 @@ from typing import Any, Optional
 import httpx
 
 from agenomic._version import __version__
+from agenomic.agent import AgentResource
 from agenomic.client.auth import bearer_header
 from agenomic.exceptions import CloudError
 from agenomic.tracking import TrackingResource
@@ -43,6 +44,8 @@ class Client:
         self._transport = transport
         #: Online tracking namespace.
         self.tracking = TrackingResource(self)
+        #: Local agent genome namespace (load + configure_model).
+        self.agent = AgentResource(self)
 
     @property
     def is_cloud(self) -> bool:

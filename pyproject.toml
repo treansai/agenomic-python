@@ -35,10 +35,11 @@ dependencies = [
 [project.optional-dependencies]
 openai = ["openai>=1.40"]
 anthropic = ["anthropic>=0.34"]
+huggingface = ["huggingface-hub>=0.20"]
 langgraph = ["langgraph>=0.2"]
 mcp = ["mcp>=1.0"]
 otel = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
-all = ["openai>=1.40", "anthropic>=0.34", "langgraph>=0.2", "mcp>=1.0", "opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
+all = ["openai>=1.40", "anthropic>=0.34", "huggingface-hub>=0.20", "langgraph>=0.2", "mcp>=1.0", "opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -87,7 +88,7 @@ no_implicit_optional = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["openai.*", "anthropic.*", "langgraph.*", "ulid", "blake3", "cbor2"]
+module = ["openai.*", "anthropic.*", "langgraph.*", "yaml", "ulid", "blake3", "cbor2"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
