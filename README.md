@@ -19,6 +19,7 @@ Optional integrations:
 ```bash
 pip install "agenomic[openai]"      # OpenAI auto-instrumentation
 pip install "agenomic[anthropic]"   # Anthropic auto-instrumentation
+pip install "agenomic[huggingface]" # Hugging Face Hub + Inference
 pip install "agenomic[langgraph]"   # LangGraph state-graph tracing
 pip install "agenomic[all]"         # Everything
 ```
@@ -59,6 +60,7 @@ account required.
 - [Tracing](docs/tracing.md) · [Decorator](docs/decorator.md)
 - [ATEP](docs/atep.md) · [Redaction](docs/redaction.md)
 - [Integrations](docs/integrations.md) · [Cloud upload](docs/cloud-upload.md)
+- [Hugging Face provider](docs/providers/huggingface.md)
 - [Non-determinism disclaimer](docs/non-determinism.md)
 
 ## Examples

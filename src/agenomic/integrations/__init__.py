@@ -9,6 +9,10 @@ from agenomic.integrations.anthropic import (
     instrument_anthropic,
     instrument_anthropic_async,
 )
+from agenomic.integrations.huggingface import (
+    instrument_huggingface,
+    trace_huggingface_call,
+)
 from agenomic.integrations.langgraph import instrument_langgraph
 from agenomic.integrations.mcp import trace_mcp_call
 from agenomic.integrations.openai import (
@@ -19,8 +23,10 @@ from agenomic.integrations.openai import (
 __all__ = [
     "instrument_anthropic",
     "instrument_anthropic_async",
+    "instrument_huggingface",
     "instrument_langgraph",
     "instrument_openai",
     "instrument_openai_async",
+    "trace_huggingface_call",
     "trace_mcp_call",
 ]
