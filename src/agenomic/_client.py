@@ -15,6 +15,7 @@ from agenomic._version import __version__
 from agenomic.agent import AgentResource
 from agenomic.client.auth import bearer_header
 from agenomic.exceptions import CloudError
+from agenomic.rmp import MonitorResource, ProtectResource, ReviewResource, RmpResource
 from agenomic.tracking import TrackingResource
 
 
@@ -46,6 +47,11 @@ class Client:
         self.tracking = TrackingResource(self)
         #: Local agent genome namespace (load + configure_model).
         self.agent = AgentResource(self)
+        #: Review · Monitor · Protect loop namespaces.
+        self.rmp = RmpResource(self)
+        self.review = ReviewResource(self)
+        self.monitor = MonitorResource(self)
+        self.protect = ProtectResource(self)
 
     @property
     def is_cloud(self) -> bool:
