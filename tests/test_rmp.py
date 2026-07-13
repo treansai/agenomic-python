@@ -154,6 +154,17 @@ def test_local_protect_alerts_empty_and_action_plan_closes_loop() -> None:
     assert approved["reviewer"] == "ops@acme.test"
     assert client.review.proposals[0]["status"] == "approved"
 
+    # the approved scenario is materialized into the Review suite, so
+    # subsequent list_scenarios() / run() calls include the enrichment
+    scenario = approved["proposed_scenario"]
+    suite = client.review.list_scenarios()
+    assert [s["scenario_id"] for s in suite] == [scenario["scenario_id"]]
+    assert suite[0]["source"] == "protect_derived"
+
+    # approving again does not duplicate the scenario
+    client.review.approve_scenario_enrichment(proposal_id)
+    assert len(client.review.list_scenarios()) == 1
+
 
 def test_local_approve_unknown_proposal_raises() -> None:
     client = Client()

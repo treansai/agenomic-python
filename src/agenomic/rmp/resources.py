@@ -33,6 +33,9 @@ RMP_REPORT_VERSION = "agenomic.rmp.report/v0.1"
 #: Version stamped on scenario enrichment proposals.
 ENRICHMENT_VERSION = "agenomic.rmp.enrichment/v0.1"
 
+#: ``spec_version`` stamped on RMP test scenarios.
+SCENARIO_VERSION = "agenomic.rmp.scenario/v0.1"
+
 #: Monitor event types projected into local findings (type → finding kind).
 _LOCAL_FINDING_KINDS = {
     "drift.detected": ("drift", "medium"),
@@ -280,6 +283,15 @@ class ReviewResource:
             proposal["reviewer"] = reviewer
         if session_id:
             proposal["session_id"] = session_id
+        # Materialize the approved scenario into the Review suite so the
+        # Protect -> Review loop actually closes offline: subsequent
+        # list_scenarios() / run() calls include the enrichment.
+        scenario = proposal.get("proposed_scenario")
+        if isinstance(scenario, dict):
+            scenario_id = scenario.get("scenario_id")
+            already = any(s.get("scenario_id") == scenario_id for s in self._scenarios)
+            if not already:
+                self.add_scenario(dict(scenario))
         return proposal
 
     def _buffer_proposal(self, proposal: dict[str, Any]) -> None:
@@ -496,6 +508,17 @@ class ProtectResource:
             "status": "proposed",
             "requires_human_approval": True,
             "created_at": now,
+            # The Review artifact this proposal materializes on approval —
+            # approve_scenario_enrichment() adds it to the scenario suite.
+            "proposed_scenario": {
+                "spec_version": SCENARIO_VERSION,
+                "scenario_id": _new_id("sc"),
+                "title": f"Regression scenario for alert {alert_id}",
+                "source": "protect_derived",
+                "severity": "high",
+                "created_at": now,
+                "evidence_source_refs": [alert_id],
+            },
         }
         if session_id:
             proposal["session_id"] = session_id
