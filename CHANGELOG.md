@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Complete documentation set under `docs/`: new pages for the API
+  reference, exporters, canonical v0.3 runs, online tracking, keys &
+  signing, workflow/system manifests (RFC 0009), the `agenomic-py` CLI,
+  and the exception hierarchy, plus a `docs/README.md` index and expanded
+  ATEP/quickstart pages. All code snippets are verified against the SDK.
+- `AGENT.md`: a condensed SDK integration guide written for AI coding
+  agents — import map, canonical recipes, environment variables, and
+  common pitfalls.
+
 - Hugging Face provider connector (`agenomic.providers.huggingface`): provider
   alias normalization, `HuggingFaceConfig` with env loading and token
   redaction, an httpx-based `HuggingFaceClient`

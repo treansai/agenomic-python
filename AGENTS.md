@@ -2,6 +2,9 @@
 
 Public Python SDK for Agenomic. Apache-2.0.
 
+This file governs **developing this repository**. If you are an agent
+**using** the SDK in another project, read [AGENT.md](AGENT.md) instead.
+
 ## Product invariants
 
 1. Works fully offline. No primitive requires network.
