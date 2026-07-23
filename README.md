@@ -56,12 +56,21 @@ account required.
 
 ## Documentation
 
-- [Quickstart](docs/quickstart.md)
-- [Tracing](docs/tracing.md) · [Decorator](docs/decorator.md)
-- [ATEP](docs/atep.md) · [Redaction](docs/redaction.md)
+Full index at [docs/](docs/README.md).
+
+- [Quickstart](docs/quickstart.md) · [API reference](docs/api-reference.md)
+- [Tracing](docs/tracing.md) · [Decorator](docs/decorator.md) · [Exporters](docs/exporters.md)
+- [Canonical v0.3 runs](docs/canonical.md) · [Online tracking](docs/tracking.md) · [RMP](docs/rmp.md)
+- [ATEP](docs/atep.md) · [Keys & signing](docs/keys-and-signing.md) · [Redaction](docs/redaction.md)
 - [Integrations](docs/integrations.md) · [Cloud upload](docs/cloud-upload.md)
+- [Workflow & system manifests](docs/orchestration.md)
 - [Hugging Face provider](docs/providers/huggingface.md)
+- [CLI](docs/cli.md) · [Errors](docs/errors.md)
 - [Non-determinism disclaimer](docs/non-determinism.md)
+
+Using an AI coding agent (Claude Code, Cursor, Copilot)? Point it at
+[`AGENT.md`](AGENT.md) — a condensed SDK guide written for agents:
+import maps, canonical recipes, and pitfalls.
 
 ## Examples
 

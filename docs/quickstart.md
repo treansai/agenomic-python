@@ -40,8 +40,16 @@ The integrations import their underlying SDKs lazily, so importing
 
 - [Tracing](tracing.md) — what `TraceEnvelope` captures
 - [Decorator reference](decorator.md)
+- [Exporters](exporters.md) — JSONL, ATEP, HTTP batched, fan-out
+- [Canonical runs](canonical.md) — v0.3 hash-chained event streams
 - [ATEP](atep.md) — signed event log format
+- [Keys & signing](keys-and-signing.md)
 - [Redaction](redaction.md)
+- [Online tracking](tracking.md) · [RMP](rmp.md)
 - [Integrations](integrations.md)
 - [Cloud upload](cloud-upload.md)
+- [CLI](cli.md) · [Errors](errors.md)
+- [API reference](api-reference.md)
 - [Non-determinism disclaimer](non-determinism.md)
+
+Integrating with an AI coding agent? See [`AGENT.md`](../AGENT.md).
