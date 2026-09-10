@@ -43,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request hash is computed.
 - The local tool engine refuses configurations carrying a `protect` block
   (`protect_cloud_required`).
+- `agenomic.integrations.langchain.TrackingCallbackHandler`: a LangChain /
+  LangGraph callback handler that mirrors every run (turns, graph nodes,
+  model calls, tools, retrievers) into a live `TrackingSession` with
+  `span_id`/`parent_span_id`/`turn_id`, timing, token usage and content
+  hashes, plus `flush()` to drain the background emitter before `stop()`.
+  New tracking event types: `turn.*`, `*.failed`, `retrieval.*`.
 
 - Complete documentation set under `docs/`: new pages for the API
   reference, exporters, canonical v0.3 runs, online tracking, keys &
