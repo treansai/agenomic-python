@@ -54,6 +54,32 @@ def test_local_rmp_get_unknown_session_raises() -> None:
         client.rmp.get("rmp_missing")
 
 
+def test_local_rmp_start_reuses_active_session_per_agent_and_environment() -> None:
+    client = Client()
+
+    first = client.rmp.start(agent="agent://treans/claims-agent", environment="development")
+    second = client.rmp.start(agent="agent://treans/claims-agent", environment="development")
+    assert first["session_id"] == second["session_id"]
+    assert len(client.rmp.list()) == 1
+
+    other_env = client.rmp.start(agent="agent://treans/claims-agent", environment="production")
+    assert other_env["session_id"] != first["session_id"]
+    assert len(client.rmp.list()) == 2
+
+
+def test_local_rmp_stop_frees_the_slot_for_a_new_session() -> None:
+    client = Client()
+
+    first = client.rmp.start(agent="agent://treans/claims-agent", environment="development")
+    stopped = client.rmp.stop(first["session_id"])
+    assert stopped["status"] == "completed"
+    assert client.rmp.get(first["session_id"])["status"] == "completed"
+
+    second = client.rmp.start(agent="agent://treans/claims-agent", environment="development")
+    assert second["session_id"] != first["session_id"]
+    assert second["status"] == "active"
+
+
 def test_local_monitor_buffers_and_stamps_events() -> None:
     client = Client()
     session = client.monitor.start(agent="agent://treans/claims-agent")
@@ -303,3 +329,18 @@ def test_cloud_error_is_wrapped(httpx_mock) -> None:
     client = Client(base_url="https://api.test")
     with pytest.raises(CloudError):
         client.rmp.start(agent="agent://a/b")
+
+
+def test_cloud_rmp_stop_posts_to_session_stop_route(httpx_mock) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url="https://api.test/v1/rmp/sessions/rmp_1/stop",
+        json={"session": {"session_id": "rmp_1", "status": "completed"}},
+    )
+    client = Client(api_key="key_123", base_url="https://api.test")
+    session = client.rmp.stop("rmp_1")
+    assert session["status"] == "completed"
+
+    request = httpx_mock.get_requests()[0]
+    assert request.url == "https://api.test/v1/rmp/sessions/rmp_1/stop"
+    assert request.headers["Authorization"] == "Bearer key_123"
