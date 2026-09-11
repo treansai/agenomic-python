@@ -54,6 +54,19 @@ def test_local_rmp_get_unknown_session_raises() -> None:
         client.rmp.get("rmp_missing")
 
 
+def test_local_rmp_start_reuses_active_session_per_agent_and_environment() -> None:
+    client = Client()
+
+    first = client.rmp.start(agent="agent://treans/claims-agent", environment="development")
+    second = client.rmp.start(agent="agent://treans/claims-agent", environment="development")
+    assert first["session_id"] == second["session_id"]
+    assert len(client.rmp.list()) == 1
+
+    other_env = client.rmp.start(agent="agent://treans/claims-agent", environment="production")
+    assert other_env["session_id"] != first["session_id"]
+    assert len(client.rmp.list()) == 2
+
+
 def test_local_monitor_buffers_and_stamps_events() -> None:
     client = Client()
     session = client.monitor.start(agent="agent://treans/claims-agent")

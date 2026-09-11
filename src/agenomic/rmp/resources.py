@@ -115,6 +115,15 @@ class RmpResource:
                 body["genome_hash"] = genome_hash
             response = self._client._post("/v1/rmp/sessions", body)
             return _session_from(response, "rmp")
+        # At most one active session per (agent, environment): reuse it
+        # instead of piling up duplicates, mirroring the cloud service.
+        for existing in self._sessions.values():
+            if (
+                existing["agent_id"] == agent
+                and existing["environment"] == environment
+                and existing["status"] == "active"
+            ):
+                return existing
         session: dict[str, Any] = {
             "spec_version": RMP_SPEC_VERSION,
             "session_id": _new_id("rmp"),
