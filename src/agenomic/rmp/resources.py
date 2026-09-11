@@ -142,14 +142,14 @@ class RmpResource:
         return session
 
     def stop(self, session_id: str) -> dict[str, Any]:
-        """End a local RMP session.
+        """End a session (idempotent).
 
         Frees its (agent, environment) slot so a later ``start()`` opens a
-        fresh session instead of reusing this one. Cloud sessions have no
-        stop endpoint yet; call :meth:`report` there instead.
+        fresh session instead of reusing this one.
         """
         if getattr(self._client, "is_cloud", False):
-            raise CloudError("cloud RMP sessions cannot be stopped from the SDK yet")
+            response = self._client._post(f"/v1/rmp/sessions/{session_id}/stop", {})
+            return _session_from(response, "rmp")
         session = self.get(session_id)
         session["status"] = "completed"
         session["ended_at"] = _now_iso()

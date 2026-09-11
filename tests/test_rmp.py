@@ -331,9 +331,16 @@ def test_cloud_error_is_wrapped(httpx_mock) -> None:
         client.rmp.start(agent="agent://a/b")
 
 
-def test_cloud_rmp_stop_raises_not_supported() -> None:
-    from agenomic.exceptions import CloudError
-
+def test_cloud_rmp_stop_posts_to_session_stop_route(httpx_mock) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url="https://api.test/v1/rmp/sessions/rmp_1/stop",
+        json={"session": {"session_id": "rmp_1", "status": "completed"}},
+    )
     client = Client(api_key="key_123", base_url="https://api.test")
-    with pytest.raises(CloudError):
-        client.rmp.stop("rmp_1")
+    session = client.rmp.stop("rmp_1")
+    assert session["status"] == "completed"
+
+    request = httpx_mock.get_requests()[0]
+    assert request.url == "https://api.test/v1/rmp/sessions/rmp_1/stop"
+    assert request.headers["Authorization"] == "Bearer key_123"
