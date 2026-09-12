@@ -7,6 +7,11 @@ Runs against a live Agenomic Cloud. Set:
     CRM_MCP_URL=http://crm-staging.internal/mcp   (value stored write-only)
     CRM_API_TOKEN=...                              (value stored write-only)
 
+Run examples/tool-execution/bootstrap-demo-resources.sh (agenomic-cloud) first:
+it creates the contracts, the approved fixture set and the scenario this
+configuration references. A loopback CRM server needs
+AGENOMIC_ALLOW_PRIVATE_DESTINATIONS=1 at bootstrap time (owner role).
+
 The agent loop below is a stand-in for your own runtime: only the tool calls
 are routed through Agenomic; the model strategy stays yours.
 """

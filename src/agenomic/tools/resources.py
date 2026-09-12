@@ -44,6 +44,9 @@ class ToolCallResult:
     duration_ms: int = 0
     virtual_time: Optional[str] = None
     expected_error: bool = False
+    #: False when a runtime-local function ran but its report never reached
+    #: the gateway; the pending record stays indeterminate server-side.
+    reported: bool = True
 
     @property
     def source(self) -> str:
@@ -387,6 +390,37 @@ class ToolsResource:
         )
         return ToolCallResult.from_response(response)
 
+    def authorize_local(
+        self,
+        run_id: str,
+        tool: str,
+        arguments: Mapping[str, Any],
+        *,
+        logical_call_id: str,
+        repetition: int = 1,
+        attempt: int = 1,
+        parent_call_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Ask the gateway whether a local function may run for this call.
+
+        Returns ``{"decision": "local", "record_id": ...}`` once the budget is
+        reserved and a pending record exists, or ``{"decision": "gateway"}``
+        when the run binds the tool to a mock or a non-local adapter. Any
+        refusal (inactive run, denied write, exhausted budget) raises before
+        anything executes.
+        """
+        body: dict[str, Any] = {
+            "repetition": repetition,
+            "logical_call_id": logical_call_id,
+            "attempt": attempt,
+            "tool": tool,
+            "arguments": dict(arguments),
+        }
+        if parent_call_id:
+            body["parent_call_id"] = parent_call_id
+        response = self._request("POST", f"/v1/tool-execution/runs/{run_id}/local/authorize", body)
+        return dict(response)
+
     def report_local(
         self,
         run_id: str,
@@ -394,18 +428,17 @@ class ToolsResource:
         arguments: Mapping[str, Any],
         result: Any,
         *,
+        logical_call_id: str,
         is_error: bool = False,
         duration_ms: int = 0,
-        logical_call_id: Optional[str] = None,
         repetition: int = 1,
         attempt: int = 1,
         parent_call_id: Optional[str] = None,
     ) -> str:
-        """Record a call the runtime executed itself (local adapter)."""
-        call_id = logical_call_id or f"call_{uuid.uuid4().hex}"
+        """Settle a call previously accepted by :meth:`authorize_local`."""
         body: dict[str, Any] = {
             "repetition": repetition,
-            "logical_call_id": call_id,
+            "logical_call_id": logical_call_id,
             "attempt": attempt,
             "tool": tool,
             "arguments": dict(arguments),
@@ -480,38 +513,24 @@ class ToolRouter:
         args = dict(arguments or {})
         call_id = logical_call_id or self._next_call_id(tool)
         if tool in self._local:
-            started = time.monotonic()
-            try:
-                value = self._local[tool](**args)
-                is_error = False
-            except Exception as exc:  # noqa: BLE001 - reported, not swallowed silently
-                value = {"code": type(exc).__name__, "message": str(exc)}
-                is_error = True
-            duration = int((time.monotonic() - started) * 1000)
-            record_id = self._tools.report_local(
+            decision = self._tools.authorize_local(
                 self.run_id,
                 tool,
                 args,
-                value,
-                is_error=is_error,
-                duration_ms=duration,
                 logical_call_id=call_id,
                 repetition=self.repetition,
                 attempt=attempt,
                 parent_call_id=parent_call_id,
             )
-            envelope = ToolCallResult(
-                result=value if not is_error else {"error": value},
-                record_id=record_id,
-                status="error" if is_error else "success",
-                provenance={"source": "runtime_local", "binding_mode": "live"},
-                external_state="confirmed",
-                duration_ms=duration,
-            )
-            self.calls.append(envelope)
-            if is_error and self._raise:
-                raise ToolCallError(tool, envelope)
-            return envelope.result
+            if decision.get("decision") == "local":
+                return self._run_local(
+                    tool,
+                    args,
+                    call_id=call_id,
+                    record_id=str(decision.get("record_id", "")),
+                    attempt=attempt,
+                    parent_call_id=parent_call_id,
+                )
         envelope = self._tools.invoke(
             self.run_id,
             tool,
@@ -523,6 +542,55 @@ class ToolRouter:
         )
         self.calls.append(envelope)
         if self._raise and not envelope.ok:
+            raise ToolCallError(tool, envelope)
+        return envelope.result
+
+    def _run_local(
+        self,
+        tool: str,
+        args: dict[str, Any],
+        *,
+        call_id: str,
+        record_id: str,
+        attempt: int,
+        parent_call_id: Optional[str],
+    ) -> Any:
+        started = time.monotonic()
+        try:
+            value = self._local[tool](**args)
+            is_error = False
+        except Exception as exc:  # noqa: BLE001 - reported, not swallowed silently
+            value = {"code": type(exc).__name__, "message": str(exc)}
+            is_error = True
+        duration = int((time.monotonic() - started) * 1000)
+        envelope = ToolCallResult(
+            result=value if not is_error else {"error": value},
+            record_id=record_id,
+            status="error" if is_error else "success",
+            provenance={"source": "runtime_local", "binding_mode": "live"},
+            external_state="confirmed",
+            duration_ms=duration,
+        )
+        try:
+            self._tools.report_local(
+                self.run_id,
+                tool,
+                args,
+                value,
+                is_error=is_error,
+                duration_ms=duration,
+                logical_call_id=call_id,
+                repetition=self.repetition,
+                attempt=attempt,
+                parent_call_id=parent_call_id,
+            )
+        except Exception:
+            envelope.reported = False
+            envelope.external_state = "indeterminate"
+            self.calls.append(envelope)
+            raise
+        self.calls.append(envelope)
+        if is_error and self._raise:
             raise ToolCallError(tool, envelope)
         return envelope.result
 
@@ -547,6 +615,7 @@ class ToolRouter:
             "calls": len(self.calls),
             "by_source": by_source,
             "has_real_calls": self.has_real_calls,
+            "unreported": sum(1 for c in self.calls if not c.reported),
         }
 
     def __repr__(self) -> str:

@@ -97,9 +97,16 @@ try:
     router.call("email.send", {"to": "ops@example.test"})
 except ToolCallError as error:
     print(error.code, error.envelope.provenance)
-print(router.summary())   # {'calls': 2, 'by_source': {...}, 'has_real_calls': ...}
+print(router.summary())   # {'calls': 2, 'by_source': {...}, 'has_real_calls': ..., 'unreported': 0}
 tools.complete_run(run["id"])
 ```
+
+Functions passed as `local_functions` never run before the gateway allows
+them: the router calls `local/authorize` first (budget reserved, pending
+record), executes only on a `local` decision, routes the call through the
+gateway when the run binds the tool to a mock, and settles the record with
+`report-local`. If the report fails, the call stays in `router.calls` with
+`reported=False` and `external_state="indeterminate"`.
 
 See `examples/10_tool_execution.py` and the cloud documentation
 `docs/tool-execution.md`.

@@ -108,6 +108,11 @@ def test_router_routes_remote_and_reports_local_functions(httpx_mock) -> None:
     )
     httpx_mock.add_response(
         method="POST",
+        url=f"{BASE}/v1/tool-execution/runs/{RUN}/local/authorize",
+        json={"decision": "local", "record_id": "rec_local"},
+    )
+    httpx_mock.add_response(
+        method="POST",
         url=f"{BASE}/v1/tool-execution/runs/{RUN}/report-local",
         json={"record_id": "rec_local"},
     )
@@ -119,14 +124,111 @@ def test_router_routes_remote_and_reports_local_functions(httpx_mock) -> None:
     send = router.wrap("email.send")
     assert send.__name__ == "email_send"
     assert router.call("math.add", {"a": 2, "b": 3}) == {"sum": 5}
-    reported = json.loads(httpx_mock.get_requests()[1].content)
+    requests = httpx_mock.get_requests()
+    assert [r.url.path.rsplit("/", 1)[-1] for r in requests] == [
+        "invoke",
+        "authorize",
+        "report-local",
+    ]
+    authorized = json.loads(requests[1].content)
+    assert authorized["tool"] == "math.add"
+    assert authorized["logical_call_id"] == "math.add#2"
+    reported = json.loads(requests[2].content)
     assert reported["tool"] == "math.add"
     assert reported["result"] == {"sum": 5}
     assert reported["logical_call_id"] == "math.add#2"
+    assert router.calls[1].record_id == "rec_local"
     assert router.summary() == {
         "calls": 2,
         "by_source": {"static": 1, "runtime_local": 1},
         "has_real_calls": True,
+        "unreported": 0,
+    }
+
+
+def test_offline_router_refuses_before_executing_local_function() -> None:
+    effects: list[str] = []
+    router = Client().tools.router(
+        RUN, local_functions={"email.send": lambda: effects.append("sent")}
+    )
+    with pytest.raises(ToolExecutionError) as exc:
+        router.call("email.send")
+    assert exc.value.code == "cloud_required"
+    assert effects == []
+    assert router.summary()["calls"] == 0
+
+
+@pytest.mark.parametrize("denial", ["live_call_denied", "run_not_active", "live_budget_exhausted"])
+def test_gateway_refusal_prevents_local_side_effect(httpx_mock, denial: str) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/v1/tool-execution/runs/{RUN}/local/authorize",
+        status_code=400,
+        json={"error": {"code": denial, "message": "rejected by gateway"}},
+    )
+    effects: list[str] = []
+    router = Client(api_key="key", base_url=BASE).tools.router(
+        RUN, local_functions={"email.send": lambda: effects.append("sent")}
+    )
+    with pytest.raises(ToolExecutionError) as exc:
+        router.call("email.send")
+    assert exc.value.code == denial
+    assert effects == []
+    assert [r.url.path.rsplit("/", 1)[-1] for r in httpx_mock.get_requests()] == ["authorize"]
+
+
+def test_mock_bound_tool_is_routed_to_the_gateway_instead_of_the_local_function(httpx_mock) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/v1/tool-execution/runs/{RUN}/local/authorize",
+        json={"decision": "gateway"},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/v1/tool-execution/runs/{RUN}/invoke",
+        json=_invoke_response({"delivered": True, "mocked": True}),
+    )
+    effects: list[str] = []
+    router = Client(api_key="key", base_url=BASE).tools.router(
+        RUN, local_functions={"email.send": lambda **_: effects.append("sent")}
+    )
+    assert router.call("email.send", {"to": "a@example.test"}) == {
+        "delivered": True,
+        "mocked": True,
+    }
+    assert effects == []
+    assert router.summary()["has_real_calls"] is False
+
+
+def test_failed_report_keeps_local_evidence_as_unreported(httpx_mock) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/v1/tool-execution/runs/{RUN}/local/authorize",
+        json={"decision": "local", "record_id": "rec_pending"},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/v1/tool-execution/runs/{RUN}/report-local",
+        status_code=502,
+        text="<html>Bad Gateway</html>",
+    )
+    effects: list[str] = []
+    router = Client(api_key="key", base_url=BASE).tools.router(
+        RUN, local_functions={"email.send": lambda **_: effects.append("sent") or {"ok": True}}
+    )
+    with pytest.raises(ToolExecutionError) as exc:
+        router.call("email.send", {"to": "a@example.test"})
+    assert exc.value.status == 502
+    assert effects == ["sent"]
+    assert len(router.calls) == 1
+    assert router.calls[0].reported is False
+    assert router.calls[0].external_state == "indeterminate"
+    assert router.calls[0].record_id == "rec_pending"
+    assert router.summary() == {
+        "calls": 1,
+        "by_source": {"runtime_local": 1},
+        "has_real_calls": True,
+        "unreported": 1,
     }
 
 
