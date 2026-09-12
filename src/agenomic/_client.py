@@ -16,6 +16,7 @@ from agenomic.agent import AgentResource
 from agenomic.client.auth import bearer_header
 from agenomic.exceptions import CloudError
 from agenomic.rmp import MonitorResource, ProtectResource, ReviewResource, RmpResource
+from agenomic.tools import ToolsResource
 from agenomic.tracking import TrackingResource
 
 
@@ -52,6 +53,8 @@ class Client:
         self.review = ReviewResource(self)
         self.monitor = MonitorResource(self)
         self.protect = ProtectResource(self)
+        #: Replay tool execution: Tool Gateway (real calls) and Tool Mock Engine.
+        self.tools = ToolsResource(self)
 
     @property
     def is_cloud(self) -> bool:

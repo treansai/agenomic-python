@@ -72,6 +72,38 @@ Using an AI coding agent (Claude Code, Cursor, Copilot)? Point it at
 [`AGENT.md`](AGENT.md) — a condensed SDK guide written for agents:
 import maps, canonical recipes, and pitfalls.
 
+## Tool execution for replays (Tool Gateway and Tool Mock Engine)
+
+In cloud mode, `client.tools` routes each tool call of a replay to a real
+backend (credentials resolved server-side from `${env:VAR_NAME}` references)
+or to the Tool Mock Engine, chosen per tool by an explicit configuration.
+Nothing falls back to a real call: an unknown tool or a missing fixture is an
+error.
+
+```python
+from agenomic import Client
+from agenomic.tools import ToolCallError
+
+tools = Client(api_key="agm_...", base_url="https://cloud.example").tools
+plan = tools.preflight(config_text=open("tool_execution.yaml").read(), repetitions=3)
+run = tools.create_run(name="hybrid", config_text=open("tool_execution.yaml").read(), repetitions=3)
+if run["status"] == "planned":
+    run = tools.approve_run(run["id"], plan_hash=run["plan_hash"])
+tools.start_run(run["id"])
+
+router = tools.router(run["id"], repetition=1)
+customer = router.call("crm.get_customer", {"id": "c_1"})   # live or mock, per binding
+try:
+    router.call("email.send", {"to": "ops@example.test"})
+except ToolCallError as error:
+    print(error.code, error.envelope.provenance)
+print(router.summary())   # {'calls': 2, 'by_source': {...}, 'has_real_calls': ...}
+tools.complete_run(run["id"])
+```
+
+See `examples/10_tool_execution.py` and the cloud documentation
+`docs/tool-execution.md`.
+
 ## Examples
 
 See [`examples/`](examples/) — minimal trace, decorator + JSONL, ATEP local,
