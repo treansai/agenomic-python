@@ -67,6 +67,41 @@ def test_local_rmp_start_reuses_active_session_per_agent_and_environment() -> No
     assert len(client.rmp.list()) == 2
 
 
+def test_local_rmp_concurrent_starts_share_one_session() -> None:
+    import threading
+
+    client = Client()
+    workers = 8
+    barrier = threading.Barrier(workers)
+    ids: list[str] = []
+    lock = threading.Lock()
+
+    def start() -> None:
+        barrier.wait()
+        session = client.rmp.start(agent="agent://treans/claims-agent", environment="development")
+        with lock:
+            ids.append(session["session_id"])
+
+    threads = [threading.Thread(target=start) for _ in range(workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(ids) == workers
+    assert len(set(ids)) == 1
+    assert len(client.rmp.list()) == 1
+
+
+def test_local_rmp_stop_twice_keeps_the_completion_timestamp() -> None:
+    client = Client()
+    session = client.rmp.start(agent="agent://treans/claims-agent", environment="development")
+    first = dict(client.rmp.stop(session["session_id"]))
+    second = client.rmp.stop(session["session_id"])
+    assert second["status"] == "completed"
+    assert second["ended_at"] == first["ended_at"]
+    assert second == first
+
+
 def test_local_rmp_stop_frees_the_slot_for_a_new_session() -> None:
     client = Client()
 
