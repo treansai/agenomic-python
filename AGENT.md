@@ -197,6 +197,10 @@ uploads behind the decorator.
 ## Import map (copy-paste correct)
 
 ```python
+from agenomic.benchmarks import AgentTargetBridge, BridgeCapability, TurnRequest, TurnReply, serve_bridge  # RMP benchmarks bridge (cloud only)
+```
+
+```python
 from agenomic import Client, __version__
 from agenomic.trace.decorator import trace_agent_run
 from agenomic.trace.context import current_recorder

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -126,6 +127,40 @@ def _cmd_keys_generate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_benchmark_serve(args: argparse.Namespace) -> int:
+    import importlib
+
+    from agenomic._client import Client
+    from agenomic.benchmarks import AgentTargetBridge, FixtureBridge, serve_bridge
+
+    if args.bridge == "fixture":
+        bridge: AgentTargetBridge = FixtureBridge()
+    else:
+        module_name, _, attr = args.bridge.partition(":")
+        if not attr:
+            print("error: --bridge must be module:attribute or 'fixture'", file=sys.stderr)
+            return 2
+        target = getattr(importlib.import_module(module_name), attr)
+        bridge = target() if isinstance(target, type) else target
+        if not isinstance(bridge, AgentTargetBridge):
+            print(
+                "error: --bridge must resolve to an AgentTargetBridge instance or class",
+                file=sys.stderr,
+            )
+            return 2
+    client = Client(api_key=args.api_key, base_url=args.base_url)
+    answered = serve_bridge(
+        client,
+        bridge,
+        agent=args.agent,
+        release_id=args.release,
+        max_turns=args.max_turns,
+        idle_timeout=args.idle_timeout,
+    )
+    print(f"bridge stopped after {answered} turn(s)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agenomic-py",
@@ -158,6 +193,26 @@ def build_parser() -> argparse.ArgumentParser:
     gen.add_argument("out", type=str)
     gen.add_argument("--force", action="store_true")
     gen.set_defaults(func=_cmd_keys_generate)
+
+    benchmark = sub.add_parser("benchmark", help="RMP benchmark bridge")
+    benchmark_sub = benchmark.add_subparsers(dest="benchmark_command", required=True)
+    serve = benchmark_sub.add_parser("serve", help="serve your agent to Agenomic benchmark turns")
+    serve.add_argument("--agent", required=True, help="agent id as used by the RMP session")
+    serve.add_argument("--release", default=None, help="release id served by this bridge")
+    serve.add_argument(
+        "--bridge", required=True, help="module:attribute of an AgentTargetBridge, or 'fixture'"
+    )
+    serve.add_argument(
+        "--base-url",
+        default=os.environ.get("AGENOMIC_BASE_URL"),
+        required="AGENOMIC_BASE_URL" not in os.environ,
+    )
+    serve.add_argument("--api-key", default=os.environ.get("AGENOMIC_API_KEY"))
+    serve.add_argument("--max-turns", type=int, default=None)
+    serve.add_argument(
+        "--idle-timeout", type=float, default=None, help="stop after this many idle seconds"
+    )
+    serve.set_defaults(func=_cmd_benchmark_serve)
 
     return parser
 

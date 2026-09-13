@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `client.benchmarks` (cloud only): catalogue, plans, preflight, idempotent
+  launch, runs, comparison and Protect policy proposals for RMP benchmarks.
+  `rmp.start()` is unchanged and still never executes anything.
+- `agenomic.benchmarks.AgentTargetBridge` + `serve_bridge()` and the
+  `agenomic-py benchmark serve` command: serve your own agent to benchmark
+  turns relayed by Agenomic; benchmark tools replace production tools per
+  trial and are executed by the benchmark environment.
+
 - Complete documentation set under `docs/`: new pages for the API
   reference, exporters, canonical v0.3 runs, online tracking, keys &
   signing, workflow/system manifests (RFC 0009), the `agenomic-py` CLI,
