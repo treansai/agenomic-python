@@ -97,7 +97,7 @@ class Client:
             with self._http() as http:
                 response = http.get(path)
                 response.raise_for_status()
-                data: dict[str, Any] = response.json()
+                data: dict[str, Any] = response.json() if response.content else {}
                 return data
         except httpx.HTTPError as exc:
             raise CloudError(f"GET {path} failed: {exc}") from exc
