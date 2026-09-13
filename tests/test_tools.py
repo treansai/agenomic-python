@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
+import httpx
 import pytest
 
 from agenomic import Client
@@ -32,13 +34,243 @@ def _invoke_response(result, source="static", status="success"):
     }
 
 
-def test_local_client_has_no_fallback() -> None:
-    client = Client()
+def test_cloud_client_never_falls_back_to_the_local_engine() -> None:
+    def unreachable(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    client = Client(api_key="key", base_url=BASE, transport=httpx.MockTransport(unreachable))
     with pytest.raises(ToolExecutionError) as excinfo:
         client.tools.validate(
             config={"schema_version": "agenomic.tool_execution/v1", "mode": "mock"}
         )
+    assert excinfo.value.code == "transport_error"
+    with pytest.raises(ToolExecutionError) as excinfo:
+        _ = client.tools.local
     assert excinfo.value.code == "cloud_required"
+
+
+MOCK_CONFIG = {
+    "schema_version": "agenomic.tool_execution/v1",
+    "mode": "mock",
+    "bindings": {
+        "email.send": {
+            "mode": "mock",
+            "strategy": "static",
+            "response": {
+                "kind": "structured",
+                "data": {"delivered": True, "message_id": "msg_0001"},
+            },
+        },
+        "weather.now": {
+            "mode": "mock",
+            "strategy": "rules",
+            "rules": [
+                {
+                    "id": "paris",
+                    "priority": 5,
+                    "when": {"args_match": {"city": "Paris"}},
+                    "then": {"kind": "structured", "data": {"temp_c": 18}},
+                },
+                {"id": "elsewhere", "then": {"kind": "structured", "data": {"temp_c": 10}}},
+            ],
+        },
+        "documents.extract": {"mode": "mock", "strategy": "recorded", "fixture_set_ref": "docs@1"},
+    },
+}
+
+
+def _local_tools_with_fixtures() -> Any:
+    tools = Client().tools
+    created = tools.create_fixture_set(
+        name="docs",
+        version=1,
+        fixtures=[
+            {
+                "fixture_id": "fx-1",
+                "request": {"tool": "documents.extract", "arguments": {"doc": "a"}},
+                "outcome": {"kind": "structured", "data": {"text": "hello"}},
+                "fidelity": "recorded_response",
+                "origin": "authored",
+            }
+        ],
+    )
+    tools.approve_fixture_set(created["fixture_set"]["id"])
+    return tools
+
+
+def test_local_mode_runs_static_rules_and_recorded_mocks_without_network() -> None:
+    tools = _local_tools_with_fixtures()
+    assert tools.validate(config=MOCK_CONFIG)["warnings"] == [
+        "no contract for email.send",
+        "no contract for weather.now",
+        "no contract for documents.extract",
+    ]
+    plan = tools.preflight(config=MOCK_CONFIG, repetitions=2)
+    assert plan["runnable"]
+    assert plan["plan"]["mock_tools"] == ["email.send", "weather.now", "documents.extract"]
+    run = tools.create_run(name="offline", config=MOCK_CONFIG, repetitions=2)
+    assert run["status"] == "approved"
+    tools.start_run(run["id"])
+    router = tools.router(run["id"], repetition=2)
+    assert router.call("email.send", {"to": "a@example.test"}) == {
+        "delivered": True,
+        "message_id": "msg_0001",
+    }
+    assert router.call("weather.now", {"city": "Paris"}) == {"temp_c": 18}
+    assert router.call("weather.now", {"city": "Lyon"}) == {"temp_c": 10}
+    assert router.call("documents.extract", {"doc": "a"}) == {"text": "hello"}
+    assert router.calls[1].provenance.rule_id == "paris"
+    assert router.calls[3].source == "recorded"
+    assert router.calls[3].provenance.fixture_id == "fx-1"
+    with pytest.raises(ToolExecutionError) as exc:
+        router.call("documents.extract", {"doc": "unknown"})
+    assert exc.value.code == "mock_unmatched"
+    with pytest.raises(ToolExecutionError) as exc:
+        router.call("tickets.get", {"ticket_id": "x"})
+    assert exc.value.code == "tool_unknown"
+    tools.complete_run(run["id"])
+    report = tools.report(run["id"])["report"]
+    assert report["calls_by_source"] == {"static": 3, "recorded": 1, "unrouted": 2}
+    assert report["has_real_calls"] is False
+    assert len(report["uncovered_calls"]) == 2
+    assert tools.export(run["id"])["export_version"] == "agenomic.tool_run_export/v1"
+    assert router.summary() == {
+        "calls": 4,
+        "by_source": {"static": 3, "recorded": 1},
+        "has_real_calls": False,
+        "unreported": 0,
+    }
+
+
+def test_local_mode_refuses_what_needs_the_cloud_at_preflight() -> None:
+    tools = Client().tools
+    tools.create_profile(name="staging", allowed_env=["CRM_MCP_URL"])
+    config = {
+        "schema_version": "agenomic.tool_execution/v1",
+        "mode": "hybrid",
+        "environment_profile": "staging",
+        "bindings": {
+            "crm.get_customer": {
+                "mode": "live",
+                "adapter": "mcp",
+                "endpoint": "${env:CRM_MCP_URL}",
+                "effect": "read",
+            },
+            "tickets.create": {"mode": "mock", "strategy": "scenario", "scenario_ref": "tickets@1"},
+        },
+    }
+    plan = tools.preflight(config=config)
+    assert plan["runnable"] is False
+    assert plan["plan"]["missing_capabilities"] == [
+        "adapter mcp requires Agenomic Cloud",
+        "strategy scenario requires Agenomic Cloud",
+    ]
+    with pytest.raises(ToolExecutionError) as exc:
+        tools.create_run(config=config)
+    assert exc.value.code == "tool_execution_config_invalid"
+    with pytest.raises(ToolExecutionError) as exc:
+        tools.validate(
+            config={
+                "schema_version": "agenomic.tool_execution/v1",
+                "mode": "mock",
+                "safety": {"allow_implicit_fallback": True},
+            }
+        )
+    assert exc.value.code == "tool_execution_config_invalid"
+    with pytest.raises(ToolExecutionError) as exc:
+        tools.validate(
+            config={
+                "schema_version": "agenomic.tool_execution/v1",
+                "mode": "mock",
+                "bindings": {
+                    "x": {
+                        "mode": "mock",
+                        "strategy": "static",
+                        "response": {"kind": "structured", "data": "${env:SECRET}"},
+                    }
+                },
+            }
+        )
+    assert exc.value.code == "env_reference_forbidden_location"
+    with pytest.raises(ToolExecutionError) as exc:
+        tools.test_connection(
+            profile="staging", tool="crm.get_customer", binding={"mode": "live", "adapter": "http"}
+        )
+    assert exc.value.code == "cloud_required"
+
+
+LOCAL_FUNCTION_CONFIG = {
+    "schema_version": "agenomic.tool_execution/v1",
+    "mode": "hybrid",
+    "environment_profile": "local-only",
+    "limits": {"max_live_calls": 1},
+    "bindings": {
+        "math.add": {"mode": "live", "adapter": "local", "function": "math.add", "effect": "read"},
+        "email.send": {
+            "mode": "mock",
+            "strategy": "static",
+            "response": {"kind": "structured", "data": {"delivered": True}},
+        },
+    },
+}
+
+
+def test_local_mode_local_functions_follow_the_two_phase_protocol() -> None:
+    tools = Client().tools
+    tools.create_profile(name="local-only")
+    run = tools.create_run(config=LOCAL_FUNCTION_CONFIG)
+    assert run["status"] == "planned"
+    with pytest.raises(ToolExecutionError) as exc:
+        tools.start_run(run["id"])
+    assert exc.value.code == "plan_approval_required"
+    with pytest.raises(ToolExecutionError) as exc:
+        tools.approve_run(run["id"], plan_hash="sha256:other")
+    assert exc.value.code == "plan_approval_required"
+    tools.approve_run(run["id"], plan_hash=run["plan_hash"])
+    tools.start_run(run["id"])
+    effects: list[str] = []
+
+    def add(a: int, b: int) -> dict[str, int]:
+        effects.append("ran")
+        return {"sum": a + b}
+
+    router = tools.router(
+        run["id"],
+        local_functions={"math.add": add, "email.send": lambda **_: effects.append("never")},
+    )
+    assert router.call("email.send", {"to": "a@example.test"}) == {"delivered": True}
+    assert effects == []
+    assert router.call("math.add", {"a": 2, "b": 3}) == {"sum": 5}
+    assert effects == ["ran"]
+    with pytest.raises(ToolExecutionError) as exc:
+        router.call("math.add", {"a": 1, "b": 1})
+    assert exc.value.code == "live_budget_exhausted"
+    assert effects == ["ran"]
+    records = tools.report(run["id"])["invocations"]
+    assert [(r["tool"], r["source"], r["status"]) for r in records] == [
+        ("email.send", "static", "success"),
+        ("math.add", "runtime_local", "success"),
+    ]
+    assert router.summary()["has_real_calls"] is True
+    with pytest.raises(ToolExecutionError) as exc:
+        tools.report_local(run["id"], "math.add", {}, {"sum": 0}, logical_call_id="ghost")
+    assert exc.value.code == "live_call_denied"
+
+
+async def test_async_router_awaits_local_coroutines_and_engine_calls() -> None:
+    tools = Client().tools
+    tools.create_profile(name="local-only")
+    run = tools.create_run(config=LOCAL_FUNCTION_CONFIG)
+    tools.approve_run(run["id"], plan_hash=run["plan_hash"])
+    tools.start_run(run["id"])
+
+    async def add(a: int, b: int) -> dict[str, int]:
+        return {"sum": a + b}
+
+    router = tools.arouter(run["id"], local_functions={"math.add": add})
+    assert await router.call("email.send", {"to": "a@example.test"}) == {"delivered": True}
+    assert await router.wrap("math.add")(a=2, b=3) == {"sum": 5}
+    assert router.summary()["by_source"] == {"static": 1, "runtime_local": 1}
 
 
 def test_set_variable_is_write_only_and_status_never_carries_values(httpx_mock) -> None:
@@ -153,9 +385,58 @@ def test_offline_router_refuses_before_executing_local_function() -> None:
     )
     with pytest.raises(ToolExecutionError) as exc:
         router.call("email.send")
-    assert exc.value.code == "cloud_required"
+    assert exc.value.code == "not_found"
     assert effects == []
     assert router.summary()["calls"] == 0
+
+
+def test_router_refuses_to_execute_without_a_record_id(httpx_mock) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/v1/tool-execution/runs/{RUN}/local/authorize",
+        json={"decision": "local"},
+    )
+    effects: list[str] = []
+    router = Client(api_key="key", base_url=BASE).tools.router(
+        RUN, local_functions={"email.send": lambda: effects.append("sent")}
+    )
+    with pytest.raises(ToolExecutionError) as exc:
+        router.call("email.send")
+    assert exc.value.code == "invalid_response"
+    assert effects == []
+
+
+def test_malformed_envelope_is_a_typed_error(httpx_mock) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/v1/tool-execution/runs/{RUN}/invoke",
+        json={
+            "result": 1,
+            "agenomic": {
+                "record_id": "r",
+                "status": "weird",
+                "provenance": {"source": "static"},
+                "external_state": "none",
+            },
+        },
+    )
+    with pytest.raises(ToolExecutionError) as exc:
+        Client(api_key="key", base_url=BASE).tools.invoke(RUN, "email.send")
+    assert exc.value.code == "invalid_response"
+
+
+async def test_async_invoke_uses_the_async_transport(httpx_mock) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/v1/tool-execution/runs/{RUN}/invoke",
+        json=_invoke_response({"delivered": True}),
+    )
+    out = await Client(api_key="key", base_url=BASE).tools.ainvoke(
+        RUN, "email.send", {"to": "a@example.test"}
+    )
+    assert out.result == {"delivered": True}
+    assert out.provenance.source == "static"
+    assert httpx_mock.get_requests()[0].headers["Idempotency-Key"]
 
 
 @pytest.mark.parametrize("denial", ["live_call_denied", "run_not_active", "live_budget_exhausted"])

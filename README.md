@@ -101,12 +101,28 @@ print(router.summary())   # {'calls': 2, 'by_source': {...}, 'has_real_calls': .
 tools.complete_run(run["id"])
 ```
 
-Functions passed as `local_functions` never run before the gateway allows
+Functions passed as `local_functions` never run before the engine allows
 them: the router calls `local/authorize` first (budget reserved, pending
-record), executes only on a `local` decision, routes the call through the
-gateway when the run binds the tool to a mock, and settles the record with
-`report-local`. If the report fails, the call stays in `router.calls` with
-`reported=False` and `external_state="indeterminate"`.
+record), executes only on a `local` decision that carries a record id,
+routes the call through the engine when the run binds the tool to a mock,
+and settles the record with `report-local`. If the report fails, the call
+stays in `router.calls` with `reported=False` and
+`external_state="indeterminate"`. `router.calls` holds typed
+`ToolCallResult` models (`result`, `status`, `provenance`, `external_state`).
+
+Local mode (`Client()` without `base_url`) runs an in-process engine with the
+same statuses and refusals: validation, preflight, run lifecycle with
+approval, the `static`, `rules` and `recorded` strategies and local
+functions through the same two-phase protocol. What needs the gateway
+(`mcp` and `http` adapters, `scenario`, `schema_generated` and `plugin`
+strategies, connection tests) is refused by the plan with an explicit
+error; neither mode falls back to the other.
+
+For asyncio runtimes use `tools.arouter(run_id)` (local functions may be
+coroutines) or `tools.ainvoke(...)`: the per-call path awaits an async HTTP
+client so the event loop is never blocked by a gateway round-trip. The
+administrative methods (profiles, contracts, fixtures, runs) stay
+synchronous.
 
 See `examples/10_tool_execution.py` and the cloud documentation
 `docs/tool-execution.md`.

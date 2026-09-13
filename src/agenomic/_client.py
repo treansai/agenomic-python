@@ -61,18 +61,28 @@ class Client:
         """True when a ``base_url`` was configured (cloud mode)."""
         return self.base_url is not None
 
-    def _http(self) -> httpx.Client:
+    def _http_kwargs(self) -> dict[str, Any]:
         headers: dict[str, str] = {"User-Agent": f"agenomic-python/{__version__}"}
         if self.api_key:
             headers.update(bearer_header(self.api_key))
-        kwargs: dict[str, Any] = {
+        return {
             "base_url": self.base_url or "",
             "headers": headers,
             "timeout": self._timeout,
         }
+
+    def _http(self) -> httpx.Client:
+        kwargs = self._http_kwargs()
         if self._transport is not None:
             kwargs["transport"] = self._transport
         return httpx.Client(**kwargs)
+
+    def _ahttp(self) -> httpx.AsyncClient:
+        """Async transport for I/O-bound namespaces (``client.tools``)."""
+        kwargs = self._http_kwargs()
+        if isinstance(self._transport, httpx.AsyncBaseTransport):
+            kwargs["transport"] = self._transport
+        return httpx.AsyncClient(**kwargs)
 
     def _post(self, path: str, body: Any) -> dict[str, Any]:
         try:
