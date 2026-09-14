@@ -72,6 +72,61 @@ Using an AI coding agent (Claude Code, Cursor, Copilot)? Point it at
 [`AGENT.md`](AGENT.md) — a condensed SDK guide written for agents:
 import maps, canonical recipes, and pitfalls.
 
+## Tool execution for replays (Tool Gateway and Tool Mock Engine)
+
+In cloud mode, `client.tools` routes each tool call of a replay to a real
+backend (credentials resolved server-side from `${env:VAR_NAME}` references)
+or to the Tool Mock Engine, chosen per tool by an explicit configuration.
+Nothing falls back to a real call: an unknown tool or a missing fixture is an
+error.
+
+```python
+from agenomic import Client
+from agenomic.tools import ToolCallError
+
+tools = Client(api_key="agm_...", base_url="https://cloud.example").tools
+plan = tools.preflight(config_text=open("tool_execution.yaml").read(), repetitions=3)
+run = tools.create_run(name="hybrid", config_text=open("tool_execution.yaml").read(), repetitions=3)
+if run["status"] == "planned":
+    run = tools.approve_run(run["id"], plan_hash=run["plan_hash"])
+tools.start_run(run["id"])
+
+router = tools.router(run["id"], repetition=1)
+customer = router.call("crm.get_customer", {"id": "c_1"})   # live or mock, per binding
+try:
+    router.call("email.send", {"to": "ops@example.test"})
+except ToolCallError as error:
+    print(error.code, error.envelope.provenance)
+print(router.summary())   # {'calls': 2, 'by_source': {...}, 'has_real_calls': ..., 'unreported': 0}
+tools.complete_run(run["id"])
+```
+
+Functions passed as `local_functions` never run before the engine allows
+them: the router calls `local/authorize` first (budget reserved, pending
+record), executes only on a `local` decision that carries a record id,
+routes the call through the engine when the run binds the tool to a mock,
+and settles the record with `report-local`. If the report fails, the call
+stays in `router.calls` with `reported=False` and
+`external_state="indeterminate"`. `router.calls` holds typed
+`ToolCallResult` models (`result`, `status`, `provenance`, `external_state`).
+
+Local mode (`Client()` without `base_url`) runs an in-process engine with the
+same statuses and refusals: validation, preflight, run lifecycle with
+approval, the `static`, `rules` and `recorded` strategies and local
+functions through the same two-phase protocol. What needs the gateway
+(`mcp` and `http` adapters, `scenario`, `schema_generated` and `plugin`
+strategies, connection tests) is refused by the plan with an explicit
+error; neither mode falls back to the other.
+
+For asyncio runtimes use `tools.arouter(run_id)` (local functions may be
+coroutines) or `tools.ainvoke(...)`: the per-call path awaits an async HTTP
+client so the event loop is never blocked by a gateway round-trip. The
+administrative methods (profiles, contracts, fixtures, runs) stay
+synchronous.
+
+See `examples/10_tool_execution.py` and the cloud documentation
+`docs/tool-execution.md`.
+
 ## Examples
 
 See [`examples/`](examples/) — minimal trace, decorator + JSONL, ATEP local,
