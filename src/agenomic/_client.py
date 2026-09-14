@@ -13,6 +13,7 @@ import httpx
 
 from agenomic._version import __version__
 from agenomic.agent import AgentResource
+from agenomic.benchmarks.resources import BenchmarksResource
 from agenomic.client.auth import bearer_header
 from agenomic.exceptions import CloudError
 from agenomic.rmp import MonitorResource, ProtectResource, ReviewResource, RmpResource
@@ -53,6 +54,8 @@ class Client:
         self.review = ReviewResource(self)
         self.monitor = MonitorResource(self)
         self.protect = ProtectResource(self)
+        #: RMP benchmarks (cloud only): catalogue, plans, launches, runs, policies.
+        self.benchmarks = BenchmarksResource(self)
         #: Replay tool execution: Tool Gateway (real calls) and Tool Mock Engine.
         self.tools = ToolsResource(self)
 
@@ -93,12 +96,21 @@ class Client:
         except httpx.HTTPError as exc:
             raise CloudError(f"POST {path} failed: {exc}") from exc
 
+    def _put(self, path: str, body: Any) -> dict[str, Any]:
+        try:
+            with self._http() as http:
+                response = http.put(path, json=body)
+                response.raise_for_status()
+                return response.json() if response.content else {}
+        except httpx.HTTPError as exc:
+            raise CloudError(f"PUT {path} failed: {exc}") from exc
+
     def _get(self, path: str) -> dict[str, Any]:
         try:
             with self._http() as http:
                 response = http.get(path)
                 response.raise_for_status()
-                data: dict[str, Any] = response.json()
+                data: dict[str, Any] = response.json() if response.content else {}
                 return data
         except httpx.HTTPError as exc:
             raise CloudError(f"GET {path} failed: {exc}") from exc

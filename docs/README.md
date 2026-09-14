@@ -26,6 +26,7 @@ condensed integration guide with import maps, recipes, and pitfalls.
 | Boundary redaction | [redaction.md](redaction.md) |
 | Online tracking (production) | [tracking.md](tracking.md) |
 | Review · Monitor · Protect | [rmp.md](rmp.md) |
+| RMP benchmarks and the agent bridge | [benchmarks.md](benchmarks.md) |
 | Workflow & system manifests (RFC 0009) | [orchestration.md](orchestration.md) |
 | Integrations (OpenAI, Anthropic, HF, LangGraph, MCP) | [integrations.md](integrations.md) |
 | Hugging Face provider | [providers/huggingface.md](providers/huggingface.md) |

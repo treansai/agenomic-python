@@ -12,6 +12,11 @@ scenarios and proposals are buffered in memory (detection runs in
 All shapes are snake_case dicts stamped with `spec_version`
 `agenomic.rmp/v0.1`, identical to the Rust `agenomic-rmp` engines.
 
+Starting a session never executes the agent or any benchmark. Benchmark
+suites (τ²-bench, ToolSandbox, AppWorld, AgentDojo, MCP-Universe) are planned
+and launched explicitly through `client.benchmarks`, and your agent takes part
+through the bridge described in [benchmarks.md](benchmarks.md).
+
 ## The umbrella session
 
 ```python
