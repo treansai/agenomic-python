@@ -40,6 +40,31 @@ agenomic-py benchmark serve --agent agent://acme/support --release rel_2026_09 \
   --bridge my_package.bridge:MyBridge --base-url https://cloud.agenomic.io --api-key agm_...
 ```
 
+Inside an asyncio runtime use `AsyncBridgeServer` or `aserve_bridge`; the
+handler may be a coroutine function and the poll never blocks the event loop.
+`serve_bridge` and `BridgeServer` are top-level wrappers over `asyncio.run`.
+
+```python
+import asyncio
+from agenomic.benchmarks import AsyncBridgeServer
+
+class MyAsyncBridge(AgentTargetBridge):
+    async def handle_turn(self, turn: TurnRequest) -> TurnReply:
+        result = await my_agent.astep(messages=turn.messages, tools=turn.tools)
+        return TurnReply(content=result.text)
+
+asyncio.run(AsyncBridgeServer(client, MyAsyncBridge(), agent="agent://acme/support").serve())
+```
+
+Every reply passes through a `RedactionEngine` before it is posted. The
+default rules (`DEFAULT_BRIDGE_REDACTION_RULES`) mask credential-looking keys
+such as `password`, `token` or `api_key` anywhere inside tool arguments; pass
+`redaction=RedactionEngine([...])` to extend them. A handler exception is
+reported to the benchmark as `[bridge error] handler raised <Type>` without
+the exception text. Wire types (`TurnRequest`, `Message`, `ToolCall`,
+`ToolSpec`, `TurnReply`) are pydantic models: a malformed relay payload raises
+`pydantic.ValidationError` instead of failing later.
+
 The bridge registers its capabilities (the catalogue's compatibility state is
 derived from that registration, which expires two minutes after the last
 heartbeat), long-polls pending turns for exactly this agent and release, and

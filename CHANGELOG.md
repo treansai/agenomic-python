@@ -15,7 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `agenomic.benchmarks.AgentTargetBridge` + `serve_bridge()` and the
   `agenomic-py benchmark serve` command: serve your own agent to benchmark
   turns relayed by Agenomic; benchmark tools replace production tools per
-  trial and are executed by the benchmark environment.
+  trial and are executed by the benchmark environment. `AsyncBridgeServer`
+  and `aserve_bridge()` are the asyncio-native entry points; the sync ones
+  wrap them with `asyncio.run`. Wire types are pydantic models, replies are
+  redacted (`DEFAULT_BRIDGE_REDACTION_RULES`) before export and handler
+  failures are reported without the exception text.
 
 - Complete documentation set under `docs/`: new pages for the API
   reference, exporters, canonical v0.3 runs, online tracking, keys &

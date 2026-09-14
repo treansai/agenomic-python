@@ -1,10 +1,13 @@
+import asyncio
 import json
 
 import pytest
+from pydantic import ValidationError
 
 from agenomic import Client
 from agenomic.benchmarks import (
     AgentTargetBridge,
+    AsyncBridgeServer,
     BridgeCapability,
     BridgeServer,
     CallableBridge,
@@ -219,5 +222,81 @@ def test_bridge_handler_failure_is_reported_not_hidden(httpx_mock) -> None:
     )
     BridgeServer(client, Broken(), agent="a", bridge_id="b").serve(max_turns=1)
     reply = json.loads(httpx_mock.get_requests()[-1].content)["reply"]
-    assert reply["message"]["content"].startswith("[bridge error] RuntimeError")
+    assert reply["message"]["content"] == "[bridge error] handler raised RuntimeError"
+    assert "boom" not in json.dumps(reply)
     assert reply["stop"] is True
+
+
+def test_turn_request_rejects_malformed_relay_payloads() -> None:
+    with pytest.raises(ValidationError):
+        TurnRequest.from_wire({"turn_id": "bturn_1", "request": {"context": {}}})
+    with pytest.raises(ValidationError):
+        ToolCall(id="c1", name="send_email", arguments={"to": object()})  # type: ignore[dict-item]
+
+
+def test_reply_is_redacted_before_export(httpx_mock) -> None:
+    client = Client(api_key="key_123", base_url="https://api.test")
+
+    def agent(turn: TurnRequest) -> TurnReply:
+        return TurnReply(
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="login",
+                    arguments={"user": "ana", "password": "hunter2", "nested": {"api_key": "k"}},
+                )
+            ]
+        )
+
+    httpx_mock.add_response(
+        method="POST", url="https://api.test/v1/rmp/benchmarks/bridge/register", json={}
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://api.test/v1/rmp/benchmarks/bridge/turns/next?agent_id=a&bridge_id=b&wait=20",
+        json={"turn": _turn("bturn_3")},
+    )
+    httpx_mock.add_response(
+        method="POST", url="https://api.test/v1/rmp/benchmarks/bridge/turns/bturn_3/reply", json={}
+    )
+    BridgeServer(client, CallableBridge(agent), agent="a", bridge_id="b").serve(max_turns=1)
+    sent = json.loads(httpx_mock.get_requests()[-1].content)
+    arguments = sent["reply"]["message"]["tool_calls"][0]["arguments"]
+    assert arguments["user"] == "ana"
+    assert arguments["password"] != "hunter2"
+    assert arguments["nested"]["api_key"] != "k"
+    assert "hunter2" not in json.dumps(sent)
+
+
+def test_async_bridge_awaits_coroutine_handlers(httpx_mock) -> None:
+    client = Client(api_key="key_123", base_url="https://api.test")
+    events: list[str] = []
+
+    class AsyncAgent(AgentTargetBridge):
+        async def start_trial(self, turn: TurnRequest) -> None:
+            events.append(f"start:{turn.trial_id}")
+
+        async def handle_turn(self, turn: TurnRequest) -> TurnReply:
+            await asyncio.sleep(0)
+            events.append(f"handle:{turn.turn_id}")
+            return TurnReply(content="done", stop=True)
+
+        async def end_trial(self, trial_id: str) -> None:
+            events.append(f"end:{trial_id}")
+
+    httpx_mock.add_response(
+        method="POST", url="https://api.test/v1/rmp/benchmarks/bridge/register", json={}
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://api.test/v1/rmp/benchmarks/bridge/turns/next?agent_id=a&bridge_id=b&wait=20",
+        json={"turn": _turn("bturn_4")},
+    )
+    httpx_mock.add_response(
+        method="POST", url="https://api.test/v1/rmp/benchmarks/bridge/turns/bturn_4/reply", json={}
+    )
+    server = AsyncBridgeServer(client, AsyncAgent(), agent="a", bridge_id="b")
+    assert asyncio.run(server.serve(max_turns=1)) == 1
+    assert events == ["start:btrial_1", "handle:bturn_4", "end:btrial_1"]
+    reply = json.loads(httpx_mock.get_requests()[-1].content)["reply"]
+    assert reply["message"]["content"] == "done"

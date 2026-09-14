@@ -166,7 +166,7 @@ def test_bridge_http_multiturn_lifecycle_and_agent_failure() -> None:
         ("turn_3", "trial_2", 0),
     ]:
         reply = (
-            TurnReply(content="[bridge error] RuntimeError: agent failed", stop=True)
+            TurnReply(content="[bridge error] handler raised RuntimeError", stop=True)
             if trial_id == "trial_2"
             else TurnReply(
                 tool_calls=[ToolCall(id="call_1", name="lookup", arguments={"q": "café"})],
