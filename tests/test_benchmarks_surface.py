@@ -145,7 +145,9 @@ def test_sync_wrappers_delegate_to_the_async_server(httpx_mock) -> None:
     assert server.register()["bridge_id"] == "b"
     assert server.poll_once() is False
     server.stop()
-    _idle_gateway(httpx_mock, "b")
+    httpx_mock.add_response(
+        method="POST", url=f"{BASE}/v1/rmp/benchmarks/bridge/register", json={"bridge_id": "b"}
+    )
     assert server.serve() == 0
     assert server.turns_answered == 0
 
