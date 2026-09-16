@@ -16,7 +16,8 @@ from agenomic.agent import AgentResource
 from agenomic.benchmarks.resources import BenchmarksResource
 from agenomic.client.auth import bearer_header
 from agenomic.exceptions import CloudError
-from agenomic.rmp import MonitorResource, ProtectResource, ReviewResource, RmpResource
+from agenomic.protect import ProtectResource
+from agenomic.rmp import MonitorResource, ReviewResource, RmpResource
 from agenomic.tools import ToolsResource
 from agenomic.tracking import TrackingResource
 

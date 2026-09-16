@@ -7,15 +7,36 @@ itself is safe to import without ``openai`` installed.
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from agenomic.crypto.canonical import canonical_cbor
 from agenomic.crypto.hashing import blake3_hex
+from agenomic.protect.models import Overlay, overlay_text
 from agenomic.trace.context import current_recorder
 from agenomic.types.trace import CallStatus, ModelCall
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from openai import AsyncOpenAI, OpenAI
+
+
+def inject_openai_overlay(kwargs: dict[str, Any], text: Optional[str]) -> dict[str, Any]:
+    """Prepend the overlay as the first system message, once.
+
+    Example:
+        >>> inject_openai_overlay({"messages": [{"role": "user", "content": "hi"}]}, "Rule.")["messages"][0]
+        {'role': 'system', 'content': 'Rule.'}
+    """
+    if text is None:
+        return kwargs
+    messages = list(kwargs.get("messages") or [])
+    first = messages[0] if messages else None
+    if (
+        isinstance(first, Mapping)
+        and first.get("role") == "system"
+        and first.get("content") == text
+    ):
+        return kwargs
+    return {**kwargs, "messages": [{"role": "system", "content": text}, *messages]}
 
 
 def _hash_request_body(payload: dict[str, Any]) -> str:
@@ -30,14 +51,16 @@ def _hash_response_body(response: Any) -> str:
     return blake3_hex(canonical_cbor(data))
 
 
-def instrument_openai(client: OpenAI) -> OpenAI:
+def instrument_openai(client: OpenAI, *, overlay: Overlay = None) -> OpenAI:
     """Wrap an OpenAI client so ``chat.completions.create`` records ModelCalls.
 
     Lazy-imports ``openai``. Raises ImportError with a helpful message if the
-    package is not installed.
+    package is not installed. ``overlay`` (text or :class:`ProtectOverlay`)
+    is prepended as the first system message of every request, once; the
+    prompt hash covers the injected message.
 
     Example:
-        >>> # client = instrument_openai(OpenAI())  # doctest: +SKIP
+        >>> # client = instrument_openai(OpenAI(), overlay=protect.overlay(run_id))  # doctest: +SKIP
     """
     try:
         import openai  # noqa: F401
@@ -45,9 +68,11 @@ def instrument_openai(client: OpenAI) -> OpenAI:
         raise ImportError("openai not installed. Install with: pip install agenomic[openai]") from e
 
     original = client.chat.completions.create
+    text = overlay_text(overlay)
 
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         recorder = current_recorder()
+        kwargs = inject_openai_overlay(kwargs, text)
         model = kwargs.get("model", "")
         prompt_hash = _hash_request_body({"model": model, **kwargs})
         started = time.perf_counter()
@@ -87,7 +112,7 @@ def instrument_openai(client: OpenAI) -> OpenAI:
     return client
 
 
-def instrument_openai_async(client: AsyncOpenAI) -> AsyncOpenAI:
+def instrument_openai_async(client: AsyncOpenAI, *, overlay: Overlay = None) -> AsyncOpenAI:
     """Wrap an AsyncOpenAI client. See :func:`instrument_openai`."""
     try:
         import openai  # noqa: F401
@@ -95,9 +120,11 @@ def instrument_openai_async(client: AsyncOpenAI) -> AsyncOpenAI:
         raise ImportError("openai not installed. Install with: pip install agenomic[openai]") from e
 
     original = client.chat.completions.create
+    text = overlay_text(overlay)
 
     async def wrapped(*args: Any, **kwargs: Any) -> Any:
         recorder = current_recorder()
+        kwargs = inject_openai_overlay(kwargs, text)
         model = kwargs.get("model", "")
         prompt_hash = _hash_request_body({"model": model, **kwargs})
         started = time.perf_counter()

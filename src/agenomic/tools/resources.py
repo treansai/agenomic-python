@@ -7,17 +7,22 @@ refusals, no network. Neither mode falls back to the other.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import time
 import uuid
-from typing import Any, Awaitable, Callable, Mapping, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Literal, Mapping, Optional, Union
 
 import httpx
 
 from agenomic.tools.local import LocalToolEngine
 from agenomic.tools.models import (
     TOOL_EXECUTION_SCHEMA_VERSION,
+    ProtectDecision,
+    ToolApprovalPending,
+    ToolCallDenied,
     ToolCallError,
     ToolCallResult,
     ToolExecutionError,
@@ -25,8 +30,10 @@ from agenomic.tools.models import (
 )
 
 _IDEMPOTENCY_NAMESPACE = uuid.UUID("6b1f7a2e-9c44-4d0e-8f1a-2e7c0d9b5a31")
+_APPROVAL_GRANTED = ("approved", "consumed")
 
 LocalFunction = Callable[..., Any]
+BeforeAction = Callable[[dict[str, Any]], Any]
 
 
 def _unwrap_run(response: Mapping[str, Any]) -> dict[str, Any]:
@@ -116,6 +123,100 @@ def _parse_response(method: str, path: str, response: httpx.Response) -> dict[st
     return data if isinstance(data, dict) else {"data": data}
 
 
+def _headers(idempotency_key: Optional[str]) -> dict[str, str]:
+    return {"Idempotency-Key": idempotency_key} if idempotency_key else {}
+
+
+def send_request(
+    client: Any,
+    method: str,
+    path: str,
+    body: Optional[Mapping[str, Any]] = None,
+    *,
+    idempotency_key: Optional[str] = None,
+) -> httpx.Response:
+    """Perform one cloud request; transport failures become ``transport_error``."""
+    try:
+        with client._http() as http:
+            response: httpx.Response = http.request(
+                method, path, json=body, headers=_headers(idempotency_key)
+            )
+            return response
+    except httpx.HTTPError as exc:
+        raise ToolExecutionError("transport_error", f"{method} {path} failed: {exc}", 0) from exc
+
+
+async def asend_request(
+    client: Any,
+    method: str,
+    path: str,
+    body: Optional[Mapping[str, Any]] = None,
+    *,
+    idempotency_key: Optional[str] = None,
+) -> httpx.Response:
+    """Async counterpart of :func:`send_request`."""
+    try:
+        async with client._ahttp() as http:
+            response: httpx.Response = await http.request(
+                method, path, json=body, headers=_headers(idempotency_key)
+            )
+            return response
+    except httpx.HTTPError as exc:
+        raise ToolExecutionError("transport_error", f"{method} {path} failed: {exc}", 0) from exc
+
+
+def typed_request(
+    client: Any,
+    method: str,
+    path: str,
+    body: Optional[Mapping[str, Any]] = None,
+    *,
+    idempotency_key: Optional[str] = None,
+) -> dict[str, Any]:
+    """Cloud request whose refusals raise :class:`ToolExecutionError` with the server code."""
+    return _parse_response(
+        method, path, send_request(client, method, path, body, idempotency_key=idempotency_key)
+    )
+
+
+async def atyped_request(
+    client: Any,
+    method: str,
+    path: str,
+    body: Optional[Mapping[str, Any]] = None,
+    *,
+    idempotency_key: Optional[str] = None,
+) -> dict[str, Any]:
+    """Async counterpart of :func:`typed_request`."""
+    return _parse_response(
+        method,
+        path,
+        await asend_request(client, method, path, body, idempotency_key=idempotency_key),
+    )
+
+
+def _parse_invoke(tool: str, method: str, path: str, response: httpx.Response) -> ToolCallResult:
+    if response.status_code == 403:
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and isinstance(body.get("agenomic"), Mapping):
+            raise ToolCallDenied(tool, ToolCallResult.from_response(body))
+    return ToolCallResult.from_response(_parse_response(method, path, response))
+
+
+def _parse_authorize(method: str, path: str, response: httpx.Response) -> dict[str, Any]:
+    if response.status_code == 403:
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and ("decision" in body or "protect" in body):
+            return body
+    return _parse_response(method, path, response)
+
+
 class ToolsResource:
     """The ``client.tools`` namespace.
 
@@ -175,17 +276,7 @@ class ToolsResource:
         *,
         idempotency_key: Optional[str] = None,
     ) -> dict[str, Any]:
-        headers: dict[str, str] = {}
-        if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key
-        try:
-            with self._client._http() as http:
-                response = http.request(method, path, json=body, headers=headers)
-        except httpx.HTTPError as exc:
-            raise ToolExecutionError(
-                "transport_error", f"{method} {path} failed: {exc}", 0
-            ) from exc
-        return _parse_response(method, path, response)
+        return typed_request(self._client, method, path, body, idempotency_key=idempotency_key)
 
     async def _arequest(
         self,
@@ -195,17 +286,9 @@ class ToolsResource:
         *,
         idempotency_key: Optional[str] = None,
     ) -> dict[str, Any]:
-        headers: dict[str, str] = {}
-        if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key
-        try:
-            async with self._client._ahttp() as http:
-                response = await http.request(method, path, json=body, headers=headers)
-        except httpx.HTTPError as exc:
-            raise ToolExecutionError(
-                "transport_error", f"{method} {path} failed: {exc}", 0
-            ) from exc
-        return _parse_response(method, path, response)
+        return await atyped_request(
+            self._client, method, path, body, idempotency_key=idempotency_key
+        )
 
     # ── profiles and variables ────────────────────────────────────────
 
@@ -697,6 +780,10 @@ class ToolsResource:
     ) -> ToolCallResult:
         """Route one tool call (Tool Gateway in cloud mode, local engine otherwise).
 
+        A Protect run answers 202 for a call waiting for approval: the result
+        comes back with ``status == "pending"`` and an ``approval_id``. A 403
+        carrying the invoke envelope raises :class:`ToolCallDenied`.
+
         Example:
             >>> from agenomic import Client
             >>> tools = Client().tools
@@ -719,12 +806,10 @@ class ToolsResource:
             deadline_ms,
         )
         if self.is_cloud:
-            response = self._request(
-                "POST", f"/v1/tool-execution/runs/{run_id}/invoke", body, idempotency_key=key
-            )
-        else:
-            response = self.local.invoke(run_id, body)
-        return ToolCallResult.from_response(response)
+            path = f"/v1/tool-execution/runs/{run_id}/invoke"
+            response = send_request(self._client, "POST", path, body, idempotency_key=key)
+            return _parse_invoke(tool, "POST", path, response)
+        return ToolCallResult.from_response(self.local.invoke(run_id, body))
 
     async def ainvoke(
         self,
@@ -762,12 +847,10 @@ class ToolsResource:
             deadline_ms,
         )
         if self.is_cloud:
-            response = await self._arequest(
-                "POST", f"/v1/tool-execution/runs/{run_id}/invoke", body, idempotency_key=key
-            )
-        else:
-            response = self.local.invoke(run_id, body)
-        return ToolCallResult.from_response(response)
+            path = f"/v1/tool-execution/runs/{run_id}/invoke"
+            response = await asend_request(self._client, "POST", path, body, idempotency_key=key)
+            return _parse_invoke(tool, "POST", path, response)
+        return ToolCallResult.from_response(self.local.invoke(run_id, body))
 
     def authorize_local(
         self,
@@ -784,7 +867,10 @@ class ToolsResource:
 
         Returns ``{"decision": "local", "record_id": ...}`` once the budget is
         reserved and a pending record exists, or ``{"decision": "gateway"}``
-        when the run binds the tool to a mock or a non-local adapter. Any
+        when the run binds the tool to a mock or a non-local adapter. A
+        Protect run may answer ``pending`` (with ``approval_id``) or
+        ``denied`` (with ``protect``), and a ``local`` decision then carries
+        the signed ``permit`` that :meth:`report_local` must present. Any
         refusal (inactive run, denied write, exhausted budget) raises before
         anything executes.
 
@@ -807,9 +893,8 @@ class ToolsResource:
             parent_call_id=parent_call_id,
         )
         if self.is_cloud:
-            return dict(
-                self._request("POST", f"/v1/tool-execution/runs/{run_id}/local/authorize", body)
-            )
+            path = f"/v1/tool-execution/runs/{run_id}/local/authorize"
+            return _parse_authorize("POST", path, send_request(self._client, "POST", path, body))
         return self.local.authorize_local(run_id, body)
 
     async def aauthorize_local(
@@ -845,10 +930,9 @@ class ToolsResource:
             parent_call_id=parent_call_id,
         )
         if self.is_cloud:
-            return dict(
-                await self._arequest(
-                    "POST", f"/v1/tool-execution/runs/{run_id}/local/authorize", body
-                )
+            path = f"/v1/tool-execution/runs/{run_id}/local/authorize"
+            return _parse_authorize(
+                "POST", path, await asend_request(self._client, "POST", path, body)
             )
         return self.local.authorize_local(run_id, body)
 
@@ -863,6 +947,7 @@ class ToolsResource:
         repetition: int,
         attempt: int,
         parent_call_id: Optional[str],
+        permit: Optional[Mapping[str, Any]],
     ) -> dict[str, Any]:
         body = _identity(
             tool,
@@ -873,6 +958,8 @@ class ToolsResource:
             parent_call_id=parent_call_id,
         )
         body.update({"result": result, "is_error": is_error, "duration_ms": duration_ms})
+        if permit is not None:
+            body["permit"] = dict(permit)
         return body
 
     def report_local(
@@ -888,8 +975,13 @@ class ToolsResource:
         repetition: int = 1,
         attempt: int = 1,
         parent_call_id: Optional[str] = None,
+        permit: Optional[Mapping[str, Any]] = None,
     ) -> str:
         """Settle a call previously accepted by :meth:`authorize_local`.
+
+        ``permit`` is the signed permit returned by the authorize step of a
+        Protect run; it is sent verbatim and the gateway refuses the report
+        without it.
 
         Example:
             >>> from agenomic import Client
@@ -911,6 +1003,7 @@ class ToolsResource:
             repetition,
             attempt,
             parent_call_id,
+            permit,
         )
         if self.is_cloud:
             response = self._request("POST", f"/v1/tool-execution/runs/{run_id}/report-local", body)
@@ -931,6 +1024,7 @@ class ToolsResource:
         repetition: int = 1,
         attempt: int = 1,
         parent_call_id: Optional[str] = None,
+        permit: Optional[Mapping[str, Any]] = None,
     ) -> str:
         """Async counterpart of :meth:`report_local`.
 
@@ -949,6 +1043,7 @@ class ToolsResource:
             repetition,
             attempt,
             parent_call_id,
+            permit,
         )
         if self.is_cloud:
             response = await self._arequest(
@@ -965,8 +1060,14 @@ class ToolsResource:
         repetition: int = 1,
         local_functions: Optional[Mapping[str, LocalFunction]] = None,
         raise_on_error: bool = True,
+        before_action: Optional[BeforeAction] = None,
     ) -> ToolRouter:
         """A synchronous router bound to one run.
+
+        ``before_action`` receives the identity dict of every call (tool,
+        arguments, logical_call_id, repetition, attempt, parent_call_id)
+        before any request is sent; raising aborts the call, its return value
+        is ignored.
 
         Example:
             >>> from agenomic import Client
@@ -984,6 +1085,7 @@ class ToolsResource:
             repetition=repetition,
             local_functions=local_functions,
             raise_on_error=raise_on_error,
+            before_action=before_action,
         )
 
     def arouter(
@@ -993,6 +1095,7 @@ class ToolsResource:
         repetition: int = 1,
         local_functions: Optional[Mapping[str, LocalFunction]] = None,
         raise_on_error: bool = True,
+        before_action: Optional[BeforeAction] = None,
     ) -> AsyncToolRouter:
         """An asyncio router bound to one run; local functions may be coroutines.
 
@@ -1013,6 +1116,7 @@ class ToolsResource:
             repetition=repetition,
             local_functions=local_functions,
             raise_on_error=raise_on_error,
+            before_action=before_action,
         )
 
 
@@ -1038,6 +1142,36 @@ def _record_id_of(tool: str, decision: Mapping[str, Any]) -> str:
     return record_id
 
 
+def _decision_envelope(
+    decision: Mapping[str, Any], status: Literal["pending", "denied"]
+) -> ToolCallResult:
+    protect = decision.get("protect")
+    approval_id = decision.get("approval_id")
+    return ToolCallResult(
+        record_id=str(decision.get("record_id") or ""),
+        status=status,
+        provenance=ToolProvenance(source="unrouted", binding_mode="live"),
+        external_state="none",
+        protect=ProtectDecision.model_validate(protect) if isinstance(protect, Mapping) else None,
+        approval_id=str(approval_id) if approval_id else None,
+        decision=str(decision.get("decision")) if decision.get("decision") is not None else None,
+    )
+
+
+def _approval_status(record: Mapping[str, Any]) -> str:
+    return str(record.get("status") or "")
+
+
+@dataclass(frozen=True)
+class _PendingCall:
+    tool: str
+    arguments: dict[str, Any]
+    logical_call_id: str
+    attempt: int
+    parent_call_id: Optional[str]
+    envelope: ToolCallResult
+
+
 class _RouterBase:
     def __init__(
         self,
@@ -1047,18 +1181,105 @@ class _RouterBase:
         repetition: int,
         local_functions: Optional[Mapping[str, LocalFunction]],
         raise_on_error: bool,
+        before_action: Optional[BeforeAction] = None,
     ) -> None:
         self._tools = tools
         self.run_id = run_id
         self.repetition = repetition
         self._local = dict(local_functions or {})
         self._raise = raise_on_error
+        self._before_action = before_action
         self._sequence = 0
+        self._pending: dict[str, _PendingCall] = {}
         self.calls: list[ToolCallResult] = []
 
     def _next_call_id(self, tool: str) -> str:
         self._sequence += 1
         return f"{tool}#{self._sequence}"
+
+    def _begin(
+        self,
+        tool: str,
+        arguments: Optional[Mapping[str, Any]],
+        logical_call_id: Optional[str],
+        attempt: int,
+        parent_call_id: Optional[str],
+    ) -> tuple[dict[str, Any], str]:
+        args = dict(arguments or {})
+        call_id = logical_call_id or self._next_call_id(tool)
+        if self._before_action is not None:
+            self._before_action(
+                _identity(
+                    tool,
+                    args,
+                    logical_call_id=call_id,
+                    repetition=self.repetition,
+                    attempt=attempt,
+                    parent_call_id=parent_call_id,
+                )
+            )
+        return args, call_id
+
+    def _hold(
+        self,
+        tool: str,
+        args: dict[str, Any],
+        call_id: str,
+        attempt: int,
+        parent_call_id: Optional[str],
+        envelope: ToolCallResult,
+    ) -> ToolApprovalPending:
+        self.calls.append(envelope)
+        approval_id = envelope.approval_id or ""
+        if approval_id:
+            self._pending[approval_id] = _PendingCall(
+                tool, dict(args), call_id, attempt, parent_call_id, envelope
+            )
+        return ToolApprovalPending(tool, approval_id, envelope.record_id, envelope)
+
+    def _refuse(self, tool: str, envelope: ToolCallResult) -> ToolCallDenied:
+        self.calls.append(envelope)
+        return ToolCallDenied(tool, envelope)
+
+    def _pending_call(self, approval: Union[ToolApprovalPending, str]) -> tuple[str, _PendingCall]:
+        approval_id = (
+            approval.approval_id if isinstance(approval, ToolApprovalPending) else str(approval)
+        )
+        pending = self._pending.get(approval_id)
+        if pending is None:
+            raise ToolExecutionError(
+                "approval_unknown",
+                f"this router holds no pending call for approval {approval_id!r}",
+                0,
+            )
+        return approval_id, pending
+
+    @staticmethod
+    def _replay_error(
+        approval_id: str, pending: _PendingCall, status: str, error: ToolExecutionError
+    ) -> ToolExecutionError:
+        if status == "consumed" and error.status == 409:
+            return ToolExecutionError(
+                "conflict",
+                f"approval {approval_id} is consumed and {pending.tool} already executed; "
+                "the gateway refused to replay its result",
+                409,
+            )
+        return error
+
+    @staticmethod
+    def _granted(pending: _PendingCall, status: str, deadline: float) -> bool:
+        if status in _APPROVAL_GRANTED:
+            return True
+        if status != "pending":
+            raise ToolCallDenied(pending.tool, pending.envelope, code=status or "policy_denied")
+        if time.monotonic() >= deadline:
+            raise ToolExecutionError(
+                "approval_timeout",
+                f"approval for {pending.tool} was still pending after the timeout",
+                0,
+            )
+        return False
 
     @property
     def has_real_calls(self) -> bool:
@@ -1131,8 +1352,7 @@ class ToolRouter(_RouterBase):
             ...
             agenomic.tools.models.ToolExecutionError: not_found: tool run not found
         """
-        args = dict(arguments or {})
-        call_id = logical_call_id or self._next_call_id(tool)
+        args, call_id = self._begin(tool, arguments, logical_call_id, attempt, parent_call_id)
         if tool in self._local:
             decision = self._tools.authorize_local(
                 self.run_id,
@@ -1143,7 +1363,8 @@ class ToolRouter(_RouterBase):
                 attempt=attempt,
                 parent_call_id=parent_call_id,
             )
-            if decision.get("decision") == "local":
+            kind = decision.get("decision")
+            if kind == "local":
                 record_id = _record_id_of(tool, decision)
                 started = time.monotonic()
                 try:
@@ -1166,6 +1387,7 @@ class ToolRouter(_RouterBase):
                         repetition=self.repetition,
                         attempt=attempt,
                         parent_call_id=parent_call_id,
+                        permit=decision.get("permit"),
                     )
                 except Exception:
                     envelope.reported = False
@@ -1173,16 +1395,77 @@ class ToolRouter(_RouterBase):
                     self.calls.append(envelope)
                     raise
                 return self._finish(tool, envelope)
-        envelope = self._tools.invoke(
-            self.run_id,
-            tool,
-            args,
-            logical_call_id=call_id,
-            repetition=self.repetition,
-            attempt=attempt,
-            parent_call_id=parent_call_id,
-        )
+            if kind == "pending":
+                pending = _decision_envelope(decision, "pending")
+                raise self._hold(tool, args, call_id, attempt, parent_call_id, pending)
+            if kind != "gateway":
+                raise self._refuse(tool, _decision_envelope(decision, "denied"))
+        try:
+            envelope = self._tools.invoke(
+                self.run_id,
+                tool,
+                args,
+                logical_call_id=call_id,
+                repetition=self.repetition,
+                attempt=attempt,
+                parent_call_id=parent_call_id,
+            )
+        except ToolCallDenied as denied:
+            raise self._refuse(tool, denied.envelope) from None
+        if envelope.status == "pending":
+            raise self._hold(tool, args, call_id, attempt, parent_call_id, envelope)
+        if envelope.status == "denied":
+            raise self._refuse(tool, envelope)
         return self._finish(tool, envelope)
+
+    def resume(
+        self,
+        approval: Union[ToolApprovalPending, str],
+        *,
+        poll_interval: float = 2.0,
+        timeout: float = 900.0,
+    ) -> Any:
+        """Wait for an approval, then re-issue the identical call once granted.
+
+        Polls ``GET /v1/protect/approvals/{id}``. ``approved`` and ``consumed``
+        both re-issue the identical identity once, with the original
+        Idempotency-Key: a consumed approval already executed, so the replay
+        recovers its result. A 409 on that replay raises
+        :class:`ToolExecutionError` with code ``conflict``. ``rejected``,
+        ``expired`` or any other terminal status raises
+        :class:`ToolCallDenied` with that status as ``code``;
+        ``approval_timeout`` is raised when the approval is still pending
+        after ``timeout`` seconds. The re-issued call keeps the same tool,
+        arguments, logical_call_id, attempt and parent, so the gateway
+        resumes the pending claim exactly once.
+
+        Example:
+            >>> from agenomic import Client
+            >>> Client().tools.router("run").resume("apr_unknown")
+            Traceback (most recent call last):
+            ...
+            agenomic.tools.models.ToolExecutionError: approval_unknown: this router holds no pending call for approval 'apr_unknown'
+        """
+        approval_id, pending = self._pending_call(approval)
+        deadline = time.monotonic() + timeout
+        status = ""
+        while True:
+            record = self._tools._request("GET", f"/v1/protect/approvals/{approval_id}")
+            status = _approval_status(record)
+            if self._granted(pending, status, deadline):
+                break
+            time.sleep(max(0.0, min(poll_interval, deadline - time.monotonic())))
+        del self._pending[approval_id]
+        try:
+            return self.call(
+                pending.tool,
+                pending.arguments,
+                parent_call_id=pending.parent_call_id,
+                attempt=pending.attempt,
+                logical_call_id=pending.logical_call_id,
+            )
+        except ToolExecutionError as error:
+            raise self._replay_error(approval_id, pending, status, error) from None
 
     def wrap(self, tool: str) -> Callable[..., Any]:
         """Return a callable ``fn(**arguments)`` routed through this run.
@@ -1238,8 +1521,7 @@ class AsyncToolRouter(_RouterBase):
             ...
             agenomic.tools.models.ToolExecutionError: not_found: tool run not found
         """
-        args = dict(arguments or {})
-        call_id = logical_call_id or self._next_call_id(tool)
+        args, call_id = self._begin(tool, arguments, logical_call_id, attempt, parent_call_id)
         if tool in self._local:
             decision = await self._tools.aauthorize_local(
                 self.run_id,
@@ -1250,7 +1532,8 @@ class AsyncToolRouter(_RouterBase):
                 attempt=attempt,
                 parent_call_id=parent_call_id,
             )
-            if decision.get("decision") == "local":
+            kind = decision.get("decision")
+            if kind == "local":
                 record_id = _record_id_of(tool, decision)
                 started = time.monotonic()
                 try:
@@ -1274,6 +1557,7 @@ class AsyncToolRouter(_RouterBase):
                         repetition=self.repetition,
                         attempt=attempt,
                         parent_call_id=parent_call_id,
+                        permit=decision.get("permit"),
                     )
                 except Exception:
                     envelope.reported = False
@@ -1281,16 +1565,66 @@ class AsyncToolRouter(_RouterBase):
                     self.calls.append(envelope)
                     raise
                 return self._finish(tool, envelope)
-        envelope = await self._tools.ainvoke(
-            self.run_id,
-            tool,
-            args,
-            logical_call_id=call_id,
-            repetition=self.repetition,
-            attempt=attempt,
-            parent_call_id=parent_call_id,
-        )
+            if kind == "pending":
+                pending = _decision_envelope(decision, "pending")
+                raise self._hold(tool, args, call_id, attempt, parent_call_id, pending)
+            if kind != "gateway":
+                raise self._refuse(tool, _decision_envelope(decision, "denied"))
+        try:
+            envelope = await self._tools.ainvoke(
+                self.run_id,
+                tool,
+                args,
+                logical_call_id=call_id,
+                repetition=self.repetition,
+                attempt=attempt,
+                parent_call_id=parent_call_id,
+            )
+        except ToolCallDenied as denied:
+            raise self._refuse(tool, denied.envelope) from None
+        if envelope.status == "pending":
+            raise self._hold(tool, args, call_id, attempt, parent_call_id, envelope)
+        if envelope.status == "denied":
+            raise self._refuse(tool, envelope)
         return self._finish(tool, envelope)
+
+    async def resume(
+        self,
+        approval: Union[ToolApprovalPending, str],
+        *,
+        poll_interval: float = 2.0,
+        timeout: float = 900.0,
+    ) -> Any:
+        """Async counterpart of :meth:`ToolRouter.resume` (waits with ``asyncio.sleep``).
+
+        Example:
+            >>> import asyncio
+            >>> from agenomic import Client
+            >>> asyncio.run(Client().tools.arouter("run").resume("apr_unknown"))
+            Traceback (most recent call last):
+            ...
+            agenomic.tools.models.ToolExecutionError: approval_unknown: this router holds no pending call for approval 'apr_unknown'
+        """
+        approval_id, pending = self._pending_call(approval)
+        deadline = time.monotonic() + timeout
+        status = ""
+        while True:
+            record = await self._tools._arequest("GET", f"/v1/protect/approvals/{approval_id}")
+            status = _approval_status(record)
+            if self._granted(pending, status, deadline):
+                break
+            await asyncio.sleep(max(0.0, min(poll_interval, deadline - time.monotonic())))
+        del self._pending[approval_id]
+        try:
+            return await self.call(
+                pending.tool,
+                pending.arguments,
+                parent_call_id=pending.parent_call_id,
+                attempt=pending.attempt,
+                logical_call_id=pending.logical_call_id,
+            )
+        except ToolExecutionError as error:
+            raise self._replay_error(approval_id, pending, status, error) from None
 
     def wrap(self, tool: str) -> Callable[..., Awaitable[Any]]:
         """Return an ``async fn(**arguments)`` routed through this run.

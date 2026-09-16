@@ -20,6 +20,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrap them with `asyncio.run`. Wire types are pydantic models, replies are
   redacted (`DEFAULT_BRIDGE_REDACTION_RULES`) before export and handler
   failures are reported without the exception text.
+- Protect policy enforcement on the tool execution path: `ToolCallResult`
+  gains `denied` and `pending` statuses plus `protect`, `approval_id`,
+  `decision`, `transformation` and `safe_explanation`; `ToolApprovalPending`
+  (202) and `ToolCallDenied` (403) subclass `ToolExecutionError`; the routers
+  never execute a call the gateway did not admit, treat unknown decisions as
+  denied, forward the signed `permit` to `report-local`, accept a
+  `before_action` hook and resume approved calls with `router.resume(...)`.
+- `client.protect` gains `overlay`, `catalog`, `approvals`, `decisions`,
+  `policies`, `bindings`, `restrictions`, `kill_switch`, `simulate`,
+  `coverage` and `metrics_summary` (sync and async), all through the typed
+  transport with server error codes.
+- `instrument_openai(..., overlay=)` and `instrument_anthropic(..., overlay=)`
+  inject the Protect instruction overlay deterministically before the
+  request hash is computed.
+- The local tool engine refuses configurations carrying a `protect` block
+  (`protect_cloud_required`).
 
 - Complete documentation set under `docs/`: new pages for the API
   reference, exporters, canonical v0.3 runs, online tracking, keys &

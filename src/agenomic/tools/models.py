@@ -20,7 +20,7 @@ ToolResultSource = Literal[
     "runtime_local",
     "unrouted",
 ]
-ToolCallStatus = Literal["success", "error", "aborted", "timeout", "pending"]
+ToolCallStatus = Literal["success", "error", "aborted", "timeout", "pending", "denied"]
 ToolExternalState = Literal["none", "confirmed", "indeterminate"]
 
 
@@ -85,6 +85,39 @@ class ToolEffect(BaseModel):
     simulated: bool = False
 
 
+class ProtectDecision(BaseModel):
+    """Admission decision stamped on an invocation by the Protect gate.
+
+    Example:
+        >>> ProtectDecision(decision_id="d1", outcome="deny", effective_mode="enforce",
+        ...     policy_snapshot_digest="blake3:x", evaluated_at="2026-09-14T00:00:00Z").outcome
+        'deny'
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    decision_id: str
+    outcome: str
+    effective_mode: str
+    reason_codes: list[str] = Field(default_factory=list)
+    approval_id: Optional[str] = None
+    permit_ref: Optional[str] = None
+    policy_snapshot_digest: str
+    evaluated_at: str
+
+
+class SignedPermit(BaseModel):
+    """Signed execution permit returned by ``local/authorize``; forwarded verbatim.
+
+    Example:
+        >>> SignedPermit(document={"tool": "t"}, signature={"value": "s"}).document["tool"]
+        't'
+    """
+
+    document: dict[str, Any]
+    signature: dict[str, Any]
+
+
 class ToolCallResult(BaseModel):
     """Native tool result plus the Agenomic technical envelope.
 
@@ -97,7 +130,7 @@ class ToolCallResult(BaseModel):
         (True, 'static', False)
     """
 
-    result: JsonValue
+    result: JsonValue = None
     record_id: str
     status: ToolCallStatus
     provenance: ToolProvenance
@@ -106,6 +139,11 @@ class ToolCallResult(BaseModel):
     duration_ms: int = 0
     virtual_time: Optional[str] = None
     expected_error: bool = False
+    protect: Optional[ProtectDecision] = None
+    approval_id: Optional[str] = None
+    decision: Optional[str] = None
+    transformation: Optional[dict[str, Any]] = None
+    safe_explanation: Optional[str] = None
     #: False when a runtime-local function ran but its report never reached
     #: the gateway; the pending record stays indeterminate server-side.
     reported: bool = True
@@ -166,3 +204,50 @@ class ToolCallError(CloudError):
         super().__init__(f"tool {tool} returned {envelope.status} ({self.code})")
         self.tool = tool
         self.envelope = envelope
+
+
+class ToolCallDenied(ToolExecutionError):  # noqa: N818
+    """The Protect gate refused the call; nothing executed.
+
+    ``code`` is ``policy_denied`` for a gateway refusal and the approval
+    status (``rejected``, ``expired``) when a resumed approval was not granted.
+
+    Example:
+        >>> envelope = ToolCallResult(record_id="r", status="denied",
+        ...     provenance=ToolProvenance(source="unrouted"), external_state="none",
+        ...     safe_explanation="credit limit changes need a reviewer")
+        >>> error = ToolCallDenied("crm.update_customer", envelope)
+        >>> (error.code, error.status, error.tool)
+        ('policy_denied', 403, 'crm.update_customer')
+    """
+
+    def __init__(self, tool: str, envelope: ToolCallResult, *, code: str = "policy_denied") -> None:
+        reasons = envelope.protect.reason_codes if envelope.protect else []
+        detail = envelope.safe_explanation or ", ".join(reasons) or envelope.status
+        super().__init__(code, f"tool {tool} was not admitted: {detail}", 403)
+        self.tool = tool
+        self.envelope = envelope
+        self.decision = envelope.protect
+        self.transformation = envelope.transformation
+
+
+class ToolApprovalPending(ToolExecutionError):  # noqa: N818
+    """The call waits for a human approval; nothing executed yet.
+
+    Example:
+        >>> envelope = ToolCallResult(record_id="r", status="pending",
+        ...     provenance=ToolProvenance(source="unrouted"), external_state="none")
+        >>> error = ToolApprovalPending("payments.refund", "apr_1", "r", envelope)
+        >>> (error.code, error.status, error.approval_id)
+        ('approval_pending', 202, 'apr_1')
+    """
+
+    def __init__(
+        self, tool: str, approval_id: str, record_id: str, envelope: ToolCallResult
+    ) -> None:
+        super().__init__("approval_pending", f"tool {tool} waits for approval {approval_id}", 202)
+        self.tool = tool
+        self.approval_id = approval_id
+        self.record_id = record_id
+        self.envelope = envelope
+        self.decision = envelope.protect

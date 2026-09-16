@@ -127,6 +127,46 @@ synchronous.
 See `examples/10_tool_execution.py` and the cloud documentation
 `docs/tool-execution.md`.
 
+### Protect: policy enforcement
+
+A run whose configuration carries a `protect` block is admitted call by
+call by the cloud gateway. The router applies the decision and never
+executes what was not admitted: a call waiting for a human approval raises
+`ToolApprovalPending` (code `approval_pending`), a refused call raises
+`ToolCallDenied` (code `policy_denied`), an unknown decision string is
+treated as denied. Both land in `router.calls` with `status` `pending` or
+`denied` and carry the gateway `protect` decision.
+
+```python
+from agenomic.tools import ToolApprovalPending, ToolCallDenied
+
+router = tools.router(run["id"], before_action=lambda identity: audit(identity))
+try:
+    router.call("payments.refund", {"amount_minor": 90000, "currency": "EUR"})
+except ToolApprovalPending as pending:
+    # re-issues the same call once approved
+    router.resume(pending, poll_interval=2.0, timeout=900.0)
+except ToolCallDenied as denied:
+    print(denied.code, denied.envelope.safe_explanation)
+```
+
+`resume` polls the approval and raises `ToolCallDenied` with the approval
+status as code when it is rejected or expired; an approval already
+`consumed` is re-issued once with the original idempotency key, which
+recovers the stored result, or raises
+`ToolExecutionError("conflict", ..., 409)` when the gateway answers 409.
+`before_action` runs with
+the call identity before any request and aborts the call when it raises.
+Local functions forward the signed permit of a Protect run to
+`report-local`. Model calls are covered cooperatively: inject the run
+overlay with `instrument_openai(client, overlay=client.protect.overlay(run_id))`
+(first system message) or `instrument_anthropic(client, overlay=...)`
+(`system` prompt). `client.protect` exposes approvals, decisions, policies,
+bindings, restrictions, the kill switch, simulation and the coverage
+matrix. The local engine refuses `protect` configurations
+(`protect_cloud_required`): policies are evaluated by the gateway only. See
+`docs/protect.md`.
+
 ## Examples
 
 See [`examples/`](examples/) — minimal trace, decorator + JSONL, ATEP local,
