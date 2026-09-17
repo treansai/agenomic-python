@@ -246,6 +246,12 @@ class LocalToolEngine:
             raise _invalid("repetitions must be an integer between 1 and 500")
         if cfg.get("schema_version") != TOOL_EXECUTION_SCHEMA_VERSION:
             raise _invalid(f"schema_version must be {TOOL_EXECUTION_SCHEMA_VERSION!r}")
+        if "protect" in cfg:
+            raise ToolExecutionError(
+                "protect_cloud_required",
+                "protect runs are admitted by the Agenomic Cloud gateway only; the local engine evaluates no policy",
+                400,
+            )
         mode = cfg.get("mode")
         if mode not in ("mock", "live", "hybrid"):
             raise _invalid("mode must be mock, live or hybrid")

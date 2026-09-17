@@ -11,6 +11,10 @@ receives the tool's native result plus a typed technical envelope.
 from agenomic.tools.local import LocalToolEngine
 from agenomic.tools.models import (
     TOOL_EXECUTION_SCHEMA_VERSION,
+    ProtectDecision,
+    SignedPermit,
+    ToolApprovalPending,
+    ToolCallDenied,
     ToolCallError,
     ToolCallResult,
     ToolCallStatus,
@@ -26,6 +30,10 @@ __all__ = [
     "TOOL_EXECUTION_SCHEMA_VERSION",
     "AsyncToolRouter",
     "LocalToolEngine",
+    "ProtectDecision",
+    "SignedPermit",
+    "ToolApprovalPending",
+    "ToolCallDenied",
     "ToolCallError",
     "ToolCallResult",
     "ToolCallStatus",
