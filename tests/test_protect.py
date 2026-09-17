@@ -338,6 +338,8 @@ def test_resume_on_a_refused_approval_raises_without_reissuing(
         router.resume(pending.value, poll_interval=0)
     assert exc.value.code == status
     assert exc.value.tool == "payments.refund"
+    assert exc.value.envelope.status == "denied"
+    assert [c.status for c in router.calls] == ["pending", "denied"]
     assert _paths(httpx_mock) == ["invoke", APPROVAL]
 
 
@@ -478,6 +480,44 @@ async def test_async_before_action_raise_aborts(httpx_mock: Any) -> None:
     with pytest.raises(PermissionError):
         await router.call("crm.get")
     assert httpx_mock.get_requests() == []
+
+
+async def test_async_before_action_coroutine_hook_is_awaited_and_can_abort(
+    httpx_mock: Any,
+) -> None:
+    seen: list[dict[str, Any]] = []
+
+    async def hook(identity: dict[str, Any]) -> None:
+        seen.append(identity)
+        raise PermissionError("blocked")
+
+    effects: list[str] = []
+    router = _cloud().tools.arouter(
+        RUN,
+        local_functions={"email.send": lambda **_: effects.append("sent")},
+        before_action=hook,
+    )
+    with pytest.raises(PermissionError):
+        await router.call("email.send", {"to": "x@example.test"})
+    assert [i["tool"] for i in seen] == ["email.send"]
+    assert effects == []
+    assert httpx_mock.get_requests() == []
+
+
+def test_sync_router_refuses_a_coroutine_before_action_instead_of_skipping_it() -> None:
+    async def hook(_: dict[str, Any]) -> None:
+        raise PermissionError("blocked")
+
+    effects: list[str] = []
+    router = _cloud().tools.router(
+        RUN,
+        local_functions={"email.send": lambda **_: effects.append("sent")},
+        before_action=hook,
+    )
+    with pytest.raises(ToolExecutionError) as exc:
+        router.call("email.send", {"to": "x@example.test"})
+    assert exc.value.code == "invalid_hook"
+    assert effects == []
 
 
 def test_local_engine_refuses_a_protect_configuration() -> None:

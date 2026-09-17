@@ -1067,7 +1067,9 @@ class ToolsResource:
         ``before_action`` receives the identity dict of every call (tool,
         arguments, logical_call_id, repetition, attempt, parent_call_id)
         before any request is sent; raising aborts the call, its return value
-        is ignored.
+        is ignored. A coroutine hook cannot run here and raises
+        ``ToolExecutionError("invalid_hook", ...)``; pass it to
+        :meth:`arouter` instead.
 
         Example:
             >>> from agenomic import Client
@@ -1098,6 +1100,9 @@ class ToolsResource:
         before_action: Optional[BeforeAction] = None,
     ) -> AsyncToolRouter:
         """An asyncio router bound to one run; local functions may be coroutines.
+
+        ``before_action`` may be a coroutine function: an awaitable return is
+        awaited before the call is admitted.
 
         Example:
             >>> import asyncio
@@ -1197,17 +1202,21 @@ class _RouterBase:
         self._sequence += 1
         return f"{tool}#{self._sequence}"
 
-    def _begin(
+    def _prepare(
         self,
         tool: str,
         arguments: Optional[Mapping[str, Any]],
         logical_call_id: Optional[str],
         attempt: int,
         parent_call_id: Optional[str],
-    ) -> tuple[dict[str, Any], str]:
+    ) -> tuple[dict[str, Any], str, Any]:
         args = dict(arguments or {})
         call_id = logical_call_id or self._next_call_id(tool)
-        if self._before_action is not None:
+        if self._before_action is None:
+            return args, call_id, None
+        return (
+            args,
+            call_id,
             self._before_action(
                 _identity(
                     tool,
@@ -1217,7 +1226,44 @@ class _RouterBase:
                     attempt=attempt,
                     parent_call_id=parent_call_id,
                 )
+            ),
+        )
+
+    def _begin(
+        self,
+        tool: str,
+        arguments: Optional[Mapping[str, Any]],
+        logical_call_id: Optional[str],
+        attempt: int,
+        parent_call_id: Optional[str],
+    ) -> tuple[dict[str, Any], str]:
+        args, call_id, outcome = self._prepare(
+            tool, arguments, logical_call_id, attempt, parent_call_id
+        )
+        if inspect.isawaitable(outcome):
+            if inspect.iscoroutine(outcome):
+                outcome.close()
+            raise ToolExecutionError(
+                "invalid_hook",
+                "before_action returned an awaitable on the synchronous router; "
+                f"{tool} was not admitted because the hook could not run",
+                0,
             )
+        return args, call_id
+
+    async def _abegin(
+        self,
+        tool: str,
+        arguments: Optional[Mapping[str, Any]],
+        logical_call_id: Optional[str],
+        attempt: int,
+        parent_call_id: Optional[str],
+    ) -> tuple[dict[str, Any], str]:
+        args, call_id, outcome = self._prepare(
+            tool, arguments, logical_call_id, attempt, parent_call_id
+        )
+        if inspect.isawaitable(outcome):
+            await outcome
         return args, call_id
 
     def _hold(
@@ -1267,12 +1313,13 @@ class _RouterBase:
             )
         return error
 
-    @staticmethod
-    def _granted(pending: _PendingCall, status: str, deadline: float) -> bool:
+    def _granted(self, pending: _PendingCall, status: str, deadline: float) -> bool:
         if status in _APPROVAL_GRANTED:
             return True
         if status != "pending":
-            raise ToolCallDenied(pending.tool, pending.envelope, code=status or "policy_denied")
+            envelope = pending.envelope.model_copy(update={"status": "denied"})
+            self.calls.append(envelope)
+            raise ToolCallDenied(pending.tool, envelope, code=status or "policy_denied")
         if time.monotonic() >= deadline:
             raise ToolExecutionError(
                 "approval_timeout",
@@ -1521,7 +1568,9 @@ class AsyncToolRouter(_RouterBase):
             ...
             agenomic.tools.models.ToolExecutionError: not_found: tool run not found
         """
-        args, call_id = self._begin(tool, arguments, logical_call_id, attempt, parent_call_id)
+        args, call_id = await self._abegin(
+            tool, arguments, logical_call_id, attempt, parent_call_id
+        )
         if tool in self._local:
             decision = await self._tools.aauthorize_local(
                 self.run_id,

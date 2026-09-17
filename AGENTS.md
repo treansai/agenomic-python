@@ -56,7 +56,11 @@ This file governs **developing this repository**. If you are an agent
   409 means the evidence stands but cannot be replayed and raises
   `ToolExecutionError("conflict", ..., 409)`, never a denial that would
   suggest nothing ran. `rejected`, `expired` and any other terminal status
-  stay `ToolCallDenied` with that status as `code`. The router only resumes
+  stay `ToolCallDenied` with that status as `code`, and the refusal is
+  recorded: the pending envelope is copied with `status="denied"`, appended to
+  `router.calls` and carried by the error, so an audit consumer tells a
+  terminal refusal from an approval still waiting instead of seeing `pending`
+  in both cases. The router only resumes
   approvals it held itself: it has no other honest source for the identity.
 - The consumed recovery contract is verified against a real gateway, not only
   against an HTTP fixture: `examples/11_protect_consumed_recovery.py` is the
@@ -80,7 +84,12 @@ This file governs **developing this repository**. If you are an agent
   receive the same 202 and approval id. This is deliberate: a router must not
   invent an identity it did not hold.
 - `before_action` runs before every request, including on resume, and its
-  return value is ignored: a hook can only abort, never widen.
+  return value is ignored: a hook can only abort, never widen. `AsyncToolRouter`
+  awaits an awaitable return so an `async def` hook actually runs before the
+  call is admitted; `ToolRouter` cannot await, so it closes the coroutine and
+  raises `ToolExecutionError("invalid_hook", ..., 0)` rather than discarding
+  it, since a silently skipped hook would let a call the hook meant to abort
+  proceed.
 - `client.protect` subclasses the RMP `ProtectResource` and routes every new
   method through `agenomic.tools.resources.typed_request` so refusals carry
   the server error code; local mode raises `cloud_required` because there is

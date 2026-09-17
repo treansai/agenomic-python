@@ -185,7 +185,9 @@ def main() -> None:
     binding = admin.protect.bindings.create(POLICY_ID, VERSION, "agent", AGENT, mode="enforce")
     note("binding", id=binding["id"], status=binding["status"])
 
-    run = caller.tools.create_run(name=f"protect-consumed-py-{uuid.uuid4().hex[:8]}", config_text=CONFIG)
+    run = caller.tools.create_run(
+        name=f"protect-consumed-py-{uuid.uuid4().hex[:8]}", config_text=CONFIG
+    )
     caller.tools.approve_run(run["id"], plan_hash=run["plan_hash"])
     caller.tools.start_run(run["id"])
     run_id = run["id"]
@@ -224,15 +226,24 @@ def main() -> None:
         replayed = router_b.resume(pending.approval_id, poll_interval=0.2, timeout=30)
         outcome = {"kind": "recovered", "result": replayed}
     except ToolExecutionError as error:
-        outcome = {"kind": "error", "code": error.code, "status": http_status(error), "message": str(error)}
+        outcome = {
+            "kind": "error",
+            "code": error.code,
+            "status": http_status(error),
+            "message": str(error),
+        }
     note("A.consumed_resume", **outcome, endpoint_calls=endpoint_count())
     check(
-        "A: consumed resume either recovers the stored result or raises conflict",
-        outcome["kind"] == "recovered" or outcome.get("code") == "conflict",
+        "A: the consumed resume recovers the stored result on the gateway path",
+        outcome["kind"] == "recovered",
         outcome,
     )
     if outcome["kind"] == "recovered":
-        check("A: the replayed result is the stored one", outcome["result"] == result, outcome["result"])
+        check(
+            "A: the replayed result is the stored one",
+            outcome["result"] == result,
+            outcome["result"],
+        )
     check("A: the consumed resume ran no second effect", endpoint_count() == before + 1)
     check("A: still exactly one settled invocation", len(settled(run_id, "gw-1")) == 1)
 
@@ -253,11 +264,16 @@ def main() -> None:
         replayed = router_d.resume(pending.approval_id, poll_interval=0.2, timeout=30)
         outcome = {"kind": "recovered", "result": replayed}
     except ToolExecutionError as error:
-        outcome = {"kind": "error", "code": error.code, "status": http_status(error), "message": str(error)}
+        outcome = {
+            "kind": "error",
+            "code": error.code,
+            "status": http_status(error),
+            "message": str(error),
+        }
     note("B.consumed_resume", **outcome, local_calls=len(LOCAL_CALLS))
     check(
-        "B: consumed resume either recovers the stored result or raises conflict",
-        outcome["kind"] == "recovered" or outcome.get("code") == "conflict",
+        "B: the consumed resume raises conflict on the runtime local path",
+        outcome["kind"] == "error" and outcome.get("code") == "conflict",
         outcome,
     )
     check("B: the local function still ran once", len(LOCAL_CALLS) == 1, LOCAL_CALLS)
@@ -265,7 +281,11 @@ def main() -> None:
     before = endpoint_count()
     router_e = caller.tools.router(run_id, local_functions=locals_map)
     try:
-        router_e.call("crm.update_customer", {"customer_id": "c-2", "fields": {"credit_limit": 9000}}, logical_call_id="gw-2")
+        router_e.call(
+            "crm.update_customer",
+            {"customer_id": "c-2", "fields": {"credit_limit": 9000}},
+            logical_call_id="gw-2",
+        )
         check("C: pending raised", False)
     except ToolApprovalPending as pending_c:
         pending = pending_c
@@ -281,7 +301,11 @@ def main() -> None:
 
     router_f = caller.tools.router(run_id, local_functions=locals_map)
     try:
-        router_f.call("crm.update_customer", {"customer_id": "c-3", "fields": {"credit_limit": 1000}}, logical_call_id="gw-3")
+        router_f.call(
+            "crm.update_customer",
+            {"customer_id": "c-3", "fields": {"credit_limit": 1000}},
+            logical_call_id="gw-3",
+        )
         check("D: pending raised", False)
     except ToolApprovalPending as pending_d:
         pending = pending_d
