@@ -4,7 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/agenomic.svg)](https://pypi.org/project/agenomic/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-Python SDK for [Agenomic](https://agenomic.dev) — agent-native versioning, tracing, and ATEP signed event logs.
+Python SDK for [Agenomic](https://agenomic.io) — agent-native versioning, tracing, and ATEP signed event logs.
 
 Works fully offline. Cloud upload is optional.
 
