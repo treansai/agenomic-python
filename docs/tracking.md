@@ -78,14 +78,18 @@ manager — leaving the `with` block calls `stop()`.
 ## From a framework
 
 Emitting by hand is only worth it for code you own. For a LangChain or
-LangGraph app, `TrackingCallbackHandler` mirrors every run into the session
-on its own — turns, nodes, model calls, tools and retrievers, with
-`span_id`/`parent_span_id` and token usage. See
+LangGraph app, `TrackingCallbackHandler` mirrors every run into the session on
+its own — turns, nodes, model calls, tools and retrievers, with timings and
+token usage. A turn carries only its `turn_id`; the spans beneath it add
+`span_id`/`parent_span_id`. See
 [integrations.md](integrations.md#langchain-live-tracking).
 
 Producers that buffer, like that handler, register teardown with
-`session.on_stop(callback)`; `stop()` runs those callbacks while the session
-still accepts events, so nothing queued is lost.
+`session.on_stop(callback)`. `stop()` runs those callbacks before it closes the
+session, so a producer can still drain into it; each callback runs at most once
+even if a failed `stop()` is retried. The drain is bounded by the callback's
+own timeout, not guaranteed — the handler gives itself 5 seconds and counts
+whatever is left as dropped.
 
 ## Reading back
 

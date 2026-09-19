@@ -86,6 +86,11 @@ class TrackingSession:
         return bool(getattr(self._client, "is_cloud", False))
 
     @property
+    def stopped(self) -> bool:
+        """``True`` once :meth:`stop` has finalized the session."""
+        return self._stopped
+
+    @property
     def events(self) -> list[dict[str, Any]]:
         """Events buffered in local mode (empty in cloud mode)."""
         return list(self._events)

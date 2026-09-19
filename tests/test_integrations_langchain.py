@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import threading
 from uuid import uuid4
 
 import pytest
@@ -266,8 +268,8 @@ async def test_usage_skips_choices_without_metadata_and_sums_batches() -> None:
     response = LLMResult(
         generations=[
             [
-                ChatGeneration(message=AIMessage(content="a", usage_metadata=first)),
-                ChatGeneration(message=AIMessage(content="b")),
+                ChatGeneration(message=AIMessage(content="a")),
+                ChatGeneration(message=AIMessage(content="b", usage_metadata=first)),
             ],
             [ChatGeneration(message=AIMessage(content="c", usage_metadata=second))],
         ]
@@ -284,3 +286,105 @@ async def test_usage_skips_choices_without_metadata_and_sums_batches() -> None:
     assert completed["usage"]["input_tokens"] == 17, "each batch is a separate request"
     assert completed["usage"]["output_tokens"] == 8
     assert completed["usage"]["total_tokens"] == 25
+
+
+async def test_flush_times_out_when_the_gateway_hangs(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _session()
+    released = threading.Event()
+
+    def block(event_type: str, **fields: object) -> dict[str, object]:
+        released.wait(5.0)
+        return {}
+
+    monkeypatch.setattr(session, "event", block)
+    handler = TrackingCallbackHandler(session)
+    await handler.on_chain_start({}, {}, run_id=uuid4())
+    try:
+        assert flush(session, timeout=0.05) is False, "a wedged worker must not report success"
+    finally:
+        released.set()
+
+
+async def test_stopping_a_session_that_dropped_events_logs_a_total(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    session = _session()
+
+    def explode(event_type: str, **fields: object) -> dict[str, object]:
+        raise CloudError("gateway down")
+
+    monkeypatch.setattr(session, "event", explode)
+    handler = TrackingCallbackHandler(session)
+    root = uuid4()
+    await handler.on_chain_start({}, {}, run_id=root)
+    await handler.on_chain_end({}, run_id=root)
+
+    with caplog.at_level(logging.WARNING, logger="agenomic.integrations.langchain"):
+        session.stop()
+    assert "2 event(s) dropped" in caplog.text
+
+
+async def test_emitting_after_stop_is_counted_and_logged_not_queued(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session = _session()
+    handler = TrackingCallbackHandler(session)
+    dispatcher = handler._dispatcher
+    await handler.on_chain_start({}, {}, run_id=uuid4())
+    session.stop()
+
+    with caplog.at_level(logging.WARNING, logger="agenomic.integrations.langchain"):
+        await handler.on_chain_start({}, {}, run_id=uuid4())
+    assert dispatcher.failures == 1, "a closed emitter counts what it refuses"
+    assert "emitter closed with the session" in caplog.text
+    assert dispatcher._queue.unfinished_tasks == 0, "nothing is queued behind a dead worker"
+
+
+async def test_a_handler_built_after_stop_leaves_no_worker_behind() -> None:
+    session = _session()
+    session.stop()
+
+    handler = TrackingCallbackHandler(session)
+    await handler.on_chain_start({}, {}, run_id=uuid4())
+
+    assert session.session_id not in _dispatchers
+    handler._dispatcher._thread.join(timeout=2.0)
+    assert handler._dispatcher._thread.is_alive() is False
+    assert dropped_events(session) == 0, "an unregistered emitter is not reported on the session"
+
+
+async def test_a_failing_stop_callback_does_not_break_stop(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    session = _session()
+    session.on_stop(lambda: (_ for _ in ()).throw(RuntimeError("teardown exploded")))
+
+    with caplog.at_level(logging.WARNING, logger="agenomic.tracking"):
+        session.stop()
+    assert session.stopped is True
+    assert "stop callback failed" in caplog.text
+
+
+def test_stop_callbacks_run_once_across_a_retried_stop() -> None:
+    session = _session()
+    calls: list[int] = []
+    session.on_stop(lambda: calls.append(1))
+
+    session.stop()
+    session.stop()
+    assert calls == [1]
+
+
+async def test_handlers_on_one_session_share_a_single_emitter() -> None:
+    session = _session()
+    first, second = TrackingCallbackHandler(session), TrackingCallbackHandler(session)
+    assert first._dispatcher is second._dispatcher, "one worker per session, not per handler"
+
+    await first.on_chain_start({}, {}, run_id=uuid4())
+    await second.on_chain_start({}, {}, run_id=uuid4())
+    thread = first._dispatcher._thread
+    session.stop()
+
+    assert session.session_id not in _dispatchers
+    thread.join(timeout=2.0)
+    assert thread.is_alive() is False, "one teardown is registered, not one per handler"

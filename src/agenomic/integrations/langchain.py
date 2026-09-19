@@ -71,33 +71,49 @@ class _Dispatcher:
         self._session = session
         self._queue: queue.Queue[tuple[str, dict[str, Any]] | None] = queue.Queue()
         self._failures = 0
+        self._closed = False
         self._thread = threading.Thread(
             target=self._run, name=f"agenomic-tracking-{session.session_id}", daemon=True
         )
         self._thread.start()
 
     def submit(self, event_type: str, fields: dict[str, Any]) -> None:
+        if self._closed:
+            self._drop(event_type, "emitter closed with the session")
+            return
         self._queue.put((event_type, fields))
 
-    def flush(self, timeout: float | None = None) -> bool:
-        """Block until every queued event has been emitted (or ``timeout`` elapses).
+    def _drop(self, event_type: str, reason: object) -> None:
+        self._failures += 1
+        if self._failures <= 3:
+            logger.warning(
+                "tracking event %s dropped for session %s: %s",
+                event_type,
+                self._session.session_id,
+                reason,
+            )
 
-        Returns ``False`` when the timeout elapsed first or when an event was
-        dropped while draining, so a caller can tell delivery from drainage.
+    def flush(self, timeout: float | None = None) -> bool:
+        """Block until the queue is empty (or ``timeout`` elapses).
+
+        Returns ``False`` when the timeout elapsed first, or when any event has
+        been dropped for this session, so a caller can tell delivery from mere
+        drainage. Drops are permanent, so this stays ``False`` afterwards.
         """
-        dropped = self._failures
         deadline = None if timeout is None else time.monotonic() + timeout
         while self._queue.unfinished_tasks:
             if deadline is not None and time.monotonic() > deadline:
                 return False
             time.sleep(0.01)
-        return self._failures == dropped
+        return self._failures == 0
 
     def close(self, timeout: float | None = None) -> bool:
-        """Drain, then stop the worker thread. Returns what :meth:`flush` returned."""
+        """Refuse new events, drain, then stop the worker. ``timeout`` is the total."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        self._closed = True
         drained = self.flush(timeout)
         self._queue.put(None)
-        self._thread.join(timeout)
+        self._thread.join(None if deadline is None else max(0.0, deadline - time.monotonic()))
         if self._failures:
             logger.warning(
                 "tracking session %s: %d event(s) dropped",
@@ -122,14 +138,7 @@ class _Dispatcher:
             # Anything the session raises is the caller's telemetry, not their
             # run: one bad event must never take the worker down with it.
             except Exception as exc:
-                self._failures += 1
-                if self._failures <= 3:
-                    logger.warning(
-                        "tracking event %s dropped for session %s: %s",
-                        event_type,
-                        self._session.session_id,
-                        exc,
-                    )
+                self._drop(event_type, exc)
             finally:
                 self._queue.task_done()
 
@@ -141,14 +150,20 @@ _dispatchers_lock = threading.Lock()
 def _dispatcher_for(session: TrackingSession) -> _Dispatcher:
     with _dispatchers_lock:
         dispatcher = _dispatchers.get(session.session_id)
-        if dispatcher is None:
-            dispatcher = _Dispatcher(session)
-            _dispatchers[session.session_id] = dispatcher
+        if dispatcher is not None:
+            return dispatcher
+        dispatcher = _Dispatcher(session)
+        if session.stopped:
+            # No stop() left to run a teardown, so never register a worker the
+            # session can no longer reclaim.
+            dispatcher.close(0.0)
+            return dispatcher
+        _dispatchers[session.session_id] = dispatcher
 
-            def _teardown() -> None:
-                shutdown(session)
+        def _teardown() -> None:
+            shutdown(session)
 
-            session.on_stop(_teardown)
+        session.on_stop(_teardown)
         return dispatcher
 
 
@@ -157,7 +172,7 @@ def flush(session: TrackingSession, timeout: float | None = 5.0) -> bool:
 
     ``TrackingSession.stop`` drains and tears the emitter down on its own, so
     call this only to checkpoint mid-session. Returns ``False`` when ``timeout``
-    elapsed first or when an event was dropped while draining; read
+    elapsed first or when any event has been dropped; read
     :func:`dropped_events` for the count.
 
     Example:
@@ -192,8 +207,8 @@ def dropped_events(session: TrackingSession) -> int:
     """How many events failed to reach the cloud for ``session`` so far.
 
     Read it before ``stop()``: teardown forgets the emitter, and a session with
-    no emitter reports ``0``. The worker logs the first three drops and a total
-    at shutdown.
+    no emitter reports ``0``. Drops are also logged, the first three
+    individually and a total at shutdown, so they are never silent.
 
     Example:
         >>> from agenomic import Client
