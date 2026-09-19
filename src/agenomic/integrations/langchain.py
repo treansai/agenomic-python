@@ -32,7 +32,6 @@ from uuid import UUID
 
 from agenomic.crypto.canonical import canonical_cbor
 from agenomic.crypto.hashing import blake3_hex
-from agenomic.exceptions import CloudError
 from agenomic.tracking.session import TrackingSession
 
 try:
@@ -81,13 +80,31 @@ class _Dispatcher:
         self._queue.put((event_type, fields))
 
     def flush(self, timeout: float | None = None) -> bool:
-        """Block until every queued event has been emitted (or ``timeout`` elapses)."""
+        """Block until every queued event has been emitted (or ``timeout`` elapses).
+
+        Returns ``False`` when the timeout elapsed first or when an event was
+        dropped while draining, so a caller can tell delivery from drainage.
+        """
+        dropped = self._failures
         deadline = None if timeout is None else time.monotonic() + timeout
         while self._queue.unfinished_tasks:
             if deadline is not None and time.monotonic() > deadline:
                 return False
             time.sleep(0.01)
-        return True
+        return self._failures == dropped
+
+    def close(self, timeout: float | None = None) -> bool:
+        """Drain, then stop the worker thread. Returns what :meth:`flush` returned."""
+        drained = self.flush(timeout)
+        self._queue.put(None)
+        self._thread.join(timeout)
+        if self._failures:
+            logger.warning(
+                "tracking session %s: %d event(s) dropped",
+                self._session.session_id,
+                self._failures,
+            )
+        return drained
 
     @property
     def failures(self) -> int:
@@ -97,11 +114,14 @@ class _Dispatcher:
         while True:
             item = self._queue.get()
             if item is None:
+                self._queue.task_done()
                 return
             event_type, fields = item
             try:
                 self._session.event(event_type, **fields)
-            except (CloudError, RuntimeError, ValueError) as exc:
+            # Anything the session raises is the caller's telemetry, not their
+            # run: one bad event must never take the worker down with it.
+            except Exception as exc:
                 self._failures += 1
                 if self._failures <= 3:
                     logger.warning(
@@ -124,14 +144,21 @@ def _dispatcher_for(session: TrackingSession) -> _Dispatcher:
         if dispatcher is None:
             dispatcher = _Dispatcher(session)
             _dispatchers[session.session_id] = dispatcher
+
+            def _teardown() -> None:
+                shutdown(session)
+
+            session.on_stop(_teardown)
         return dispatcher
 
 
 def flush(session: TrackingSession, timeout: float | None = 5.0) -> bool:
     """Wait until every event queued for ``session`` has been sent.
 
-    Call it before :meth:`TrackingSession.stop` so the last spans of a turn
-    reach the cloud. Returns ``False`` when ``timeout`` elapsed first.
+    ``TrackingSession.stop`` drains and tears the emitter down on its own, so
+    call this only to checkpoint mid-session. Returns ``False`` when ``timeout``
+    elapsed first or when an event was dropped while draining; read
+    :func:`dropped_events` for the count.
 
     Example:
         >>> from agenomic import Client
@@ -142,6 +169,41 @@ def flush(session: TrackingSession, timeout: float | None = 5.0) -> bool:
     with _dispatchers_lock:
         dispatcher = _dispatchers.get(session.session_id)
     return True if dispatcher is None else dispatcher.flush(timeout)
+
+
+def shutdown(session: TrackingSession, timeout: float | None = 5.0) -> bool:
+    """Drain ``session``'s emitter, stop its worker thread and forget it.
+
+    Registered on :meth:`TrackingSession.on_stop` the first time a handler is
+    built, so ``session.stop()`` already calls it. Idempotent.
+
+    Example:
+        >>> from agenomic import Client
+        >>> session = Client().tracking.start(agent="agent://acme/support")
+        >>> shutdown(session)
+        True
+    """
+    with _dispatchers_lock:
+        dispatcher = _dispatchers.pop(session.session_id, None)
+    return True if dispatcher is None else dispatcher.close(timeout)
+
+
+def dropped_events(session: TrackingSession) -> int:
+    """How many events failed to reach the cloud for ``session`` so far.
+
+    Read it before ``stop()``: teardown forgets the emitter, and a session with
+    no emitter reports ``0``. The worker logs the first three drops and a total
+    at shutdown.
+
+    Example:
+        >>> from agenomic import Client
+        >>> session = Client().tracking.start(agent="agent://acme/support")
+        >>> dropped_events(session)
+        0
+    """
+    with _dispatchers_lock:
+        dispatcher = _dispatchers.get(session.session_id)
+    return 0 if dispatcher is None else dispatcher.failures
 
 
 @dataclass
@@ -589,6 +651,9 @@ def _usage(response: Any) -> dict[str, Any] | None:
     usage: dict[str, Any] = {}
     generations = getattr(response, "generations", None) or []
     for batch in generations:
+        # One batch is one request, and providers attach that request's usage to
+        # every choice, so count the first choice that carries it and stop:
+        # summing the batch would multiply the tokens by n.
         for generation in batch:
             message = getattr(generation, "message", None)
             meta = getattr(message, "usage_metadata", None)
@@ -596,6 +661,7 @@ def _usage(response: Any) -> dict[str, Any] | None:
                 for key in ("input_tokens", "output_tokens", "total_tokens"):
                     if isinstance(meta.get(key), int):
                         usage[key] = usage.get(key, 0) + meta[key]
+                break
     if not usage:
         token_usage = (getattr(response, "llm_output", None) or {}).get("token_usage") or {}
         aliases = {

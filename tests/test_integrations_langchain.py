@@ -10,7 +10,13 @@ from langchain_core.outputs import ChatGeneration, LLMResult
 
 from agenomic import Client
 from agenomic.exceptions import CloudError
-from agenomic.integrations.langchain import TrackingCallbackHandler, flush
+from agenomic.integrations.langchain import (
+    TrackingCallbackHandler,
+    _dispatchers,
+    dropped_events,
+    flush,
+    shutdown,
+)
 from agenomic.tracking import TrackingSession
 
 
@@ -171,6 +177,110 @@ async def test_transport_failures_never_reach_the_caller(monkeypatch: pytest.Mon
     root = uuid4()
     await handler.on_chain_start({}, {}, run_id=root)
     await handler.on_chain_end({}, run_id=root)
-    assert flush(session)
-    assert handler._dispatcher.failures == 2
+    assert flush(session) is False, "a drained-but-dropped flush is not a success"
+    assert dropped_events(session) == 2
     assert session.events == []
+
+
+async def test_worker_survives_an_exception_outside_the_transport_types(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session()
+    calls: list[str] = []
+
+    real_event = session.event
+
+    def flaky(event_type: str, **fields: object) -> dict[str, object]:
+        calls.append(event_type)
+        if event_type == "turn.started":
+            raise TypeError("Object of type Foo is not JSON serializable")
+        return real_event(event_type, **fields)
+
+    monkeypatch.setattr(session, "event", flaky)
+    handler = TrackingCallbackHandler(session)
+    root = uuid4()
+    await handler.on_chain_start({}, {}, run_id=root)
+    await handler.on_chain_end({}, run_id=root)
+
+    assert flush(session) is False
+    assert handler._dispatcher._thread.is_alive(), "one bad event must not kill the worker"
+    assert calls == ["turn.started", "turn.completed"], "the next event is still attempted"
+    assert [e["type"] for e in session.events] == ["turn.completed"]
+    assert dropped_events(session) == 1
+
+
+async def test_stopping_the_session_drains_and_tears_down_the_worker() -> None:
+    session = _session()
+    handler = TrackingCallbackHandler(session)
+    root = uuid4()
+    await handler.on_chain_start({}, {}, run_id=root)
+    await handler.on_chain_end({}, run_id=root)
+
+    thread = handler._dispatcher._thread
+    assert session.session_id in _dispatchers
+
+    session.stop()
+
+    assert session.session_id not in _dispatchers, "the registry must not retain stopped sessions"
+    thread.join(timeout=2.0)
+    assert thread.is_alive() is False, "the worker thread must exit on shutdown"
+    assert [e["type"] for e in session.events] == ["turn.started", "turn.completed"]
+
+    assert shutdown(session) is True, "shutdown is idempotent"
+    assert flush(session) is True
+
+
+async def test_usage_counts_one_generation_per_batch() -> None:
+    session = _session()
+    handler = TrackingCallbackHandler(session)
+    root, llm = uuid4(), uuid4()
+    usage = {"input_tokens": 1000, "output_tokens": 200, "total_tokens": 1200}
+    response = LLMResult(
+        generations=[
+            [
+                ChatGeneration(message=AIMessage(content="a", usage_metadata=usage)),
+                ChatGeneration(message=AIMessage(content="b", usage_metadata=usage)),
+            ]
+        ]
+    )
+
+    await handler.on_chain_start({}, {}, run_id=root)
+    await handler.on_llm_start(
+        {}, ["p"], run_id=llm, parent_run_id=root, invocation_params={"model": "m"}
+    )
+    await handler.on_llm_end(response, run_id=llm, parent_run_id=root)
+    assert flush(session)
+
+    completed = next(e for e in session.events if e["type"] == "model.call.completed")
+    assert completed["usage"]["input_tokens"] == 1000, "n>1 must not multiply the response usage"
+    assert completed["usage"]["output_tokens"] == 200
+    assert completed["usage"]["total_tokens"] == 1200
+
+
+async def test_usage_skips_choices_without_metadata_and_sums_batches() -> None:
+    session = _session()
+    handler = TrackingCallbackHandler(session)
+    root, llm = uuid4(), uuid4()
+    first = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+    second = {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
+    response = LLMResult(
+        generations=[
+            [
+                ChatGeneration(message=AIMessage(content="a", usage_metadata=first)),
+                ChatGeneration(message=AIMessage(content="b")),
+            ],
+            [ChatGeneration(message=AIMessage(content="c", usage_metadata=second))],
+        ]
+    )
+
+    await handler.on_chain_start({}, {}, run_id=root)
+    await handler.on_llm_start(
+        {}, ["p", "q"], run_id=llm, parent_run_id=root, invocation_params={"model": "m"}
+    )
+    await handler.on_llm_end(response, run_id=llm, parent_run_id=root)
+    assert flush(session)
+
+    completed = next(e for e in session.events if e["type"] == "model.call.completed")
+    assert completed["usage"]["input_tokens"] == 17, "each batch is a separate request"
+    assert completed["usage"]["output_tokens"] == 8
+    assert completed["usage"]["total_tokens"] == 25

@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 from datetime import datetime, timezone
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import ulid
 
 from agenomic.exceptions import CloudError
+
+logger = logging.getLogger("agenomic.tracking")
 
 SPEC_VERSION = "agenomic/v0.3"
 
@@ -76,6 +79,7 @@ class TrackingSession:
         self._seq = 0
         self._events: list[dict[str, Any]] = []
         self._stopped = False
+        self._on_stop: list[Callable[[], None]] = []
 
     @property
     def cloud(self) -> bool:
@@ -182,10 +186,27 @@ class TrackingSession:
         metadata = {"schema_version": schema_version} if schema_version else None
         return self._emit("memory.write", output_hash=output_hash, metadata=metadata)
 
+    def on_stop(self, callback: Callable[[], None]) -> None:
+        """Register a callback to run once when the session stops.
+
+        Callbacks run at the top of :meth:`stop`, while the session still
+        accepts events, so a buffering producer can drain into it. Each one
+        runs at most once even if an earlier ``stop()`` failed and is retried.
+        """
+        self._on_stop.append(callback)
+
     def stop(self) -> None:
         """Finalize the session. Idempotent."""
         if self._stopped:
             return
+        while self._on_stop:
+            callback = self._on_stop.pop()
+            try:
+                callback()
+            except Exception:
+                logger.warning(
+                    "tracking session %s: stop callback failed", self.session_id, exc_info=True
+                )
         # Mark stopped only after a successful stop so a failed cloud POST stays
         # retryable and the remote session isn't orphaned.
         if self.cloud:
