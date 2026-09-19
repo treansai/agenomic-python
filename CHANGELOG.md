@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-20
+
+### Changed
+
+- The package version is derived from the git tag at build time (hatch-vcs);
+  `agenomic.__version__` reads the installed distribution metadata.
+
 ### Added
 
 - `client.benchmarks` (cloud only): catalogue, plans, preflight, idempotent
