@@ -10,14 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Check tag matches package version
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          v="$(python -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
-          [ "${GITHUB_REF_NAME}" = "v${v}" ] || { echo "tag ${GITHUB_REF_NAME} does not match pyproject version ${v}"; exit 1; }
       - name: Install build
         run: python -m pip install --upgrade pip build
       - name: Build wheel and sdist
