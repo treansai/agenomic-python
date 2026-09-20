@@ -1,9 +1,13 @@
 # Integrations
 
 `agenomic-python` ships first-party integrations for OpenAI, Anthropic,
-LangGraph, and MCP — all **optional and lazy-imported**. You can
-`import agenomic.integrations.openai` without `openai` installed; the
-import error only raises when you call `instrument_openai()`.
+LangGraph, LangChain, and MCP — all **optional**. The `instrument_*` ones are
+lazy: you can `import agenomic.integrations.openai` without `openai`
+installed, and the import error only raises when you call
+`instrument_openai()`. The LangChain handler is the exception — it subclasses
+a `langchain_core` type, so importing `agenomic.integrations.langchain`
+without the extra raises immediately. Importing the `agenomic.integrations`
+package itself is always safe.
 
 ## OpenAI
 
@@ -67,6 +71,67 @@ graph = instrument_langgraph(StateGraph(...))
 ```
 
 Each node execution records a `ToolCall`.
+
+## LangChain (live tracking)
+
+`instrument_langgraph` feeds the **trace** channel. To feed the **live
+tracking** channel instead, pass `TrackingCallbackHandler` in the runnable
+config: LangChain propagates it to every child run, so subgraphs, nodes, chat
+models, tools and retrievers are all observed without touching the graph.
+
+```bash
+pip install "agenomic[langgraph]"
+```
+
+```python
+from agenomic import Client
+from agenomic.integrations.langchain import TrackingCallbackHandler
+
+session = Client().tracking.start(agent="agent://acme/support")
+
+await graph.ainvoke(state, config={"callbacks": [TrackingCallbackHandler(session)]})
+
+session.stop()   # drains the emitter, then closes the session
+```
+
+Build one handler per request and share the session. The mapping:
+
+| LangChain run                      | tracking events                        |
+| ---------------------------------- | -------------------------------------- |
+| root chain                         | `turn.started` / `.completed` / `.failed` |
+| node (`graph:step:N` tag)          | `agent.step.*`                         |
+| chat model or LLM                  | `model.call.*` with `usage`            |
+| tool                               | `tool.call.*`                          |
+| retriever                          | `retrieval.*`                          |
+
+Only the root chain and `graph:step:`-tagged nodes produce chain spans. Every
+other chain run is silent — LangChain's own plumbing (`RunnableSequence`,
+`ChannelWrite`, `seq:step:N`) but equally any sub-chain of your own that
+LangGraph did not tag. Their children are re-parented onto the nearest emitted
+span, so the hierarchy matches the graph rather than the runnable tree.
+
+Events are queued to one background worker per session, so a slow or failing
+gateway never blocks the run and never raises into your code. That is also why
+delivery is not guaranteed by default:
+
+```python
+from agenomic.integrations.langchain import dropped_events, flush
+
+if not flush(session):                     # checkpoint mid-session
+    print("dropped:", dropped_events(session))
+```
+
+`flush()` returns `False` when it timed out **or** when an event was dropped
+while draining. Read `dropped_events()` before `stop()`: teardown forgets the
+emitter. `session.stop()` drains and joins the worker on its own, so
+`shutdown()` is only needed if you never stop the session.
+
+Raw prompts, arguments and completions never leave the process; the handler
+sends `input_hash` / `output_hash` only, and an error sends the exception class
+name without its message. `capture_turn_title=True` is the one opt-in
+exception: it takes the **last** message of the root run's `messages` state
+whatever its role, collapses its whitespace and sends the first 120
+characters.
 
 ## MCP
 

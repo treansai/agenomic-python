@@ -36,13 +36,20 @@ The generic emitter is `session.event(event_type, **fields)`. The event
 type must be one of the spec's `TRACKING_EVENT_TYPES`:
 
 ```
-agent.started        agent.step.started    agent.step.completed
-model.call.started   model.call.completed  tool.call.started
-tool.call.completed  memory.read           memory.write
-policy.evaluated     intent.detected       loop.detected
-drift.detected       harness.violation     alert.created
-agent.completed      agent.failed
+agent.started        agent.completed       agent.failed
+turn.started         turn.completed        turn.failed
+agent.step.started   agent.step.completed  agent.step.failed
+model.call.started   model.call.completed  model.call.failed
+tool.call.started    tool.call.completed   tool.call.failed
+retrieval.started    retrieval.completed   retrieval.failed
+memory.read          memory.write          policy.evaluated
+intent.detected      loop.detected         drift.detected
+harness.violation    alert.created
 ```
+
+A `turn` is one user-facing exchange and groups the spans beneath it;
+`retrieval.*` covers RAG lookups. Both come from framework instrumentation
+rather than the typed helpers below.
 
 Unknown types raise `ValueError`; emitting on a stopped session raises
 `RuntimeError`. Each event is stamped with `spec_version`, a ULID
@@ -67,6 +74,22 @@ session.stop()                                # idempotent
 on entry, `agent.step.completed` on success, and `agent.failed` (then
 re-raises) when the body raises. The session itself is also a context
 manager — leaving the `with` block calls `stop()`.
+
+## From a framework
+
+Emitting by hand is only worth it for code you own. For a LangChain or
+LangGraph app, `TrackingCallbackHandler` mirrors every run into the session on
+its own — turns, nodes, model calls, tools and retrievers, with timings and
+token usage. A turn carries only its `turn_id`; the spans beneath it add
+`span_id`/`parent_span_id`. See
+[integrations.md](integrations.md#langchain-live-tracking).
+
+Producers that buffer, like that handler, register teardown with
+`session.on_stop(callback)`. `stop()` runs those callbacks before it closes the
+session, so a producer can still drain into it; each callback runs at most once
+even if a failed `stop()` is retried. The drain is bounded by the callback's
+own timeout, not guaranteed — the handler gives itself 5 seconds and counts
+whatever is left as dropped.
 
 ## Reading back
 

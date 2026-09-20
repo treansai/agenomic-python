@@ -43,6 +43,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   request hash is computed.
 - The local tool engine refuses configurations carrying a `protect` block
   (`protect_cloud_required`).
+- `agenomic.integrations.langchain.TrackingCallbackHandler`: a LangChain /
+  LangGraph callback handler that mirrors every run (turns, graph nodes,
+  model calls, tools, retrievers) into a live `TrackingSession` with
+  `span_id`/`parent_span_id`/`turn_id`, timing, token usage and content
+  hashes. New tracking event types: `turn.*`, `*.failed`, `retrieval.*`.
+  `session.stop()` drains the background emitter and joins its worker on its
+  own; `flush()` checkpoints mid-session and `shutdown()` tears down a session
+  that is never stopped. `flush()` returns `False` when it timed out **or**
+  when any event has been dropped, and `dropped_events(session)` reports the
+  count, so drainage is no longer mistaken for delivery. A closed emitter
+  counts and logs what it refuses rather than queueing it behind a stopped
+  worker, and a handler built for an already-stopped session leaves no thread
+  behind. The
+  worker survives any exception the session raises, so one unserializable
+  field cannot silently end tracking. Token usage counts the first choice that
+  carries `usage_metadata` per batch instead of summing the batch: providers
+  attach the response-level usage to every choice, which multiplied the counts
+  by `n`. Batches are still summed, one per request.
+- `TrackingSession.stopped` and `TrackingSession.on_stop(callback)`:
+  `on_stop` runs a callback at the top of `stop()`,
+  while the session still accepts events, so a buffering producer can drain
+  into it. Each callback runs at most once even if a failed `stop()` is
+  retried.
 
 - Complete documentation set under `docs/`: new pages for the API
   reference, exporters, canonical v0.3 runs, online tracking, keys &
