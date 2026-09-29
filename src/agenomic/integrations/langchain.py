@@ -64,12 +64,21 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-class _Dispatcher:
-    """One worker thread per session so emits stay ordered and never block the event loop."""
+DISPATCH_QUEUE_MAX = 10_000
 
-    def __init__(self, session: TrackingSession) -> None:
+
+class _Dispatcher:
+    """One worker thread per session so emits stay ordered and never block the event loop.
+
+    The queue is bounded: when the gateway stalls and the queue fills, new
+    events are dropped (and counted) instead of growing process memory.
+    """
+
+    def __init__(self, session: TrackingSession, max_queue: int = DISPATCH_QUEUE_MAX) -> None:
         self._session = session
-        self._queue: queue.Queue[tuple[str, dict[str, Any]] | None] = queue.Queue()
+        self._queue: queue.Queue[tuple[str, dict[str, Any]] | None] = queue.Queue(max_queue)
+        # Reentrant: guards the closed check + enqueue against close(), and the failure count.
+        self._lock = threading.RLock()
         self._failures = 0
         self._closed = False
         self._thread = threading.Thread(
@@ -78,14 +87,20 @@ class _Dispatcher:
         self._thread.start()
 
     def submit(self, event_type: str, fields: dict[str, Any]) -> None:
-        if self._closed:
-            self._drop(event_type, "emitter closed with the session")
-            return
-        self._queue.put((event_type, fields))
+        with self._lock:
+            if self._closed:
+                self._drop(event_type, "emitter closed with the session")
+                return
+            try:
+                self._queue.put_nowait((event_type, fields))
+            except queue.Full:
+                self._drop(event_type, "dispatcher queue full (gateway stalled?)")
 
     def _drop(self, event_type: str, reason: object) -> None:
-        self._failures += 1
-        if self._failures <= 3:
+        with self._lock:
+            self._failures += 1
+            failures = self._failures
+        if failures <= 3:
             logger.warning(
                 "tracking event %s dropped for session %s: %s",
                 event_type,
@@ -110,9 +125,18 @@ class _Dispatcher:
     def close(self, timeout: float | None = None) -> bool:
         """Refuse new events, drain, then stop the worker. ``timeout`` is the total."""
         deadline = None if timeout is None else time.monotonic() + timeout
-        self._closed = True
+        with self._lock:
+            self._closed = True
         drained = self.flush(timeout)
-        self._queue.put(None)
+        try:
+            self._queue.put(
+                None, timeout=None if deadline is None else max(0.0, deadline - time.monotonic())
+            )
+        except queue.Full:
+            logger.warning(
+                "tracking session %s: dispatcher stuck, worker left running",
+                self._session.session_id,
+            )
         self._thread.join(None if deadline is None else max(0.0, deadline - time.monotonic()))
         if self._failures:
             logger.warning(

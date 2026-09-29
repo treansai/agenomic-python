@@ -197,6 +197,11 @@ class TrackingSession:
         Callbacks run at the top of :meth:`stop`, while the session still
         accepts events, so a buffering producer can drain into it. Each one
         runs at most once even if an earlier ``stop()`` failed and is retried.
+
+        Example:
+            >>> session = Client().tracking.start(agent="agent://acme/support")  # doctest: +SKIP
+            >>> session.on_stop(lambda: print("flushing"))  # doctest: +SKIP
+            >>> session.stop()  # doctest: +SKIP  # runs the callback, then finalizes
         """
         self._on_stop.append(callback)
 
