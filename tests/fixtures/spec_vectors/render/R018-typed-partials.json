@@ -1,0 +1,64 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R018",
+  "intent": "integer and boolean partials render with typed rendering",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "{n} {b}",
+      "variables": {
+        "n": {
+          "type": "integer",
+          "required": false
+        },
+        "b": {
+          "type": "boolean",
+          "required": false
+        }
+      },
+      "partials": {
+        "n": 7,
+        "b": false
+      },
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {},
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "7 false",
+    "messages": null,
+    "expanded_template": "{n} {b}",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:0ac09903d110bbad47c0e2fb48a4633f07e6d598755f1d49e2d0120a9625965b",
+      "kind": "text",
+      "text": "7 false",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:09d1cfaa46f6356a6b051cf8b8136af43b48da86cce6a07f665946bc3bf4a18c",
+    "warnings": [],
+    "langchain_parity": false
+  }
+}

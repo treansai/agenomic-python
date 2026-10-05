@@ -1,0 +1,30 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T001",
+  "intent": "a literal followed by a variable",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "template": "Hello {name}"
+  },
+  "expected": {
+    "ok": true,
+    "tokens": [
+      {
+        "t": "literal",
+        "text": "Hello "
+      },
+      {
+        "t": "var",
+        "name": "name",
+        "offset": 6
+      }
+    ],
+    "source": "Hello {name}"
+  }
+}

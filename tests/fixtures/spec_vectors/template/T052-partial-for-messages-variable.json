@@ -1,0 +1,53 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T052",
+  "intent": "a partial on a messages variable",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "placeholder": "history",
+          "optional": true
+        }
+      ],
+      "variables": {
+        "history": {
+          "type": "messages",
+          "required": false
+        }
+      },
+      "partials": {
+        "history": "x"
+      },
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {}
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_template_invalid",
+      "item": {
+        "code": "partial_for_messages_variable",
+        "path": "/partials/history",
+        "variable": "history"
+      }
+    }
+  }
+}

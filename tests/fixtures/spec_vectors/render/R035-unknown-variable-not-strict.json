@@ -1,0 +1,65 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R035",
+  "intent": "an undeclared input variable is dropped with a strict_disabled warning when strict is false",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Hello {name}",
+      "variables": {
+        "name": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "name": "Ada",
+      "zzz": "1"
+    },
+    "options": {
+      "strict": false,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "Hello Ada",
+    "messages": null,
+    "expanded_template": "Hello {name}",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:bcd8fd23d76935d3eb9d1afb1e821ecebbf0ccb0f3655b5776ec8eacbe6a5ff1",
+      "kind": "text",
+      "text": "Hello Ada",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:4be83c4143f3f7ad2dc2b75dabd1aadd16b0c4ba88edeac96a4bb4a755e3307b",
+    "warnings": [
+      {
+        "code": "strict_disabled",
+        "variable": "zzz"
+      }
+    ],
+    "langchain_parity": false
+  }
+}

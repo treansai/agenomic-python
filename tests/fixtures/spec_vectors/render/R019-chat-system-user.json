@@ -1,0 +1,100 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R019",
+  "intent": "a chat prompt with a system and a user message renders both, roles kept",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "messages",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "You help with {topic}."
+        },
+        {
+          "role": "user",
+          "content": "{question}"
+        }
+      ],
+      "variables": {
+        "topic": {
+          "type": "string",
+          "required": true
+        },
+        "question": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "topic": "billing",
+      "question": "Why was I charged twice?"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "chat",
+    "text": null,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You help with billing."
+      },
+      {
+        "role": "user",
+        "content": "Why was I charged twice?"
+      }
+    ],
+    "expanded_template": [
+      {
+        "role": "system",
+        "content": "You help with {topic}."
+      },
+      {
+        "role": "user",
+        "content": "{question}"
+      }
+    ],
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:b33cdf3382b40f6847325bc06bb466b9fc761b1ed771bb3a1a66cac6a0499133",
+      "kind": "chat",
+      "text": null,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You help with billing."
+        },
+        {
+          "role": "user",
+          "content": "Why was I charged twice?"
+        }
+      ],
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:5077a1306b65f9653edb98eef5b6c6596de81f4ed563c56e0a301ed97b83e14b",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

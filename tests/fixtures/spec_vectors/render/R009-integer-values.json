@@ -1,0 +1,69 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R009",
+  "intent": "integer values render in decimal, including zero, a negative value and the largest AJS integer",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "{a} {b} {c}",
+      "variables": {
+        "a": {
+          "type": "integer",
+          "required": true
+        },
+        "b": {
+          "type": "integer",
+          "required": true
+        },
+        "c": {
+          "type": "integer",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "a": 0,
+      "b": -42,
+      "c": 9007199254740991
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "0 -42 9007199254740991",
+    "messages": null,
+    "expanded_template": "{a} {b} {c}",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:8ea7d302fcaed0b477aae69b3d4d74984509f521b2d67a9c3b4703190cd5f0f2",
+      "kind": "text",
+      "text": "0 -42 9007199254740991",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:b2bf57d047b520ea2e29823129cde039503dfc5987c6a659ae0887b2dad1355d",
+    "warnings": [],
+    "langchain_parity": false
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R042",
+  "intent": "a json value holding a non-integral number is refused with the JSON Pointer of the number",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "{payload}",
+      "variables": {
+        "payload": {
+          "type": "json",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "payload": {
+        "items": [
+          {
+            "price": 0.5
+          }
+        ]
+      }
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_render_error",
+      "item": {
+        "code": "float_not_allowed",
+        "variable": "payload",
+        "value_path": "/variables/payload/items/0/price"
+      }
+    }
+  }
+}

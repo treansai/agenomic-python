@@ -1,0 +1,42 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T056",
+  "intent": "a role entry with an extra member name",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "user",
+          "content": "Hi",
+          "name": "ada"
+        }
+      ],
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {}
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_template_invalid",
+      "item": {
+        "code": "invalid_message_entry",
+        "path": "/body/0"
+      }
+    }
+  }
+}

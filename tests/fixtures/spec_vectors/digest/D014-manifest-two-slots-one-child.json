@@ -1,0 +1,43 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D014",
+  "intent": "a manifest with two slots and one child",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.prompt_manifest/v1",
+      "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+      "slots": {
+        "planner.instructions": {
+          "prompt_id": "prm_support_planner",
+          "version": 8,
+          "content_digest": "sha256:1dd16c2c558681bae42bfcf83578b1d486a420dc30ed557fd5186bf88230fa15"
+        },
+        "writer.response": {
+          "prompt_id": "prm_support_writer",
+          "version": 3,
+          "content_digest": "sha256:f74bd48ea206c5b3f1dfe6a6ad31b0e3f6503989c330e858cf99a971de53a88e"
+        }
+      },
+      "children": {
+        "7f3c9a1e-0b2d-4c5e-8f6a-9b0c1d2e3f4a": {
+          "release_id": "d4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70",
+          "genome_version": "sha256:4f3a8950ee0d00309660f03040b9a8e49423f8596cdffe20f61b1f835e900fcf"
+        }
+      }
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.prompt_manifest/v1",
+    "canonical": "{\"agent_id\":\"2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c\",\"children\":{\"7f3c9a1e-0b2d-4c5e-8f6a-9b0c1d2e3f4a\":{\"genome_version\":\"sha256:4f3a8950ee0d00309660f03040b9a8e49423f8596cdffe20f61b1f835e900fcf\",\"release_id\":\"d4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70\"}},\"schema\":\"agenomic.prompt_manifest/v1\",\"slots\":{\"planner.instructions\":{\"content_digest\":\"sha256:1dd16c2c558681bae42bfcf83578b1d486a420dc30ed557fd5186bf88230fa15\",\"prompt_id\":\"prm_support_planner\",\"version\":8},\"writer.response\":{\"content_digest\":\"sha256:f74bd48ea206c5b3f1dfe6a6ad31b0e3f6503989c330e858cf99a971de53a88e\",\"prompt_id\":\"prm_support_writer\",\"version\":3}}}",
+    "digest": "sha256:9e60d2cfae4ec4a42006cdb0e1034ca56361bc24c066ce0d408b3dbe0b01d968"
+  }
+}

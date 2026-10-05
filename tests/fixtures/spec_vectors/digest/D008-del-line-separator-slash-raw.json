@@ -1,0 +1,32 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D008",
+  "intent": "U+007F, U+2028 and the slash are written raw",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "del sep  slash/",
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.prompt_content/v1",
+    "canonical": "{\"body\":\"del sep  slash/\",\"fragments\":{},\"kind\":\"text\",\"output_contract\":null,\"partials\":{},\"renderer_version\":\"1\",\"schema\":\"agenomic.prompt_content/v1\",\"template_format\":\"agenomic-fstring/v1\",\"variables\":{}}",
+    "digest": "sha256:c0f42959c658ebc7db949eb0a5f48a33a841f21efb8eb8445ba53640158ce4eb"
+  }
+}

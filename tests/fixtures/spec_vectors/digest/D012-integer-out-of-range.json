@@ -1,0 +1,41 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D012",
+  "intent": "an integer beyond 2^53 - 1 in a hashed document is refused",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Count.",
+      "variables": {},
+      "partials": {},
+      "output_contract": {
+        "type": "json_schema",
+        "json_schema": {
+          "type": "integer",
+          "maximum": 9007199254740992
+        }
+      },
+      "fragments": {}
+    }
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "item": {
+        "code": "integer_out_of_range",
+        "value_path": "/output_contract/json_schema/maximum"
+      }
+    }
+  }
+}

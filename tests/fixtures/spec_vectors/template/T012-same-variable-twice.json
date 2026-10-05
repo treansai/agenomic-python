@@ -1,0 +1,31 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T012",
+  "intent": "the same variable twice yields two tokens",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "template": "{x}{x}"
+  },
+  "expected": {
+    "ok": true,
+    "tokens": [
+      {
+        "t": "var",
+        "name": "x",
+        "offset": 0
+      },
+      {
+        "t": "var",
+        "name": "x",
+        "offset": 3
+      }
+    ],
+    "source": "{x}{x}"
+  }
+}

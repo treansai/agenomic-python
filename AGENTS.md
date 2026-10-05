@@ -117,3 +117,82 @@ This file governs **developing this repository**. If you are an agent
   idempotent (first system message or `system` prefix compared verbatim).
 - The pre-existing `ruff format --check` failures on markdown files are not
   touched by this feature.
+
+## Managed prompts
+
+Reasons behind `agenomic.prompts`, `agenomic._transport` and
+`agenomic.integrations.langchain_prompts`, kept here because this code carries
+no comments and no docstrings. That is a deliberate exception to the docstring
+rule of the engineering rules above.
+
+- The contract is RFC 0012 of agenomic-spec. Its conformance vectors are
+  vendored byte for byte under `tests/fixtures/spec_vectors/` with
+  `SPEC_VECTORS.lock` (`spec_commit`, `manifest_sha256`). Refresh them only with
+  `scripts/sync-spec-vectors.sh <spec-commit> [<agenomic-spec checkout>]`,
+  never by hand: `tests/test_prompts_conformance.py` checks the lock, the file
+  set and every hash before running the `python` vectors, and fails on an
+  unknown suite. `.gitattributes` marks the directory `-text` so a Windows
+  checkout keeps the bytes the manifest hashes. The YAML suite is added with
+  the prompts file importer.
+- `render.py` ports the reference algorithm of the vectors. The order of the
+  checks decides `errors[0]`, so every name-keyed map is visited in UTF-16 key
+  order (`digest.sorted_keys`), secret findings are collected before the chat
+  entry checks, and `bool` is always tested before `int`. Digit strings are
+  matched with ASCII regular expressions before `int()`, which would accept
+  `1_0` and non-ASCII digits.
+- `canonical_json_v1` is new. The shared `agenomic.canonical.hashing`
+  function keeps its code-point key order and `repr` floats because ATEP and
+  trace hashes depend on it; `test_shared_canonical_json_unchanged` pins that.
+- Digests are always computed over the AJS-normalized parsed value, never over
+  a pydantic dump; the pydantic models are typed views built after
+  validation. `AjsError` is a `ValueError`, not an `ApiError`, because the JSON
+  subset check has no wire code of its own; each caller maps the reason
+  (render error, template error, `bundle_incomplete`).
+- Building a `ManagedPromptVersion` runs the full content validation, secret
+  patterns included, so a stored version that matches a pattern added later
+  fails closed with `prompt_secret_detected`, as a bundle export would.
+  `prompt_kind_mismatch` keeps its own top-level code.
+- `PromptUri.to_version_ref(workspace_id)` takes the workspace so a URI can
+  never be reduced to a local `prm_x:n` without the workspace check.
+- `PromptBundle.load` runs AJS, schema, authenticity, expiry, entry digests,
+  the artifact set digest (in file, then the caller's pin), manifest digests,
+  exact closure (prompts, fragments, children with their release pins), scope,
+  then governance. The signature is ed25519 over BLAKE3 of `canonical_json_v1`
+  of the document without `signature`; the embedded PEM is never trusted. A
+  signed bundle is verified whenever a trust store is given; governance
+  applies only when no `expected_bundle_digest` was given, since the pin is the
+  operator's approval. `BundleTrust.from_pem_files` names each key after the
+  file stem (save the key of `GET /v1/signing-keys/:key_id` as
+  `<key_id>.pem`); `BundleTrust.from_pems` takes explicit ids.
+  `from_online_response` refuses a document that carries a signature.
+- `_transport.py` keeps one pooled `httpx.Client` per `Client`, and one
+  `httpx.AsyncClient` per running event loop, in weak maps keyed by the
+  `Client`, so the client facade does not need to change for pooling;
+  `close_pool` and `aclose_pool` release them. Retries happen only with
+  `retry=True`, on transport errors and on 429, 502, 503 and 504, with the CLI
+  schedule (0.2 s, 0.8 s, 3.2 s) and `Retry-After` seconds when present; a 500
+  is never retried because `artifact_integrity_error` is a 500. A final
+  transport error, 429, 502, 503 or 504 raises `RegistryUnavailableError`
+  (status 0 for a transport error) with `details.cause`, whether or not the
+  call retried. Server codes map to classes through one explicit table
+  (`prompts.errors`), never by prefix, because some 409 codes are binding
+  errors; unknown codes stay a plain `ApiError`. `request_id` and the other
+  error envelope fields are copied into `details`. Tests replace the module
+  level `_sleep` and `_asleep`.
+- `PromptCache` keys always include the workspace. Disk entries are written
+  atomically (temporary file then `os.replace`, files 0600, directories 0700),
+  every path segment is validated first (a bad segment is a `ValueError`, so no
+  traversal is possible), and every read is re-verified. A mismatch raises
+  `cache_conflict`; whether that is a miss (online) or a failure (offline) is
+  the caller's decision.
+- `LocalPromptEngine` is a simulation of the governed path: in Agenomic Cloud a
+  channel move is a session-only action with approvals. It returns the server
+  codes and statuses. It never invents genome addresses (`genome_version` stays
+  `null`), and its runtime `bundle_id` and `bundle_hash` are deterministic
+  placeholders derived from the agent id.
+- `to_langchain` refuses `integer`, `boolean` and `json` variables because
+  LangChain would print `True` and Python reprs. Its metadata uses the key
+  `agenomic_prompt_content_digest`, which the LangChain importer must read.
+- `agenomic.prompts` never imports langchain or langgraph, and
+  `agenomic.integrations` does not import `langchain_prompts`; a subprocess
+  test checks both.

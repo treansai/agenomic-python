@@ -1,0 +1,27 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "ref",
+  "id": "F010",
+  "intent": "a one-character alias",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "ref": "prm_x@a",
+    "context": "execution",
+    "workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f"
+  },
+  "expected": {
+    "ok": true,
+    "form": "alias",
+    "prompt_id": "prm_x",
+    "version": null,
+    "alias": "a",
+    "workspace_id": null,
+    "canonical": "prm_x@a",
+    "version_ref": null
+  }
+}

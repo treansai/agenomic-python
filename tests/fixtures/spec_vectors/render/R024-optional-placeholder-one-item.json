@@ -1,0 +1,121 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R024",
+  "intent": "an optional placeholder given one item splices it at its position",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "messages",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "You track orders."
+        },
+        {
+          "placeholder": "history",
+          "optional": true
+        },
+        {
+          "role": "user",
+          "content": "{question}"
+        }
+      ],
+      "variables": {
+        "history": {
+          "type": "messages",
+          "required": false
+        },
+        "question": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "history": [
+        {
+          "role": "user",
+          "content": "Earlier question"
+        }
+      ],
+      "question": "Hi"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "chat",
+    "text": null,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You track orders."
+      },
+      {
+        "role": "user",
+        "content": "Earlier question"
+      },
+      {
+        "role": "user",
+        "content": "Hi"
+      }
+    ],
+    "expanded_template": [
+      {
+        "role": "system",
+        "content": "You track orders."
+      },
+      {
+        "placeholder": "history",
+        "optional": true
+      },
+      {
+        "role": "user",
+        "content": "{question}"
+      }
+    ],
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:d38a99ff436d5bba0b6718a65e954af543834ee11025d84f82a65c0504197005",
+      "kind": "chat",
+      "text": null,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You track orders."
+        },
+        {
+          "placeholder": "history",
+          "count": 1
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ],
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:680ad71e2e4dae0224f74d5b61d667ab2519c9b586f5b6b8fb4d9ce6eb61e63d",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

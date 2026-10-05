@@ -1,0 +1,151 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R021",
+  "intent": "a required placeholder splices an assistant message with tool_calls and a tool message with tool_call_id at its position, unchanged",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "messages",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "You track orders."
+        },
+        {
+          "placeholder": "history",
+          "optional": false
+        },
+        {
+          "role": "user",
+          "content": "{question}"
+        }
+      ],
+      "variables": {
+        "history": {
+          "type": "messages",
+          "required": true
+        },
+        "question": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "history": [
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "type": "function",
+              "function": {
+                "name": "lookup_order",
+                "arguments": "{\"order_id\": \"A-42\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "shipped",
+          "tool_call_id": "call_1"
+        }
+      ],
+      "question": "Where is my parcel?"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "chat",
+    "text": null,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You track orders."
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+              "name": "lookup_order",
+              "arguments": "{\"order_id\": \"A-42\"}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "shipped",
+        "tool_call_id": "call_1"
+      },
+      {
+        "role": "user",
+        "content": "Where is my parcel?"
+      }
+    ],
+    "expanded_template": [
+      {
+        "role": "system",
+        "content": "You track orders."
+      },
+      {
+        "placeholder": "history",
+        "optional": false
+      },
+      {
+        "role": "user",
+        "content": "{question}"
+      }
+    ],
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:5e57d9f2ba2c916a5dab95038722b14f07a44c35cf927ed1f4f3e99921490b70",
+      "kind": "chat",
+      "text": null,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You track orders."
+        },
+        {
+          "placeholder": "history",
+          "count": 2
+        },
+        {
+          "role": "user",
+          "content": "Where is my parcel?"
+        }
+      ],
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:158e2e315fe8a7a3ccfc7d7f70c90b8be71c802066687df3e3217267e98ae58f",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

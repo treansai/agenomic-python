@@ -1,0 +1,73 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R030",
+  "intent": "escaped braces inside a fragment render as literal braces and stay escaped in the expanded template",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "{>braces}",
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {
+        "braces": {
+          "prompt_id": "prm_literal_braces",
+          "version": 1,
+          "content_digest": "sha256:1737f599ff5a09be1e1332f3092ef9f1e6872a20127f20b5e32b908022fb4627"
+        }
+      }
+    },
+    "fragments": {
+      "prm_literal_braces:1": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "Literal {{x}} braces.",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {}
+        }
+      }
+    },
+    "variables": {},
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "Literal {x} braces.",
+    "messages": null,
+    "expanded_template": "Literal {{x}} braces.",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:72eb9c0485ca648aee06463423ca3fc21548ff9457c13e9e627cbf4ef888d854",
+      "kind": "text",
+      "text": "Literal {x} braces.",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:f947f05c766b538cfe72a7022bdf471297effd160d201144c085a86835c8729f",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

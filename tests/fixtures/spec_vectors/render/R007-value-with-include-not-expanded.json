@@ -1,0 +1,59 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R007",
+  "intent": "a substituted value that looks like an include is emitted verbatim and never expanded",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Value: {v}",
+      "variables": {
+        "v": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "v": "{>safety}"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "Value: {>safety}",
+    "messages": null,
+    "expanded_template": "Value: {v}",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:20f285e5fac021663e100e338c0f7fe8073fa224cd89a487967be2d01cc4734b",
+      "kind": "text",
+      "text": "Value: {>safety}",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:3383bfeabb17053c0c204e5388abc90a34158fcea47bf30b301eee314e2980f7",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

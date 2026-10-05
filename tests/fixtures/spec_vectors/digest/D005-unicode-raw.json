@@ -1,0 +1,32 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D005",
+  "intent": "accented, astral and CJK characters are written raw as UTF-8 in the canonical form",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "café 😀 日本語",
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.prompt_content/v1",
+    "canonical": "{\"body\":\"café 😀 日本語\",\"fragments\":{},\"kind\":\"text\",\"output_contract\":null,\"partials\":{},\"renderer_version\":\"1\",\"schema\":\"agenomic.prompt_content/v1\",\"template_format\":\"agenomic-fstring/v1\",\"variables\":{}}",
+    "digest": "sha256:604d4170720a10c59e39a959fb4acc86684e1563efb15eb2cfd778d8ba160054"
+  }
+}

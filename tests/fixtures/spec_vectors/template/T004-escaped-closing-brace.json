@@ -1,0 +1,25 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T004",
+  "intent": "a doubled closing brace inside text",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "template": "a}}b"
+  },
+  "expected": {
+    "ok": true,
+    "tokens": [
+      {
+        "t": "literal",
+        "text": "a}b"
+      }
+    ],
+    "source": "a}}b"
+  }
+}

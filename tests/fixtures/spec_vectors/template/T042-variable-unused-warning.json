@@ -1,0 +1,51 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T042",
+  "intent": "a declared variable that is never used is a warning, not an error",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Hello",
+      "variables": {
+        "tone": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {}
+  },
+  "expected": {
+    "ok": true,
+    "validation": {
+      "variables": {
+        "declared": [
+          "tone"
+        ],
+        "referenced": [],
+        "placeholders": []
+      },
+      "warnings": [
+        {
+          "code": "variable_unused",
+          "path": "/variables/tone",
+          "variable": "tone"
+        }
+      ],
+      "content_digest": "sha256:022d72137f855965e2a52ded5d64139cd83248c1660016cfb702cd73883914a8"
+    }
+  }
+}

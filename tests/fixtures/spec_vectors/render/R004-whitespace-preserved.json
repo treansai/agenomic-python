@@ -1,0 +1,59 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R004",
+  "intent": "leading spaces, TAB, CRLF, blank lines and a trailing LF are preserved exactly; nothing is trimmed or normalized",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "  Indented\tTabbed {x}\r\n\r\n\nLast line\n",
+      "variables": {
+        "x": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "x": "value"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "  Indented\tTabbed value\r\n\r\n\nLast line\n",
+    "messages": null,
+    "expanded_template": "  Indented\tTabbed {x}\r\n\r\n\nLast line\n",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:ff811b1de7aff6e3ef2e66c010daae40c9d00348ce677da3e6f556dc2005d7be",
+      "kind": "text",
+      "text": "  Indented\tTabbed value\r\n\r\n\nLast line\n",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:3781b8ae0bbcb9252a40c50f6201302aad08d1649ff9a6aa93af6287d7ef6125",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T051",
+  "intent": "a partial for an undeclared name",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Hello",
+      "variables": {},
+      "partials": {
+        "ghost": "x"
+      },
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {}
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_template_invalid",
+      "item": {
+        "code": "partial_for_unknown_variable",
+        "path": "/partials/ghost",
+        "variable": "ghost"
+      }
+    }
+  }
+}

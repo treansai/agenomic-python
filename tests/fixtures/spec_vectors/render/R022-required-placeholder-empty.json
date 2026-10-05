@@ -1,0 +1,112 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R022",
+  "intent": "a required placeholder given an empty list contributes no message and count 0 in the rendered document",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "messages",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "You track orders."
+        },
+        {
+          "placeholder": "history",
+          "optional": false
+        },
+        {
+          "role": "user",
+          "content": "{question}"
+        }
+      ],
+      "variables": {
+        "history": {
+          "type": "messages",
+          "required": true
+        },
+        "question": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "history": [],
+      "question": "Hi"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "chat",
+    "text": null,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You track orders."
+      },
+      {
+        "role": "user",
+        "content": "Hi"
+      }
+    ],
+    "expanded_template": [
+      {
+        "role": "system",
+        "content": "You track orders."
+      },
+      {
+        "placeholder": "history",
+        "optional": false
+      },
+      {
+        "role": "user",
+        "content": "{question}"
+      }
+    ],
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:5e57d9f2ba2c916a5dab95038722b14f07a44c35cf927ed1f4f3e99921490b70",
+      "kind": "chat",
+      "text": null,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You track orders."
+        },
+        {
+          "placeholder": "history",
+          "count": 0
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ],
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:96c766541f124095a75422e1cc628c98eb7ab0c7d9838eb206570b907d89fe04",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

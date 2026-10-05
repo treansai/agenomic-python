@@ -1,0 +1,66 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R045",
+  "intent": "a placeholder item with role developer is refused at its role member",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "messages",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "placeholder": "history",
+          "optional": false
+        }
+      ],
+      "variables": {
+        "history": {
+          "type": "messages",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "history": [
+        {
+          "role": "developer",
+          "content": "x"
+        }
+      ]
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_render_error",
+      "item": {
+        "code": "invalid_message_value",
+        "value_path": "/variables/history/0/role",
+        "variable": "history"
+      }
+    }
+  }
+}

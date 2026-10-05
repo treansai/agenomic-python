@@ -1,0 +1,33 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D026",
+  "intent": "the artifact set of a legacy release: the D013 empty manifest and its digest, no children, no prompts",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.prompt_artifact_set/v1",
+      "prompt_manifest_digest": "sha256:f5558f9a42e31aadc424f3dd54ead2176857f848c6b7f7552c0b1489c3e7a1b0",
+      "manifest": {
+        "schema": "agenomic.prompt_manifest/v1",
+        "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+        "slots": {},
+        "children": {}
+      },
+      "children": {},
+      "prompts": {}
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.prompt_artifact_set/v1",
+    "canonical": "{\"children\":{},\"manifest\":{\"agent_id\":\"2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c\",\"children\":{},\"schema\":\"agenomic.prompt_manifest/v1\",\"slots\":{}},\"prompt_manifest_digest\":\"sha256:f5558f9a42e31aadc424f3dd54ead2176857f848c6b7f7552c0b1489c3e7a1b0\",\"prompts\":{},\"schema\":\"agenomic.prompt_artifact_set/v1\"}",
+    "digest": "sha256:fa830cc7fe775ecdd7ae8667c8032f1e0937060cf23f68729848b120b1767990"
+  }
+}

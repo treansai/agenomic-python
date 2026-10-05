@@ -1,0 +1,112 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R026",
+  "intent": "the history option on a chat prompt without placeholder appends its items after the template messages; history_count is 2",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "messages",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "You track orders."
+        },
+        {
+          "role": "user",
+          "content": "{question}"
+        }
+      ],
+      "variables": {
+        "question": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "question": "Hi"
+    },
+    "options": {
+      "strict": true,
+      "history": [
+        {
+          "role": "user",
+          "content": "Earlier question"
+        },
+        {
+          "role": "assistant",
+          "content": "Earlier answer"
+        }
+      ],
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "chat",
+    "text": null,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You track orders."
+      },
+      {
+        "role": "user",
+        "content": "Hi"
+      },
+      {
+        "role": "user",
+        "content": "Earlier question"
+      },
+      {
+        "role": "assistant",
+        "content": "Earlier answer"
+      }
+    ],
+    "expanded_template": [
+      {
+        "role": "system",
+        "content": "You track orders."
+      },
+      {
+        "role": "user",
+        "content": "{question}"
+      }
+    ],
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:2df11e4dd04dd1e4e35bda75cf4e09b1da872e450a9a0bb40fa2e17b63250b18",
+      "kind": "chat",
+      "text": null,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You track orders."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ],
+      "history_count": 2
+    },
+    "rendered_hash": "sha256:54f679a77d5d044b3d0550637bced52bf0345d6deec18b653070d312b323293e",
+    "warnings": [],
+    "langchain_parity": false
+  }
+}

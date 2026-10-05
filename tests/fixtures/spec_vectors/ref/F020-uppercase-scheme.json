@@ -1,0 +1,24 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "ref",
+  "id": "F020",
+  "intent": "an uppercase scheme",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "ref": "AGENOMIC://0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f/prompts/prm_x/versions/1",
+    "context": "execution",
+    "workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f"
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_ref_invalid",
+      "reason": "uppercase"
+    }
+  }
+}

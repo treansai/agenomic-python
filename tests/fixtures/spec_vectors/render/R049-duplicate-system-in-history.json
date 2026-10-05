@@ -1,0 +1,69 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R049",
+  "intent": "a history system message equal to the rendered system message is refused at its position",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "messages",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "You are a planner."
+        },
+        {
+          "role": "user",
+          "content": "{question}"
+        }
+      ],
+      "variables": {
+        "question": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "question": "Hi"
+    },
+    "options": {
+      "strict": true,
+      "history": [
+        {
+          "role": "system",
+          "content": "You are a planner."
+        },
+        {
+          "role": "user",
+          "content": "Earlier"
+        }
+      ],
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_render_error",
+      "item": {
+        "code": "duplicate_system_message",
+        "value_path": "/history/0"
+      }
+    }
+  }
+}
