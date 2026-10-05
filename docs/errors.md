@@ -23,8 +23,22 @@ AgenomicError
 ├── ExportError
 ├── RedactionError
 └── CloudError
-    └── AuthenticationError
+    ├── AuthenticationError
+    └── ToolExecutionError            (code, status; tool execution and Protect)
+        ├── ToolCallDenied, ToolApprovalPending
+        └── VaultError                (Agents Vault; request_id, action_id)
+            ├── VaultNotEntitled, VaultApprovalRequired, VaultPolicyDenied
+            ├── VaultGrantUnusable, VaultRevoked, VaultOutcomeUnknown
+            ├── VaultExecutionFailed, VaultExecutionInProgress
+            ├── VaultRateLimited, VaultValidationError, VaultAuthenticationError
+            ├── VaultPermissionDenied, VaultNotFound, VaultConflict
+            ├── VaultRefused → VaultFailClosed, VaultUnavailable
+            ├── VaultServerError, VaultTransportError, VaultNotConfigured
+            └── ReplayFixtureMissing, ReplayUnsupported
 ```
+
+The Agents Vault errors and what each server code maps to are tabulated in
+[vault.md](vault.md#errors).
 
 ## What raises what
 
@@ -32,6 +46,7 @@ AgenomicError
 | ---------------------------------------------------- | ---------------------- |
 | Cloud request fails after retries / 4xx / 5xx        | `CloudError`           |
 | Cloud returns 401                                    | `AuthenticationError`  |
+| Agents Vault locked, pending, denied, unknown outcome | `VaultError` subclasses, see [vault.md](vault.md#errors) |
 | ATEP segment bad magic, CRC mismatch, truncation     | `AtepError`            |
 | Store `agent_id` mismatch                            | `AtepError`            |
 | Bad PEM key file / not ed25519                       | `CryptoError`          |
@@ -57,7 +72,8 @@ Two deliberate design points:
 Library code never prints. Named loggers: `agenomic.client`,
 `agenomic.trace.decorator`, `agenomic.exporters.http`,
 `agenomic.exporters.multi`, `agenomic.exporters.atep_local`,
-`agenomic.crypto.signing`.
+`agenomic.crypto.signing`, `agenomic.vault` (route and status of each
+request and each retry, never a body, an argument or a secret value).
 
 ```python
 import logging

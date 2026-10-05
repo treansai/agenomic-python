@@ -65,6 +65,7 @@ Full index at [docs/](docs/README.md).
 - [Integrations](docs/integrations.md) · [Cloud upload](docs/cloud-upload.md)
 - [Workflow & system manifests](docs/orchestration.md)
 - [Hugging Face provider](docs/providers/huggingface.md)
+- [Agents Vault](docs/vault.md) (optional commercial module)
 - [CLI](docs/cli.md) · [Errors](docs/errors.md)
 - [Non-determinism disclaimer](docs/non-determinism.md)
 
@@ -167,11 +168,37 @@ matrix. The local engine refuses `protect` configurations
 (`protect_cloud_required`): policies are evaluated by the gateway only. See
 `docs/protect.md`.
 
+## Agents Vault (optional commercial module)
+
+Agents Vault is an optional commercial module of Agenomic Cloud/Enterprise and
+requires the Agents Vault add-on on your workspace; nothing in the offline SDK
+depends on it. The agent holds an authorization, the executor holds the
+credential: `client.tools.execute` performs one logical action and returns the
+business result and a receipt, never a secret value. `client.vault` is the
+administrative plane (secrets are write-only, passed through `Sensitive`).
+
+```python
+from agenomic import Client
+from agenomic.vault import VaultOutcomeUnknown
+
+agent = Client(base_url="https://cloud.example", runtime_token="vrt_...")
+try:
+    out = agent.tools.execute(tool="crm.get_customer", binding="crm-read", arguments={"id": "c_1"})
+    print(out.result, out.receipt_id, out.action_id)
+except VaultOutcomeUnknown as unknown:       # never retried; settle it deliberately
+    print(unknown.action_id)
+```
+
+Retries reuse the same `action_id`, so the server never repeats an effect;
+approvals, a locked add-on, denials and revoked bindings are typed errors;
+replay answers from fixtures and a missing fixture is an error, never a live
+call. See [docs/vault.md](docs/vault.md) and `examples/12_vault_langgraph.py`.
+
 ## Examples
 
 See [`examples/`](examples/) — minimal trace, decorator + JSONL, ATEP local,
-OpenAI traced, LangGraph traced, cloud upload, and a full offline signed
-release.
+OpenAI traced, LangGraph traced, cloud upload, a full offline signed
+release, and Agents Vault with LangGraph (`12_vault_langgraph.py`).
 
 ## License
 

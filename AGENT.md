@@ -194,6 +194,36 @@ Retries + idempotency keys are automatic. `401` →
 event loop. For continuous export, `HttpExporter(client)` batches
 uploads behind the decorator.
 
+## Recipe: Agents Vault (optional commercial module, cloud only)
+
+Needs the Agents Vault add-on of Agenomic Cloud/Enterprise. The agent holds an
+authorization, the executor holds the credential: there is no way to read a
+secret value back, and none must be added.
+
+```python
+from agenomic import Client
+from agenomic.vault import (VaultApprovalRequired, VaultNotEntitled,
+                            VaultOutcomeUnknown, VaultPolicyDenied)
+
+agent = Client(base_url="https://cloud.example", runtime_token="vrt_...")   # no API key
+try:
+    out = agent.tools.execute(tool="crm.get_customer", binding="crm-read",
+                              arguments={"id": "c_1"}, action_id=saved_action_id)
+    out.result, out.receipt_id, out.status        # filtered business result + receipt
+except VaultApprovalRequired as pending:
+    ...   # decide pending.approval_id via client.protect.approvals, then call again with pending.action_id
+except VaultOutcomeUnknown as unknown:
+    ...   # NEVER retry; verify the destination, then client.vault.executions.resolve(unknown.action_id, ...)
+except VaultNotEntitled as locked:
+    ...   # add-on locked: show locked.upgrade_hint; do not work around it
+```
+
+Secrets go in only through `Sensitive` (`client.vault.secrets.create(...,
+value=Sensitive.from_env("NAME"))`); admin calls need `Client(api_key=...)`.
+Replay: `Client(vault_replay=VaultReplay([...]))` answers from fixtures and
+raises `ReplayFixtureMissing` for anything else, never a live call. Details:
+`docs/vault.md`; LangGraph: `examples/12_vault_langgraph.py`.
+
 ## Import map (copy-paste correct)
 
 ```python
@@ -224,6 +254,9 @@ from agenomic.integrations.mcp import trace_mcp_call
 from agenomic.providers.huggingface import HuggingFaceClient, HuggingFaceConfig
 from agenomic.exceptions import (AgenomicError, CloudError, AuthenticationError,
                                  AtepError, CryptoError, RedactionError)
+from agenomic.vault import (Sensitive, VaultReplay, ReplayFixture, ReplayOutcome,
+                            VaultError, VaultNotEntitled, VaultOutcomeUnknown,
+                            VaultApprovalRequired, VaultPolicyDenied, ReplayFixtureMissing)
 ```
 
 The top-level package intentionally exports only `Client` and
@@ -263,6 +296,19 @@ The top-level package intentionally exports only `Client` and
     accepts only the spec vocabulary (`TRACKING_EVENT_TYPES`); unknown
     types raise `ValueError`.
 
+11. **Retrying an unknown outcome.** `VaultOutcomeUnknown` means the request
+    left the executor and its effect cannot be established. Do not catch it
+    and resend with a new `action_id`; verify, then settle it. A technical
+    retry (network, 429, 5xx) reuses the same `action_id`: generate it once,
+    persist it, pass it back.
+12. **Putting a secret anywhere but `Sensitive`.** A plain `str` is refused by
+    the secret methods; a `Sensitive` is refused in `execute(arguments=...)`.
+    Never put a credential in graph state, a prompt or a checkpoint: keep the
+    binding name, `action_id` and `receipt_id`.
+13. **Mixing the planes.** `runtime_token` authenticates `client.tools.execute`
+    and `client.vault.runtime`; `api_key` authenticates the rest of
+    `client.vault`. Neither is sent on the other plane.
+
 ## Environment variables
 
 The library core reads none. Peripherals:
@@ -291,4 +337,5 @@ Cloud credentials go to `Client(...)` / `AgenomicClient(...)` explicitly.
 | Cloud client | `docs/cloud-upload.md` |
 | CLI | `docs/cli.md` |
 | Errors & logging | `docs/errors.md` |
-| Runnable code | `examples/01`–`09` (offline ones run with zero setup) |
+| Agents Vault (optional commercial module) | `docs/vault.md`, `examples/12_vault_langgraph.py` |
+| Runnable code | `examples/01`–`12` (offline ones run with zero setup) |

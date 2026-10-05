@@ -28,6 +28,7 @@ condensed integration guide with import maps, recipes, and pitfalls.
 | Review · Monitor · Protect | [rmp.md](rmp.md) |
 | RMP benchmarks and the agent bridge | [benchmarks.md](benchmarks.md) |
 | Protect policy enforcement (pending, denied, resume, overlay) | [protect.md](protect.md) |
+| Agents Vault: use credentials without receiving them (optional commercial module) | [vault.md](vault.md) |
 | Workflow & system manifests (RFC 0009) | [orchestration.md](orchestration.md) |
 | Integrations (OpenAI, Anthropic, HF, LangGraph, LangChain, MCP) | [integrations.md](integrations.md) |
 | Hugging Face provider | [providers/huggingface.md](providers/huggingface.md) |
@@ -38,6 +39,6 @@ condensed integration guide with import maps, recipes, and pitfalls.
 ## Reference
 
 - [API reference](api-reference.md) — the complete public surface
-- [`examples/`](../examples/) — nine runnable examples, offline ones run
+- [`examples/`](../examples/) — twelve runnable examples, offline ones run
   with zero setup
 - [`CHANGELOG.md`](../CHANGELOG.md)

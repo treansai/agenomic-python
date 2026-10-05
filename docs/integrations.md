@@ -72,6 +72,11 @@ graph = instrument_langgraph(StateGraph(...))
 
 Each node execution records a `ToolCall`.
 
+For a graph whose nodes act with credentials the agent must never see, see
+[Agents Vault](vault.md#langgraph) and `examples/12_vault_langgraph.py`: the
+state and the checkpoints carry opaque references (binding, `action_id`,
+`receipt_id`) and the node calls `client.tools.execute`.
+
 ## LangChain (live tracking)
 
 `instrument_langgraph` feeds the **trace** channel. To feed the **live
