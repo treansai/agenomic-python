@@ -435,6 +435,155 @@ def test_names_outside_the_report_bounds_are_never_reported(tmp_path: Path) -> N
     assert inner["status"] == "supported"
 
 
+FAKE_AWS_KEY = "AKIA" + "TESTFAKEKEY00000"
+
+
+def strings_outside_content(document: Any, path: str = "") -> list[tuple[str, str]]:
+    if isinstance(document, str):
+        return [(path, document)]
+    if isinstance(document, list):
+        return [
+            pair
+            for index, item in enumerate(document)
+            for pair in strings_outside_content(item, f"{path}/{index}")
+        ]
+    if isinstance(document, dict):
+        return [
+            pair
+            for key, item in document.items()
+            if key != "content"
+            for pair in strings_outside_content(item, f"{path}/{key}")
+        ]
+    return []
+
+
+def assert_no_secret_outside_content(document: dict[str, Any]) -> None:
+    from agenomic.prompts.secrets import scan
+
+    serialized = json.dumps(document)
+    assert FAKE_AWS_KEY not in serialized
+    assert FAKE_AWS_KEY.lower() not in serialized.lower()
+    assert [(path, text) for path, text in strings_outside_content(document) if scan(text)] == []
+    assert schema_errors(document) == []
+
+
+def test_secrets_in_names_paths_and_labels_never_reach_the_report(tmp_path: Path) -> None:
+    from agenomic.prompts.importer import check_report
+
+    key = FAKE_AWS_KEY
+    graph = (
+        "from langgraph.graph import StateGraph\n"
+        "from langgraph.prebuilt import create_react_agent\n"
+        'PLAN_PROMPT = "Plan {task}."\n'
+        'REVIEW_PROMPT = "Review {draft}."\n'
+        "def plan(state):\n    return PLAN_PROMPT\n"
+        "def review(state):\n    return REVIEW_PROMPT\n"
+        "research = create_react_agent(model, tools=[], prompt='Research the order.')\n"
+        "g = StateGraph(dict)\n"
+        f'g.add_node("planner-{key}", plan)\n'
+        f'g.add_node("research-{key}", research)\n'
+        f'g.add_node("review-{key}", review)\n'
+        f'g.add_node("review-{key[:-1]}1", review)\n'
+    )
+    write(tmp_path, "graph.py", graph)
+    write(
+        tmp_path,
+        "names.py",
+        "from langchain_core.prompts import PromptTemplate\n"
+        f'{key} = PromptTemplate.from_template("Hello {{name}}.")\n'
+        f"def {key[:-1]}1():\n"
+        '    return PromptTemplate.from_template("Inside {e}.")\n'
+        "def handler():\n"
+        '    return PromptTemplate.from_template("Plain {f}.")\n',
+    )
+    write(tmp_path, f"keys/{key}.py", 'KEY_PROMPT = "Use {x}."\n')
+    result = scan_paths([tmp_path], root=tmp_path, now=NOW, label=f"agent {key}")
+    assert_no_secret_outside_content(result)
+    assert check_report(result) == result
+    assert result["root"]["label"] == "agent [REDACTED:aws_access_key]"
+    paths = [entry["path"] for entry in result["files"]]
+    assert paths == ["graph.py", "keys/[REDACTED:aws_access_key].py", "names.py"]
+    finding = {"pattern": "aws_access_key", "length": len(key)}
+
+    planner = candidate(result, "graph.py", symbol="PLAN_PROMPT")
+    assert planner["status"] == "blocked_secret"
+    assert planner["content"] is None
+    assert planner["content_digest"] is None
+    assert codes(planner)[0] == "secret_detected"
+    assert planner["secret_findings"] == [
+        {**finding, "line": planner["source"]["line"], "column": planner["source"]["column"]}
+    ]
+    assert planner["proposal"]["node_path"] == "planner-[REDACTED:aws_access_key]"
+    assert planner["proposal"]["slot_path"] == "planner_redacted_aws_access_key.instructions"
+    assert planner["proposal"]["prompt_id"] == "prm_planner_redacted_aws_access_key_instructions"
+
+    review = candidate(result, "graph.py", symbol="REVIEW_PROMPT")
+    assert review["status"] == "supported"
+    assert review["proposal"]["node_path"] is None
+    assert "node_unresolved" in codes(review)
+    assert review["secret_findings"] == []
+
+    subagent = candidate(result, "graph.py", construct="langgraph.subagent_node")
+    assert subagent["status"] == "unresolved"
+    assert subagent["proposal"]["node_path"] == "research-[REDACTED:aws_access_key]"
+    assert {"subagent_unmapped", "secret_detected"} <= set(codes(subagent))
+    assert [item["pattern"] for item in subagent["secret_findings"]] == ["aws_access_key"]
+    agent = candidate(result, "graph.py", construct="langgraph.create_react_agent.prompt")
+    assert agent["status"] == "blocked_secret"
+    assert agent["proposal"]["node_path"] == "research-[REDACTED:aws_access_key]"
+
+    named = candidate(result, "names.py", line=2)
+    assert named["source"]["symbol"] == "[REDACTED:aws_access_key]"
+    assert named["status"] == "blocked_secret"
+    assert named["proposal"]["slot_path"] == "redacted_aws_access_key.instructions"
+    inner = candidate(result, "names.py", line=4)
+    assert inner["source"]["enclosing_function"] == "[REDACTED:aws_access_key]"
+    assert inner["status"] == "blocked_secret"
+    plain = candidate(result, "names.py", enclosing_function="handler")
+    assert plain["status"] == "supported"
+
+    stored = candidate(result, "keys/[REDACTED:aws_access_key].py", symbol="KEY_PROMPT")
+    assert stored["status"] == "blocked_secret"
+    assert [item["pattern"] for item in stored["secret_findings"]] == ["aws_access_key"]
+
+
+def test_an_issue_message_never_carries_a_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agenomic.prompts import importer
+
+    monkeypatch.setitem(
+        importer.ISSUE_MESSAGES, "variable_types_defaulted", f"types near {FAKE_AWS_KEY}"
+    )
+    write(tmp_path, "note.py", 'NOTE_PROMPT = "Note {x}."\n')
+    result = scan_paths([tmp_path], root=tmp_path, now=NOW)
+    assert_no_secret_outside_content(result)
+    note = candidate(result, "note.py", symbol="NOTE_PROMPT")
+    assert note["status"] == "blocked_secret"
+    assert note["content"] is None
+    messages = [issue["message"] for issue in note["issues"]]
+    assert "types near [REDACTED:aws_access_key]" in messages
+    assert note["secret_findings"] == [
+        {"pattern": "aws_access_key", "line": 1, "column": 15, "length": len(FAKE_AWS_KEY)}
+    ]
+
+
+def test_slugs_that_look_like_secrets_are_never_proposed(tmp_path: Path) -> None:
+    token = "GHP_" + "A" * 36
+    write(
+        tmp_path,
+        "hub.py",
+        "from langchain_core.prompts import PromptTemplate\n"
+        f'{token} = PromptTemplate.from_template("Hi {{x}}.")\n',
+    )
+    result = scan_paths([tmp_path], root=tmp_path, now=NOW)
+    assert_no_secret_outside_content(result)
+    hub = candidate(result, "hub.py", construct="langchain.prompt_template")
+    assert hub["status"] == "supported"
+    assert hub["source"]["symbol"] == token
+    assert hub["proposal"]["slot_path"] == "redacted_github_token.instructions"
+
+
 def test_columns_count_code_points_and_follow_escapes(tmp_path: Path) -> None:
     line = 'TITLE = "café"; GREETING_PROMPT = "Hello {name}"\n'
     secret = '"Bearer abcdefghijklmnopqrstuvwxyz0123"'

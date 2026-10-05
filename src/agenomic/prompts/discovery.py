@@ -12,7 +12,7 @@ import tokenize
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional, Union
@@ -29,7 +29,7 @@ from agenomic.prompts.importer import (
     convert_prompt,
     valid_label,
 )
-from agenomic.prompts.secrets import SECRET_PATTERN_SET, scan
+from agenomic.prompts.secrets import SECRET_PATTERN_SET, SecretFinding, scan, scrub
 
 __all__ = ["DEFAULT_EXCLUDES", "scan_paths"]
 
@@ -216,6 +216,15 @@ def _bounded(name: Optional[str]) -> Optional[str]:
     if name is None or not 0 < len(name) <= _MAX_NAME or "\0" in name:
         return None
     return name
+
+
+def _redact(value: str, leaks: list[SecretFinding]) -> str:
+    found = scan(value)
+    if not found:
+        return value
+    leaks.extend(found)
+    text = scrub(value)
+    return text if len(text) <= _MAX_NAME else f"[REDACTED:{found[0].pattern}]"
 
 
 def _kw(call: ast.Call, name: str) -> Optional[ast.expr]:
@@ -1446,6 +1455,8 @@ class _Report:
         self.prompt_ids: set[str] = set()
 
     def slot(self, prefix: str, usage: str) -> Optional[str]:
+        if scan(prefix):
+            prefix = _slug(scrub(prefix))
         if not _SLOT_SEGMENT.fullmatch(prefix):
             return None
         candidate = f"{prefix}.{usage}"
@@ -1470,6 +1481,16 @@ class _Report:
         return candidate
 
     def candidate(self, draft: _Draft) -> dict[str, Any]:
+        leaks: list[SecretFinding] = []
+        linked = next(iter(draft.node_paths)) if len(draft.node_paths) == 1 else None
+        draft = replace(
+            draft,
+            rel=_redact(draft.rel, leaks),
+            symbol=None if draft.symbol is None else _redact(draft.symbol, leaks),
+            function=None if draft.function is None else _redact(draft.function, leaks),
+            hint=None if draft.hint is None else _redact(draft.hint, leaks),
+            subagent=None if draft.subagent is None else _redact(draft.subagent, leaks),
+        )
         source = {
             "path": draft.rel,
             "line": draft.start[0],
@@ -1493,7 +1514,7 @@ class _Report:
         content: Optional[dict[str, Any]] = None
         digest: Optional[str] = None
         kind: Optional[str] = None
-        node_path = next(iter(draft.node_paths)) if len(draft.node_paths) == 1 else None
+        node_path = None if linked is None else _redact(linked, leaks)
         if draft.subagent is not None:
             status = "unresolved"
             node_path = draft.subagent
@@ -1542,6 +1563,20 @@ class _Report:
             issues.append(_report_issue("node_unresolved", draft.start))
         if draft.subagent is None and len(draft.node_paths) > 1:
             issues.append(_report_issue("node_unresolved", draft.start))
+        for entry in issues:
+            quoted = scan(entry["message"])
+            if quoted:
+                leaks.extend(quoted)
+                entry["message"] = scrub(entry["message"])
+        if leaks:
+            findings.extend(
+                _finding(None, draft.start, leak.pattern, leak.offset, leak.length)
+                for leak in leaks
+            )
+            if status != "unresolved":
+                status, content, digest = "blocked_secret", None, None
+            if all(item["code"] != "secret_detected" for item in issues):
+                issues.insert(0, _report_issue("secret_detected", draft.start))
         proposal: dict[str, Any] = {
             "prompt_id": None,
             "prompt_kind": None,
@@ -1572,7 +1607,7 @@ class _Report:
 
 def _file_record(rel: str, digest: str, reason: Optional[str]) -> dict[str, Any]:
     return {
-        "path": rel,
+        "path": _redact(rel, []),
         "sha256": "sha256:" + digest,
         "status": "scanned" if reason is None else "skipped",
         "skip_reason": reason,
@@ -1657,7 +1692,8 @@ def _label(root: Path, label: Optional[str]) -> str:
         if label is not None:
             raise ValueError("label must be a short name, never an absolute path")
         return "repository"
-    return value
+    value = scrub(value)
+    return value if valid_label(value) else "repository"
 
 
 def _timestamp(now: Optional[datetime]) -> str:

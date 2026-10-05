@@ -638,8 +638,12 @@ Each candidate has a status:
   mustache or jinja2 template, a format spec or a callable partial.
 - `unresolved`: the prompt is built at runtime: an f-string, `.format`,
   `hub.pull`, the result of a call, a subgraph node.
-- `blocked_secret`: the template contains a credential. The report keeps
-  the pattern id and its position (`secret_findings`), never the text.
+- `blocked_secret`: the template contains a credential, or so does a name
+  the report carries for it: its file path, symbol, function, graph node or
+  an issue message. The report keeps the pattern id and its position
+  (`secret_findings`), never the text. A name is written with each match
+  replaced by `[REDACTED:<pattern>]`, and so is the root label; an
+  unresolved candidate keeps its status with the same findings.
 
 Each candidate also proposes a prompt id, a slot path such as
 `planner.instructions` and a usage, and explains every decision with issue
@@ -677,6 +681,8 @@ for item in plan.items:
 - `import_report` verifies the plan digest and the summary before it
   returns. Uploading the same report for the same agent again returns the
   same plan (`plan.replayed`) until it expires (`plan.expires_at`).
+- A report with a credential anywhere, contents or any other string, is
+  refused before it is sent (`secret_detected`, with the location only).
 
 Applying cites the digest of the plan you reviewed:
 

@@ -4,7 +4,7 @@ import json
 import os
 import re
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union, cast
@@ -820,7 +820,27 @@ def check_report(report: Mapping[str, Any]) -> dict[str, Any]:
             "a candidate content contains a credential",
             path + "/content",
         )
+    outside = {**document, "candidates": [{**item, "content": None} for item in candidates]}
+    for path, text in _strings(outside, ""):
+        _expect(
+            not scan(text),
+            "secret_detected",
+            "a report member outside the contents contains a credential",
+            path,
+        )
     return cast(dict[str, Any], document)
+
+
+def _strings(value: Any, path: str) -> Iterator[tuple[str, str]]:
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _strings(item, f"{path}/{index}")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield path, key
+            yield from _strings(item, pointer(path, key))
 
 
 def build_import_request(

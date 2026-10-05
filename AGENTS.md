@@ -355,6 +355,23 @@ rule of the engineering rules above.
   literal, and the literal pieces of an f-string are located at the start of
   the f-string, because the positions of nodes inside an f-string changed in
   Python 3.12. A report never carries a matched value.
+- Every other string of a report is scanned with the same patterns too: the
+  root label, file paths, symbols, enclosing functions, graph node names,
+  the agent variable a slot is named after, and issue messages. A match is
+  replaced by `[REDACTED:<pattern>]` (the marker alone when the result would
+  pass 256 code points; a label that would pass 128 becomes `repository`).
+  Names are redacted before the slot path and prompt id are derived, because
+  slugs are lowercased and would carry an `AKIA` key as `akia...`; a slug
+  that matches only after lowercasing (`GHP_...`) is replaced by the slug of
+  its redaction. Each match in a candidate's names or messages is a
+  `secret_findings` entry at the candidate's start, since a name has no
+  position of its own, and a supported or unsupported candidate becomes
+  `blocked_secret`: the schema allows findings on no supported candidate,
+  and a slot proposed from a redacted name would not match the code. An
+  unresolved candidate keeps its status. The root label and a file without
+  candidates have nowhere to hold a finding and are only redacted. The node
+  rule counts the raw names, so two secret node names that redact alike
+  still give `node_unresolved`.
 - A static message (`SystemMessage`, and the string `prompt` of
   `create_react_agent` or `system_prompt` of `create_agent`) is literal text
   for LangChain, so its braces are escaped on import (`static_message_escaped`).
@@ -399,8 +416,11 @@ rule of the engineering rules above.
 - The import plan is a server document (plan id, workspace, base versions), so
   the client only builds the upload (`build_import_request`) after checking the
   report: repository-relative paths, content only on supported candidates,
-  content digests, and no secret in any content. Every plan received is
-  verified (`plan_digest`, `summary`, unresolved items skipped) before it is
+  content digests, and no secret in any content or in any other string or
+  key (`secret_detected` with the pointer of the member, or of its parent
+  for a key, never the value), so a report written by hand or by an older
+  scanner cannot upload one. Every plan received is verified
+  (`plan_digest`, `summary`, unresolved items skipped) before it is
   printed or applied. Apply decisions default to the planned action with
   `blocked` turned into `skip`, cite `plan_digest`, carry a generated body
   `idempotency_key` and never send the `Idempotency-Key` header.

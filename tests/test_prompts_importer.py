@@ -271,6 +271,39 @@ def test_reports_are_checked_before_upload() -> None:
         assert reason(raised) == code
 
 
+def test_a_secret_outside_the_contents_is_never_uploaded() -> None:
+    key = "AKIA" + "TESTFAKEKEY00000"
+    scanned = scan_paths([SOURCES], root=SOURCES)
+    with_issue = next(c for c in scanned["candidates"] if c["issues"])
+    index = scanned["candidates"].index(with_issue)
+    cases = [
+        (["candidates", index, "issues", 0, "message"], f"/candidates/{index}/issues/0/message"),
+        (["candidates", index, "proposal", "node_path"], f"/candidates/{index}/proposal/node_path"),
+        (["candidates", index, "source", "path"], f"/candidates/{index}/source/path"),
+        (["files", 0, "path"], "/files/0/path"),
+        (["root", "label"], "/root/label"),
+    ]
+    for members, pointer in cases:
+        document = copy.deepcopy(scanned)
+        parent: Any = document
+        for member in members[:-1]:
+            parent = parent[member]
+        parent[members[-1]] = f"app/{key}.py"
+        with pytest.raises(PromptImportError) as raised:
+            build_import_request(document, agent_id=AGENT)
+        assert reason(raised) == "secret_detected"
+        assert raised.value.details["errors"][0]["path"] == pointer
+        assert key not in json.dumps(raised.value.details)
+        assert key not in str(raised.value)
+    keyed = copy.deepcopy(scanned)
+    keyed["root"][f"note {key}"] = "x"
+    with pytest.raises(PromptImportError) as raised:
+        check_report(keyed)
+    assert reason(raised) == "secret_detected"
+    assert raised.value.details["errors"][0]["path"] == "/root"
+    assert key not in json.dumps(raised.value.details)
+
+
 def test_plans_are_verified_before_review() -> None:
     plan = fixture("import-plan.json")
     assert verify_plan(plan) is plan
@@ -510,6 +543,22 @@ def test_cli_render_and_digest(
     )
     assert cli.main(["prompts", "digest", str(incomplete)]) == 1
     assert "prompt_template_invalid" in capsys.readouterr().err
+    defaulted = tmp_path / "defaulted.yaml"
+    defaulted.write_text(
+        "schema: agenomic.prompt_file/v1\n"
+        "content:\n"
+        "  schema: agenomic.prompt_content/v1\n"
+        "  kind: text\n"
+        "  body: Plan for {customer}.\n"
+        "  variables:\n"
+        "    customer: {type: string, required: true}\n",
+        encoding="utf-8",
+    )
+    variables.write_text(json.dumps({"customer": "Acme"}), encoding="utf-8")
+    assert cli.main(["prompts", "render", str(defaulted), "--vars", str(variables)]) == 1
+    assert "(missing_field)" in capsys.readouterr().err
+    assert cli.main(["prompts", "digest", str(defaulted)]) == 1
+    assert "(missing_field)" in capsys.readouterr().err
     pinned_content = complete_content(
         {
             "kind": "text",
