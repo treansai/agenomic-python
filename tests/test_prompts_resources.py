@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Optional, cast
 
+import httpx
 import pytest
 from prompt_fakes import (
     AGENT,
@@ -15,6 +18,8 @@ from prompt_fakes import (
     SESSION_MESSAGE,
     WORKSPACE,
     FakePromptServer,
+    _if_match,
+    _strict,
     chat_content,
     release_with_child,
     required,
@@ -22,6 +27,7 @@ from prompt_fakes import (
     text_content,
 )
 
+from agenomic import _transport
 from agenomic._client import Client
 from agenomic._transport import pool_for
 from agenomic._version import __version__
@@ -33,18 +39,22 @@ from agenomic.prompts import (
     PromptBundle,
     PromptCache,
     PromptConflictError,
+    PromptImportError,
     PromptIntegrityError,
     PromptRefError,
     PromptUri,
     PromptVersionRef,
     ResolvedFrom,
+    prompt_digest,
     thread_key,
 )
+from agenomic.prompts.importer import complete_content, load_prompts_file, plan_summary
 from agenomic.prompts.resources import (
     Channel,
     ChannelEvent,
     ChannelMovePreview,
     Draft,
+    ImportPlan,
     Page,
     PinnedRefs,
     PromptAlias,
@@ -53,6 +63,364 @@ from agenomic.prompts.resources import (
 )
 
 BASE = "https://api.test"
+IMPORTS = Path(__file__).parent / "fixtures" / "prompt_imports"
+SCHEMAS = Path(__file__).parent / "schemas" / "v0.4"
+AT = "2026-10-05T12:00:00Z"
+OBSERVATION_KEYS = {
+    "slot_path",
+    "node_path",
+    "prompt_ref",
+    "content_digest",
+    "rendered_hash",
+    "overlay",
+    "alias",
+    "alias_generation",
+    "unmanaged",
+    "role_layout",
+    "count",
+    "first_at",
+    "last_at",
+}
+PROMPTS_FILE = f"""schema: agenomic.prompts_file/v1
+agent_id: {AGENT}
+prompts:
+  - prompt_id: prm_support_writer
+    kind: text
+    name: Support writer
+    tags: [yes, support]
+    expected_latest_version: null
+    change_message: first
+    content:
+      kind: text
+      body: |-
+        Answer {{question}} politely.
+      variables:
+        question: {{ type: string, required: true }}
+slots:
+  - slot_path: writer.response
+    usage: system
+    prompt_id: prm_support_writer
+"""
+
+
+@dataclass
+class ImportServer(FakePromptServer):
+    imports: dict[str, dict[str, Any]] = field(default_factory=dict)
+    replays: dict[str, str] = field(default_factory=dict)
+    journal: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict)
+    slot_revision: int = 0
+    usage: list[dict[str, Any]] = field(default_factory=list)
+
+    def _routes(self) -> list[tuple[str, str, Callable[..., httpx.Response]]]:
+        return [
+            (r"/v1/prompts/imports", "POST", self._create_import),
+            (r"/v1/prompts/imports/([^/]+)/apply", "POST", self._apply_import),
+            (r"/v1/prompts/declarations/plan", "POST", self._plan_declarations),
+            (r"/v1/prompts/declarations/apply", "POST", self._apply_declarations),
+            (r"/v1/agents/([^/]+)/bindings/([^/]+)/usage", "POST", self._usage),
+            *super()._routes(),
+        ]
+
+    def _plan(
+        self, kind: str, digest: str, items: list[Any], **header: Optional[str]
+    ) -> dict[str, Any]:
+        plan: dict[str, Any] = {
+            "schema": "agenomic.prompt_import_plan/v1",
+            "plan_id": header.get("plan_id"),
+            "workspace_id": self.engine.workspace_id,
+            "agent_id": header.get("agent_id"),
+            "source": {"kind": kind, "digest": digest},
+            "created_at": header.get("created_at"),
+            "items": items,
+            "summary": plan_summary(items),
+        }
+        plan["plan_digest"] = prompt_digest(plan)
+        return plan
+
+    def _action(self, prompt_id: str, digest: str) -> tuple[str, Optional[int], Optional[int]]:
+        if prompt_id not in self.engine._state["prompts"]:
+            return "create_prompt", None, None
+        latest = self.engine.prompt(prompt_id)["latest_version"]
+        if latest is not None and self.engine.get_version(prompt_id, latest).content_digest == (
+            digest
+        ):
+            return "reuse_version", latest, latest
+        return "create_version", latest, None
+
+    def _write(self, item: dict[str, Any], prompt_id: str, action: str) -> dict[str, Any]:
+        if action == "reuse_version":
+            return {"outcome": "unchanged", "version": item["base_version"]}
+        if action == "create_prompt":
+            self.engine.create_prompt(prompt_id, kind=item["prompt_kind"], name=prompt_id)
+        latest = self.engine.prompt(prompt_id)["latest_version"]
+        version = self.engine.publish(
+            prompt_id, item["content"], parent_version=latest, change_message="import"
+        )
+        outcome = "created" if action == "create_prompt" else "versioned"
+        return {"outcome": outcome, "version": version.ref.version}
+
+    def _replayed(self, key: str, digest: str) -> Optional[httpx.Response]:
+        journaled = self.journal.get(key)
+        if journaled is None:
+            return None
+        if journaled[0] != digest:
+            raise ApiError("idempotency_key_reused", 409, "the key names another request")
+        return httpx.Response(200, json={**journaled[1], "replayed": True})
+
+    def _slots(self, request: httpx.Request, writes: bool) -> None:
+        if writes and _if_match(request) != self.slot_revision:
+            raise ApiError(
+                "agent_prompt_slots_conflict", 409, "slots moved", {"current": self.slot_revision}
+            )
+
+    def _create_import(self, request: httpx.Request, body: Any) -> httpx.Response:
+        _strict(body, {"report", "agent_id", "options"})
+        self._require_editor()
+        key = prompt_digest({"request": body})
+        if key in self.replays:
+            record = self.imports[self.replays[key]]["record"]
+            return httpx.Response(200, json={"replayed": True, "import": record})
+        report = body["report"]
+        items = []
+        for candidate in report["candidates"]:
+            proposal, status = candidate["proposal"], candidate["status"]
+            action, base, existing = "skip", None, None
+            if status in ("unsupported", "blocked_secret"):
+                action = "blocked"
+            elif status == "supported":
+                action, base, existing = self._action(
+                    proposal["prompt_id"], candidate["content_digest"]
+                )
+            items.append(
+                {
+                    "item_id": candidate["candidate_id"],
+                    "action": action,
+                    "prompt_id": proposal["prompt_id"],
+                    "prompt_kind": proposal["prompt_kind"],
+                    "base_version": base,
+                    "content": candidate["content"],
+                    "content_digest": candidate["content_digest"],
+                    "existing_version_with_same_digest": existing,
+                    "slot": {
+                        "slot_path": proposal["slot_path"],
+                        "node_path": proposal["node_path"],
+                        "subagent_id": None,
+                        "usage": proposal["usage"],
+                        "status": "unresolved" if status == "unresolved" else "discovered",
+                    },
+                    "issues": candidate["issues"],
+                    "secret_findings": candidate["secret_findings"],
+                    "provenance": {
+                        "source_file": candidate["source"]["path"],
+                        "source_line": candidate["source"]["line"],
+                    },
+                }
+            )
+        import_id = f"imp_01j9x1k3m5n7p9q1r3s5t7v9{len(self.imports):02d}"
+        plan = self._plan(
+            "discovery_report",
+            prompt_digest(report),
+            items,
+            plan_id=import_id,
+            agent_id=body.get("agent_id"),
+            created_at=AT,
+        )
+        record = {
+            "import_id": import_id,
+            "status": "planned",
+            "report_digest": prompt_digest(report),
+            "expires_at": "2026-10-12T12:00:00Z",
+            "plan": plan,
+        }
+        self.imports[import_id] = {"record": record, "applied": False}
+        self.replays[key] = import_id
+        return httpx.Response(201, json={"replayed": False, "import": record})
+
+    def _apply_import(self, request: httpx.Request, body: Any, import_id: str) -> httpx.Response:
+        allowed = {"idempotency_key", "plan_digest", "agent_id", "mode", "declare_slots", "items"}
+        _strict(body, allowed, ("items",))
+        self._require_editor()
+        decisions = {}
+        for decision in body["items"]:
+            _strict(
+                decision,
+                {
+                    "item_id",
+                    "action",
+                    "prompt_id",
+                    "base_version",
+                    "slot_path",
+                    "subagent_id",
+                    "override",
+                },
+            )
+            decisions[decision["item_id"]] = decision
+        stored = self.imports.get(import_id)
+        if stored is None:
+            raise ApiError("prompt_import_not_found", 404, "no such import")
+        declare = body.get("declare_slots", False)
+        if declare:
+            _if_match(request)
+        replay = self._replayed(body["idempotency_key"], prompt_digest(body))
+        if replay is not None:
+            return replay
+        if stored["applied"]:
+            raise ApiError("prompt_import_already_applied", 409, "the plan was applied")
+        plan = stored["record"]["plan"]
+        if body["plan_digest"] != plan["plan_digest"]:
+            raise ApiError(
+                "prompt_import_plan_stale",
+                409,
+                "plan_digest differs from the stored plan",
+                {"current": plan["plan_digest"]},
+            )
+        self._slots(request, declare)
+        if set(decisions) != {item["item_id"] for item in plan["items"]}:
+            raise ApiError("validation_error", 400, "every plan item is listed once")
+        results = []
+        for item in plan["items"]:
+            decision = decisions[item["item_id"]]
+            action = decision["action"]
+            if action == "skip":
+                results.append({"item_id": item["item_id"], "outcome": "skipped"})
+                continue
+            if item["action"] in ("blocked", "skip") and "override" not in decision:
+                raise ApiError(
+                    "prompt_import_item_blocked",
+                    409,
+                    "the item cannot be imported",
+                    {"item_id": item["item_id"]},
+                )
+            written = self._write(item, decision["prompt_id"], action)
+            results.append(
+                {
+                    "item_id": item["item_id"],
+                    "prompt_id": decision["prompt_id"],
+                    "content_digest": item["content_digest"],
+                    **written,
+                }
+            )
+        slots = None
+        if declare:
+            self.slot_revision += 1
+            agent = body.get("agent_id") or plan["agent_id"]
+            slots = {"agent_id": agent, "revision": self.slot_revision}
+        stored["applied"] = True
+        answer = {"import_id": import_id, "replayed": False, "results": results, "slots": slots}
+        self.journal[body["idempotency_key"]] = (prompt_digest(body), answer)
+        return httpx.Response(200, json=answer)
+
+    def _declared(self, document: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+        items = []
+        declared = document.get("slots") or []
+        for entry in document["prompts"]:
+            content = complete_content(entry["content"])
+            action, base, existing = self._action(entry["prompt_id"], prompt_digest(content))
+            if "expected_latest_version" in entry and entry["expected_latest_version"] != base:
+                raise ApiError("prompt_import_plan_stale", 409, "expected_latest_version moved", {})
+            slot = next((s for s in declared if s.get("prompt_id") == entry["prompt_id"]), None)
+            items.append(
+                {
+                    "item_id": "cand_"
+                    + hashlib.sha256(entry["prompt_id"].encode()).hexdigest()[:16],
+                    "action": action,
+                    "prompt_id": entry["prompt_id"],
+                    "prompt_kind": entry["kind"],
+                    "base_version": base,
+                    "content": content,
+                    "content_digest": prompt_digest(content),
+                    "existing_version_with_same_digest": existing,
+                    "slot": None
+                    if slot is None
+                    else {
+                        "slot_path": slot["slot_path"],
+                        "node_path": slot.get("node_path"),
+                        "subagent_id": None,
+                        "usage": slot.get("usage", "other"),
+                        "status": "managed",
+                    },
+                    "issues": [],
+                    "secret_findings": [],
+                    "provenance": {"source_file": None, "source_line": None},
+                }
+            )
+        plan = self._plan(
+            "prompts_file", prompt_digest(document), items, agent_id=document.get("agent_id")
+        )
+        slots = None
+        if isinstance(document.get("slots"), list) and isinstance(document.get("agent_id"), str):
+            slots = {
+                "agent_id": document["agent_id"],
+                "revision": self.slot_revision,
+                "added": [slot["slot_path"] for slot in declared],
+                "removed": [],
+                "changed": [],
+            }
+        return plan, slots
+
+    def _plan_declarations(self, request: httpx.Request, body: Any) -> httpx.Response:
+        _strict(body, {"document"})
+        self._require_editor()
+        plan, slots = self._declared(body["document"])
+        return httpx.Response(200, json={"plan": plan, "slots": slots})
+
+    def _apply_declarations(self, request: httpx.Request, body: Any) -> httpx.Response:
+        _strict(body, {"idempotency_key", "document", "plan_digest"})
+        self._require_editor()
+        document = body["document"]
+        writes = isinstance(document.get("slots"), list) and isinstance(
+            document.get("agent_id"), str
+        )
+        if writes:
+            _if_match(request)
+        replay = self._replayed(body["idempotency_key"], prompt_digest(body))
+        if replay is not None:
+            return replay
+        plan, _ = self._declared(document)
+        if plan["plan_digest"] != body["plan_digest"]:
+            raise ApiError(
+                "prompt_import_plan_stale",
+                409,
+                "the plan computed now differs from the cited plan_digest",
+                {"plan_digest": plan["plan_digest"]},
+            )
+        self._slots(request, writes)
+        results = [
+            {
+                "item_id": item["item_id"],
+                "prompt_id": item["prompt_id"],
+                **self._write(item, item["prompt_id"], item["action"]),
+            }
+            for item in plan["items"]
+        ]
+        slots = None
+        if writes:
+            self.slot_revision += 1
+            slots = {"agent_id": document["agent_id"], "revision": self.slot_revision}
+        answer = {
+            "replayed": False,
+            "plan_digest": body["plan_digest"],
+            "results": results,
+            "slots": slots,
+        }
+        self.journal[body["idempotency_key"]] = (prompt_digest(body), answer)
+        return httpx.Response(200, json=answer)
+
+    def _usage(
+        self, request: httpx.Request, body: Any, agent_id: str, binding_id: str
+    ) -> httpx.Response:
+        _strict(body, {"observations"})
+        observations = body["observations"]
+        if not 1 <= len(observations) <= 500:
+            raise ApiError("validation_error", 400, "observations must hold 1 to 500 entries")
+        for observation in observations:
+            _strict(observation, OBSERVATION_KEYS)
+            if observation.get("overlay") is not None:
+                _strict(observation["overlay"], {"digest", "position"})
+        self.usage.extend(observations)
+        return httpx.Response(204)
+
+
 PLANNER_V2 = chat_content(
     [
         {"role": "system", "content": "Plan briefly for {customer}. {>safety}"},
@@ -85,9 +453,13 @@ def body_of(server: FakePromptServer, index: int = -1) -> Any:
     return json.loads(server.requests[index].content)
 
 
+def import_fixture(name: str) -> dict[str, Any]:
+    return json.loads((IMPORTS / name).read_text(encoding="utf-8"))
+
+
 @pytest.fixture
-def server() -> FakePromptServer:
-    return FakePromptServer(seeded_engine(), api_key_scopes=["write"])
+def server() -> ImportServer:
+    return ImportServer(seeded_engine(), api_key_scopes=["write"])
 
 
 @pytest.fixture
@@ -273,6 +645,14 @@ def test_read_key_publish_refused_verbatim(client: Client, server: FakePromptSer
         lambda: client.prompts.drafts.save(
             "prm_writer", text_content("x"), base_version=1, expected_revision=0
         ),
+        lambda: client.prompts.import_report(import_fixture("discovery-report.json")),
+        lambda: client.prompts.apply_import(
+            "imp_01j9x1k3m5n7p9q1r3s5t7v9w1", plan_digest="sha256:" + "0" * 64, items=[]
+        ),
+        lambda: client.prompts.plan_declarations(PROMPTS_FILE),
+        lambda: client.prompts.apply_declarations(
+            PROMPTS_FILE, plan_digest="sha256:" + "0" * 64, expected_slots_revision=0
+        ),
     ]
     for call in calls:
         with pytest.raises(ApiError) as raised:
@@ -282,8 +662,9 @@ def test_read_key_publish_refused_verbatim(client: Client, server: FakePromptSer
         assert raised.value.message == SCOPE_MESSAGE
         assert raised.value.request_id == REQUEST_ID
     assert "prm_new" not in server.engine._state["prompts"]
+    assert "prm_support_writer" not in server.engine._state["prompts"]
     assert server.engine.prompt("prm_writer")["latest_version"] == 1
-    assert len(server.requests) == 3
+    assert len(server.requests) == 7
     for scopes in (["read"], ["write"], []):
         server.api_key_scopes = scopes
         with pytest.raises(ApiError) as alias:
@@ -759,6 +1140,12 @@ def test_local_mode_uses_the_engine(client: Client) -> None:
         ),
         local.whoami,
         lambda: client.prompts.local,
+        lambda: local.prompts.import_report(import_fixture("discovery-report.json")),
+        lambda: local.prompts.apply_import("imp_x", plan_digest="sha256:x", items=[]),
+        lambda: local.prompts.plan_declarations(PROMPTS_FILE),
+        lambda: local.prompts.apply_declarations(PROMPTS_FILE, plan_digest="sha256:x"),
+        lambda: local.prompts.register_runtime(AGENT, {"writer.system": object()}),
+        lambda: local.bindings.report_usage(AGENT, binding.binding_id, []),
     ]
     for call in unsupported:
         with pytest.raises(ApiError) as raised:
@@ -855,3 +1242,464 @@ async def test_async_twins(server: FakePromptServer, tmp_path: Path) -> None:
         assert len(await client.channels.ahistory(AGENT, "production")) == 1
         preview = await client.channels.amove_preview(AGENT, "production", release_id=root)
         assert preview.agent_id == AGENT
+
+
+def report_errors(report: dict[str, Any]) -> list[str]:
+    from jsonschema import Draft202012Validator
+    from referencing import Registry, Resource
+
+    documents = [json.loads(path.read_text()) for path in sorted(SCHEMAS.glob("*.json"))]
+    registry = Registry().with_resources(
+        (document["$id"], Resource.from_contents(document)) for document in documents
+    )
+    schema = next(d for d in documents if d["$id"].endswith("prompt-discovery-report.schema.json"))
+    validator = Draft202012Validator(schema, registry=registry)
+    return [f"{error.json_path}: {error.message}" for error in validator.iter_errors(report)]
+
+
+def test_import_report_then_apply_cites_the_plan_digest(
+    client: Client, server: ImportServer
+) -> None:
+    report = import_fixture("discovery-report.json")
+    plan = client.prompts.import_report(report, agent_id=AGENT)
+    assert server.paths() == ["POST /v1/prompts/imports"]
+    assert body_of(server) == {"report": report, "agent_id": AGENT}
+    assert "idempotency-key" not in server.requests[-1].headers
+    assert isinstance(plan, ImportPlan)
+    assert (plan.import_id, plan.status, plan.replayed) == (plan.plan["plan_id"], "planned", False)
+    assert plan.report_digest == prompt_digest(report)
+    assert plan.plan_digest == plan.plan["plan_digest"]
+    assert {item["action"] for item in plan.items} == {"create_prompt", "skip", "blocked"}
+    replay = client.prompts.import_report(report, agent_id=AGENT)
+    assert replay.replayed
+    assert replay.plan == plan.plan
+    import_id = cast_str(plan.import_id)
+    with pytest.raises(ValueError):
+        client.prompts.apply_import(
+            import_id, plan_digest=plan.plan_digest, items=plan.decisions(), declare_slots=True
+        )
+    assert len(server.requests) == 2
+    with pytest.raises(PromptImportError) as stale:
+        client.prompts.apply_import(
+            import_id, plan_digest="sha256:" + "0" * 64, items=plan.decisions()
+        )
+    assert stale.value.code == "prompt_import_plan_stale"
+    assert stale.value.details["current"] == plan.plan_digest
+    result = client.prompts.apply_import(
+        import_id,
+        plan_digest=plan.plan_digest,
+        items=plan.decisions(),
+        declare_slots=True,
+        expected_slots_revision=0,
+        agent_id=AGENT,
+    )
+    sent = body_of(server)
+    assert set(sent) == {
+        "idempotency_key",
+        "plan_digest",
+        "mode",
+        "declare_slots",
+        "items",
+        "agent_id",
+    }
+    assert sent["plan_digest"] == plan.plan_digest
+    assert sent["idempotency_key"].startswith("import-apply-")
+    assert sent["idempotency_key"] != body_of(server, -2)["idempotency_key"]
+    assert sent["items"] == plan.decisions()
+    assert server.requests[-1].headers["if-match"] == '"0"'
+    assert "idempotency-key" not in server.requests[-1].headers
+    assert result["replayed"] is False
+    assert result["slots"] == {"agent_id": AGENT, "revision": 1}
+    outcomes = {entry["item_id"]: entry["outcome"] for entry in result["results"]}
+    assert sorted(set(outcomes.values())) == ["created", "skipped"]
+    assert server.engine.prompt("prm_support_planner")["latest_version"] == 1
+    again = client.prompts.apply_import(
+        import_id,
+        plan_digest=plan.plan_digest,
+        items=plan.decisions(),
+        declare_slots=True,
+        expected_slots_revision=0,
+        agent_id=AGENT,
+        idempotency_key=sent["idempotency_key"],
+    )
+    assert again["replayed"] is True
+    assert again["results"] == result["results"]
+    with pytest.raises(PromptImportError) as applied:
+        client.prompts.apply_import(import_id, plan_digest=plan.plan_digest, items=plan.decisions())
+    assert applied.value.code == "prompt_import_already_applied"
+    assert "if-match" not in server.requests[-1].headers
+    assert client.prompts.import_report(report).items[0]["action"] == "reuse_version"
+
+
+def cast_str(value: Optional[str]) -> str:
+    assert value is not None
+    return value
+
+
+def test_import_answers_are_verified(client: Client, server: ImportServer) -> None:
+    report = import_fixture("discovery-report.json")
+
+    def tamper(request: Any, payload: dict[str, Any]) -> dict[str, Any]:
+        if "import" in payload:
+            payload["import"]["plan"]["items"][0]["prompt_id"] = "prm_other"
+        return payload
+
+    server.rewrite = tamper
+    with pytest.raises(PromptIntegrityError) as tampered:
+        client.prompts.import_report(report, agent_id=AGENT)
+    assert tampered.value.code == "prompt_digest_mismatch"
+
+    def other_import(request: Any, payload: dict[str, Any]) -> dict[str, Any]:
+        if "import" in payload:
+            payload["import"]["import_id"] = "imp_01j9x1k3m5n7p9q1r3s5t7v9zz"
+        if "results" in payload:
+            payload["import_id"] = "imp_01j9x1k3m5n7p9q1r3s5t7v9zz"
+        return payload
+
+    def no_record(request: Any, payload: dict[str, Any]) -> dict[str, Any]:
+        payload["import"] = "planned"
+        return payload
+
+    server.rewrite = no_record
+    with pytest.raises(ApiError) as shapeless:
+        client.prompts.import_report(report, agent_id=AGENT)
+    assert shapeless.value.code == "invalid_response"
+    server.rewrite = other_import
+    with pytest.raises(ApiError) as mismatch:
+        client.prompts.import_report(report, agent_id=AGENT)
+    assert mismatch.value.code == "invalid_response"
+    with pytest.raises(ApiError) as other_agent:
+        client.prompts.import_report(report, agent_id=OTHER_AGENT)
+    assert other_agent.value.code == "invalid_response"
+    server.rewrite = None
+    plan = client.prompts.import_report(report)
+    server.rewrite = other_import
+    with pytest.raises(ApiError) as result:
+        client.prompts.apply_import(
+            cast_str(plan.import_id), plan_digest=plan.plan_digest, items=plan.decisions()
+        )
+    assert result.value.code == "invalid_response"
+    broken = json.loads(json.dumps(report))
+    broken["root"]["label"] = "/home/dev/support"
+    count = len(server.requests)
+    with pytest.raises(PromptImportError):
+        client.prompts.import_report(broken)
+    assert len(server.requests) == count
+
+
+def test_declarations_convert_yaml_client_side(
+    client: Client, server: ImportServer, tmp_path: Path
+) -> None:
+    plan = client.prompts.plan_declarations(PROMPTS_FILE)
+    request = server.requests[-1]
+    sent = body_of(server)
+    assert server.paths() == ["POST /v1/prompts/declarations/plan"]
+    assert set(sent) == {"document"}
+    assert sent["document"] == load_prompts_file(PROMPTS_FILE)
+    assert sent["document"]["prompts"][0]["tags"] == ["yes", "support"]
+    assert sent["document"]["prompts"][0]["content"]["body"] == "Answer {question} politely."
+    assert b"|-" not in request.content
+    assert request.headers["content-type"] == "application/json"
+    assert "idempotency-key" not in request.headers
+    assert plan.plan["source"] == {
+        "kind": "prompts_file",
+        "digest": prompt_digest(sent["document"]),
+    }
+    assert (plan.import_id, plan.plan["plan_id"]) == (None, None)
+    assert plan.slots == {
+        "agent_id": AGENT,
+        "revision": 0,
+        "added": ["writer.response"],
+        "removed": [],
+        "changed": [],
+    }
+    path = tmp_path / "prompts.yaml"
+    path.write_text(PROMPTS_FILE, encoding="utf-8")
+    assert client.prompts.plan_declarations(path).plan_digest == plan.plan_digest
+    assert client.prompts.plan_declarations(sent["document"]).plan_digest == plan.plan_digest
+    count = len(server.requests)
+    with pytest.raises(ValueError):
+        client.prompts.apply_declarations(PROMPTS_FILE, plan_digest=plan.plan_digest)
+    for broken in (
+        "prompts: [",
+        PROMPTS_FILE.replace("kind: text\n    name", "kind: 1.5\n    name"),
+    ):
+        with pytest.raises(PromptImportError):
+            client.prompts.plan_declarations(broken)
+    assert len(server.requests) == count
+    with pytest.raises(PromptImportError) as stale:
+        client.prompts.apply_declarations(
+            PROMPTS_FILE, plan_digest="sha256:" + "0" * 64, expected_slots_revision=0
+        )
+    assert stale.value.code == "prompt_import_plan_stale"
+    assert stale.value.details["plan_digest"] == plan.plan_digest
+    result = client.prompts.apply_declarations(
+        path, plan_digest=plan.plan_digest, expected_slots_revision=plan.slots["revision"]
+    )
+    applied = body_of(server)
+    assert set(applied) == {"idempotency_key", "document", "plan_digest"}
+    assert applied["document"] == sent["document"]
+    assert applied["plan_digest"] == plan.plan_digest
+    assert applied["idempotency_key"].startswith("declarations-apply-")
+    assert server.requests[-1].headers["if-match"] == '"0"'
+    assert "idempotency-key" not in server.requests[-1].headers
+    assert result["results"][0]["outcome"] == "created"
+    assert result["slots"] == {"agent_id": AGENT, "revision": 1}
+    again = client.prompts.apply_declarations(
+        path,
+        plan_digest=plan.plan_digest,
+        expected_slots_revision=0,
+        idempotency_key=applied["idempotency_key"],
+    )
+    assert again["replayed"] is True
+    unslotted = load_prompts_file(PROMPTS_FILE)
+    del unslotted["slots"]
+    unslotted["prompts"][0]["expected_latest_version"] = 1
+    reused = client.prompts.plan_declarations(unslotted)
+    assert reused.slots is None
+    assert reused.items[0]["action"] == "reuse_version"
+    done = client.prompts.apply_declarations(unslotted, plan_digest=reused.plan_digest)
+    assert "if-match" not in server.requests[-1].headers
+    assert done["results"][0]["outcome"] == "unchanged"
+
+    def other_document(request: Any, payload: dict[str, Any]) -> dict[str, Any]:
+        if "plan" in payload:
+            plan = payload["plan"]
+            plan["source"]["digest"] = "sha256:" + "1" * 64
+            plan["plan_digest"] = prompt_digest(
+                {key: value for key, value in plan.items() if key != "plan_digest"}
+            )
+        if "results" in payload:
+            payload["plan_digest"] = "sha256:" + "2" * 64
+        return payload
+
+    server.rewrite = other_document
+    with pytest.raises(ApiError) as mismatch:
+        client.prompts.plan_declarations(unslotted)
+    assert mismatch.value.code == "invalid_response"
+    with pytest.raises(ApiError) as result_mismatch:
+        client.prompts.apply_declarations(unslotted, plan_digest=reused.plan_digest)
+    assert result_mismatch.value.code == "invalid_response"
+
+
+def test_register_runtime_builds_a_report_and_only_plans(
+    client: Client, server: ImportServer
+) -> None:
+    prompts = pytest.importorskip("langchain_core.prompts")
+    secret = "AKIA" + "Z7" * 8
+    slots = {
+        "writer.instructions": prompts.PromptTemplate.from_template("Write about {topic}."),
+        "planner.system": prompts.ChatPromptTemplate.from_messages(
+            [
+                ("system", "Plan for {customer}."),
+                prompts.MessagesPlaceholder("history", optional=True),
+            ]
+        ),
+        "triage.router": prompts.PromptTemplate.from_template(
+            "Route {{x}}", template_format="mustache"
+        ),
+        "billing.system": prompts.PromptTemplate.from_template(f"Sign with {secret}."),
+        "dated.system": prompts.PromptTemplate.from_template(
+            "Today is {day}.", partial_variables={"day": lambda: "monday"}
+        ),
+        "price.system": prompts.PromptTemplate.from_template("Price {amount:.2f}"),
+    }
+    plan = client.prompts.register_runtime(AGENT, slots)
+    assert server.paths() == ["POST /v1/prompts/imports"]
+    assert secret not in server.requests[-1].content.decode("utf-8")
+    sent = body_of(server)
+    assert set(sent) == {"report", "agent_id"}
+    assert sent["agent_id"] == AGENT
+    report = sent["report"]
+    assert report_errors(report) == []
+    assert report["root"] == {"label": "runtime_registration", "vcs": None}
+    assert report["files"] == []
+    candidates = {entry["proposal"]["slot_path"]: entry for entry in report["candidates"]}
+    assert list(candidates) == sorted(slots)
+    planner = candidates["planner.system"]
+    assert (planner["status"], planner["construct"]) == (
+        "supported",
+        "langchain.chat_prompt_template",
+    )
+    assert planner["proposal"] == {
+        "prompt_id": "prm_planner_system",
+        "prompt_kind": "chat",
+        "slot_path": "planner.system",
+        "node_path": None,
+        "usage": "system",
+    }
+    assert planner["source"]["path"] == "planner.system"
+    assert planner["content"]["body"][1] == {"placeholder": "history", "optional": True}
+    assert candidates["writer.instructions"]["proposal"]["usage"] == "instructions"
+    triage = candidates["triage.router"]
+    assert (triage["status"], triage["content"], triage["proposal"]["usage"]) == (
+        "unsupported",
+        None,
+        "other",
+    )
+    assert [issue["code"] for issue in triage["issues"]] == ["unsupported_template_format"]
+    billing = candidates["billing.system"]
+    assert (billing["status"], billing["content"]) == ("blocked_secret", None)
+    assert billing["secret_findings"] == [
+        {"pattern": "aws_access_key", "line": 1, "column": 1, "length": 20}
+    ]
+    assert "callable_partial" in [issue["code"] for issue in candidates["dated.system"]["issues"]]
+    price = candidates["price.system"]
+    assert price["status"] == "unsupported"
+    assert price["issues"][0]["code"] == "format_spec"
+    assert price["issues"][0]["severity"] == "error"
+    assert price["issues"][0]["message"] == "template syntax error: format_spec"
+    assert plan.plan["source"]["kind"] == "discovery_report"
+    actions = {item["slot"]["slot_path"]: item["action"] for item in plan.items}
+    assert actions == {
+        "billing.system": "blocked",
+        "dated.system": "blocked",
+        "planner.system": "create_prompt",
+        "price.system": "blocked",
+        "triage.router": "blocked",
+        "writer.instructions": "create_prompt",
+    }
+    assert "prm_planner_system" not in server.engine._state["prompts"]
+    client.prompts.register_runtime(AGENT, slots)
+    assert [entry["candidate_id"] for entry in body_of(server)["report"]["candidates"]] == [
+        entry["candidate_id"] for entry in report["candidates"]
+    ]
+    count = len(server.requests)
+    with pytest.raises(ValueError):
+        client.prompts.register_runtime(AGENT, {})
+    with pytest.raises(ValueError):
+        client.prompts.register_runtime(AGENT, {"Planner": slots["planner.system"]})
+    with pytest.raises(TypeError):
+        client.prompts.register_runtime(AGENT, {"planner.system": "Plan for {customer}."})
+    assert len(server.requests) == count
+    server.api_key_scopes = ["read"]
+    with pytest.raises(ApiError) as refused:
+        client.prompts.register_runtime(
+            AGENT, {"writer.instructions": slots["writer.instructions"]}
+        )
+    assert (refused.value.code, refused.value.status) == ("api_key_scope_insufficient", 403)
+    assert refused.value.message == SCOPE_MESSAGE
+    assert len(server.requests) == count + 1
+
+
+def test_runtime_prompt_ids_follow_the_grammar(client: Client, server: ImportServer) -> None:
+    prompts = pytest.importorskip("langchain_core.prompts")
+    template = prompts.PromptTemplate.from_template("Write about {topic}.")
+    client.prompts.register_runtime(
+        AGENT, {"a_b.c": template, "a.b_c": template, "a__.b_": template}
+    )
+    report = body_of(server)["report"]
+    assert report_errors(report) == []
+    assert [entry["proposal"]["prompt_id"] for entry in report["candidates"]] == [
+        "prm_a_b_c",
+        "prm_a_b",
+        "prm_a_b_c_2",
+    ]
+
+
+def test_report_usage_sends_refs_and_hashes_only(
+    client: Client, server: ImportServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server.api_key_scopes = ["read"]
+    path = f"POST /v1/agents/{AGENT}/bindings/bnd_x/usage"
+    managed = {
+        "slot_path": "planner.instructions",
+        "node_path": "planner",
+        "prompt_ref": "prm_planner:1",
+        "content_digest": "sha256:" + "a" * 64,
+        "rendered_hash": "sha256:" + "b" * 64,
+        "overlay": {"digest": "blake3:" + "c" * 64, "position": "prepended"},
+        "alias": "prod",
+        "alias_generation": 1,
+        "count": 3,
+        "first_at": AT,
+        "last_at": AT,
+    }
+    unmanaged = {
+        "slot_path": None,
+        "node_path": "researcher",
+        "unmanaged": True,
+        "rendered_hash": "sha256:" + "d" * 64,
+        "role_layout": ["system", "user"],
+        "count": 1,
+        "first_at": AT,
+        "last_at": AT,
+    }
+    assert client.bindings.report_usage(AGENT, "bnd_x", [managed, unmanaged]) is None
+    assert server.paths() == [path]
+    assert body_of(server) == {"observations": [managed, unmanaged]}
+    assert "idempotency-key" not in server.requests[-1].headers
+    refused: list[Any] = [
+        {**unmanaged, "rendered_text": "hello there"},
+        {**unmanaged, "rendered_hash": "blake3:" + "e" * 64},
+        {**managed, "overlay": {**managed["overlay"], "text": "hello there"}},
+        {**managed, "overlay": "prepended"},
+    ]
+    for observation in refused:
+        with pytest.raises(ValueError):
+            client.bindings.report_usage(AGENT, "bnd_x", [unmanaged, observation])
+    with pytest.raises(TypeError):
+        client.bindings.report_usage(AGENT, "bnd_x", cast(Any, ["hello there"]))
+    client.bindings.report_usage(AGENT, "bnd_x", [])
+    assert server.paths() == [path]
+    assert all(b"hello there" not in request.content for request in server.requests)
+    batch = [{**unmanaged, "count": number + 1} for number in range(501)]
+    monkeypatch.setattr(_transport, "_sleep", lambda seconds: None)
+    server.fail_next = [(503, {})]
+    client.bindings.report_usage(AGENT, "bnd_x", batch)
+    sizes = [len(json.loads(request.content)["observations"]) for request in server.requests[1:]]
+    assert sizes == [500, 500, 1]
+    assert len(server.usage) == 2 + 501
+
+
+async def test_import_and_usage_async_twins(server: ImportServer, tmp_path: Path) -> None:
+    async with make_client(server) as client:
+        report = import_fixture("discovery-report.json")
+        plan = await client.prompts.aimport_report(report, agent_id=AGENT)
+        applied = await client.prompts.aapply_import(
+            cast_str(plan.import_id), plan_digest=plan.plan_digest, items=plan.decisions()
+        )
+        assert body_of(server)["idempotency_key"].startswith("import-apply-")
+        assert {entry["outcome"] for entry in applied["results"]} == {"created", "skipped"}
+        notes = PROMPTS_FILE.replace("prm_support_writer", "prm_support_notes")
+        declared = await client.prompts.aplan_declarations(notes)
+        assert declared.slots is not None
+        result = await client.prompts.aapply_declarations(
+            notes,
+            plan_digest=declared.plan_digest,
+            expected_slots_revision=declared.slots["revision"],
+        )
+        assert result["slots"]["revision"] == 1
+        observation = {
+            "unmanaged": True,
+            "rendered_hash": "sha256:" + "d" * 64,
+            "count": 1,
+            "first_at": AT,
+            "last_at": AT,
+        }
+        assert await client.bindings.areport_usage(AGENT, "bnd_x", [observation]) is None
+        assert server.usage == [observation]
+        prompts = pytest.importorskip("langchain_core.prompts")
+        registered = await client.prompts.aregister_runtime(
+            AGENT, {"notes.system": prompts.PromptTemplate.from_template("Take notes.")}
+        )
+        assert registered.items[0]["action"] == "create_prompt"
+
+
+def test_bind_langgraph_never_registers_prompts() -> None:
+    pytest.importorskip("langgraph")
+    from langgraph_world import World, thread, two_node_graph
+
+    world = World.create()
+    world.server.api_key_scopes = ["read"]
+    managed = world.bind(two_node_graph())
+    assert managed.invoke({"log": []}, thread("registration"))["log"]
+    paths = world.server.paths()
+    assert any(path.endswith("/bindings") for path in paths)
+    assert not [
+        path
+        for path in paths
+        if "/v1/prompts/imports" in path
+        or "/v1/prompts/declarations" in path
+        or path.endswith("/usage")
+    ]

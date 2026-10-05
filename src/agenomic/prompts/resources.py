@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import hashlib
 import json
 import os
+import re
 import sys
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, TypeVar, Union, cast
@@ -18,11 +21,25 @@ from agenomic._version import __version__
 from agenomic.exceptions import ApiError
 from agenomic.prompts.bundle import BundleTrust, PromptBundle
 from agenomic.prompts.cache import PromptCache
+from agenomic.prompts.digest import canonical_json_v1, prompt_digest
+from agenomic.prompts.discovery import PYTHON_GRAMMAR, SCANNER_NAME
 from agenomic.prompts.errors import (
     PromptIntegrityError,
     PromptRefError,
     binding_error,
     integrity_error,
+)
+from agenomic.prompts.importer import (
+    DISCOVERY_SCHEMA,
+    ISSUE_MESSAGES,
+    ISSUE_SEVERITY,
+    Source,
+    build_import_request,
+    check_prompts_file,
+    default_decisions,
+    load_prompts_file,
+    new_idempotency_key,
+    verify_plan,
 )
 from agenomic.prompts.models import (
     ExecutionBinding,
@@ -38,10 +55,12 @@ from agenomic.prompts.refs import (
     parse_execution_ref,
     parse_prompt_ref,
 )
-from agenomic.prompts.render import RenderedMessage
+from agenomic.prompts.render import PromptIssue, RenderedMessage
+from agenomic.prompts.secrets import SECRET_PATTERN_SET
 
 if TYPE_CHECKING:
     from agenomic._client import Client
+    from agenomic.integrations.langchain_prompts import LangChainImport
     from agenomic.prompts.local import LocalPromptEngine
 
 __all__ = [
@@ -51,6 +70,7 @@ __all__ = [
     "ChannelMovePreview",
     "ChannelsResource",
     "Draft",
+    "ImportPlan",
     "Page",
     "PinnedRefs",
     "PromptAlias",
@@ -68,6 +88,29 @@ _T = TypeVar("_T")
 _V = TypeVar("_V", bound=BaseModel)
 _MANAGED_KEY = "__agenomic_prompt_set"
 _LANGCHAIN_CONFIG = "langchain_core.runnables.config"
+_RUNTIME_LABEL = "runtime_registration"
+_USAGES = frozenset({"system", "instructions", "user", "chat", "tool_description", "other"})
+_SLOT_PATH = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+", re.ASCII)
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}", re.ASCII)
+_OBSERVATION_KEYS = frozenset(
+    {
+        "slot_path",
+        "node_path",
+        "prompt_ref",
+        "content_digest",
+        "rendered_hash",
+        "overlay",
+        "alias",
+        "alias_generation",
+        "unmanaged",
+        "role_layout",
+        "count",
+        "first_at",
+        "last_at",
+    }
+)
+_OVERLAY_KEYS = frozenset({"digest", "position"})
+_USAGE_BATCH = 500
 
 
 @dataclass(frozen=True)
@@ -228,6 +271,28 @@ class RenderResult:
     rendered_hash: str
     text: Optional[str] = None
     messages: Optional[list[Union[RenderedMessage, object]]] = None
+
+
+@dataclass(frozen=True)
+class ImportPlan:
+    plan: dict[str, Any]
+    import_id: Optional[str] = None
+    status: Optional[str] = None
+    replayed: bool = False
+    report_digest: Optional[str] = None
+    expires_at: Optional[str] = None
+    slots: Optional[dict[str, Any]] = None
+
+    @property
+    def plan_digest(self) -> str:
+        return cast(str, self.plan["plan_digest"])
+
+    @property
+    def items(self) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], self.plan["items"])
+
+    def decisions(self) -> list[dict[str, Any]]:
+        return default_decisions(self.plan)
 
 
 class PinnedRefs(Mapping[str, ManagedPromptVersion]):
@@ -612,6 +677,269 @@ def get_binding_flow(
     if binding.binding_id != binding_id:
         raise binding_error("binding_mismatch", "the registry answered another binding")
     return binding, binding_bundle(binding, artifacts)
+
+
+def import_report_flow(
+    client: Client,
+    report: Mapping[str, Any],
+    agent_id: Optional[str],
+    options: Optional[Mapping[str, Any]],
+) -> Flow[ImportPlan]:
+    if _engine(client) is not None:
+        raise _cloud_required("prompts.import_report")
+    body = build_import_request(report, agent_id=agent_id, options=options)
+    response = yield Call("POST", "/v1/prompts/imports", body, retry=True)
+    record = _member(response, "import")
+    if not isinstance(record, Mapping):
+        raise _invalid(response, "import")
+    plan = verify_plan(record.get("plan"))
+    import_id = record.get("import_id", plan.get("plan_id"))
+    if (
+        not isinstance(import_id, str)
+        or plan.get("plan_id") != import_id
+        or plan.get("agent_id") != agent_id
+    ):
+        raise _invalid(response, "import plan for the request")
+    return ImportPlan(
+        plan=plan,
+        import_id=import_id,
+        status=record.get("status"),
+        replayed=response.body.get("replayed") is True,
+        report_digest=record.get("report_digest"),
+        expires_at=record.get("expires_at"),
+    )
+
+
+def apply_import_flow(
+    client: Client,
+    import_id: str,
+    *,
+    plan_digest: str,
+    items: Sequence[Mapping[str, Any]],
+    mode: str,
+    declare_slots: bool,
+    expected_slots_revision: Optional[int],
+    idempotency_key: Optional[str],
+    agent_id: Optional[str],
+) -> Flow[dict[str, Any]]:
+    if _engine(client) is not None:
+        raise _cloud_required("prompts.apply_import")
+    if declare_slots and expected_slots_revision is None:
+        raise ValueError("declare_slots needs expected_slots_revision")
+    body: dict[str, Any] = {
+        "idempotency_key": idempotency_key or new_idempotency_key(),
+        "plan_digest": plan_digest,
+        "mode": mode,
+        "declare_slots": declare_slots,
+        "items": [dict(item) for item in items],
+    }
+    if agent_id is not None:
+        body["agent_id"] = agent_id
+    response: ApiResponse = yield Call(
+        "POST",
+        f"/v1/prompts/imports/{segment(import_id)}/apply",
+        body,
+        if_match=expected_slots_revision if declare_slots else None,
+        retry=True,
+    )
+    if response.body.get("import_id") != import_id or not isinstance(
+        response.body.get("results"), list
+    ):
+        raise _invalid(response, f"result of import {import_id}")
+    return response.body
+
+
+def _prompts_file(document: Union[Mapping[str, Any], Source]) -> dict[str, Any]:
+    if isinstance(document, Mapping):
+        return check_prompts_file(dict(document))
+    return load_prompts_file(document)
+
+
+def plan_declarations_flow(
+    client: Client, document: Union[Mapping[str, Any], Source]
+) -> Flow[ImportPlan]:
+    if _engine(client) is not None:
+        raise _cloud_required("prompts.plan_declarations")
+    sent = _prompts_file(document)
+    source = {"kind": "prompts_file", "digest": prompt_digest(sent)}
+    response = yield Call("POST", "/v1/prompts/declarations/plan", {"document": sent}, retry=True)
+    plan = verify_plan(_member(response, "plan"))
+    slots = response.body.get("slots")
+    if plan.get("source") != source or (slots is not None and not isinstance(slots, dict)):
+        raise _invalid(response, "plan of the prompts file")
+    return ImportPlan(plan=plan, slots=slots)
+
+
+def apply_declarations_flow(
+    client: Client,
+    document: Union[Mapping[str, Any], Source],
+    *,
+    plan_digest: str,
+    idempotency_key: Optional[str],
+    expected_slots_revision: Optional[int],
+) -> Flow[dict[str, Any]]:
+    if _engine(client) is not None:
+        raise _cloud_required("prompts.apply_declarations")
+    sent = _prompts_file(document)
+    declares_slots = isinstance(sent.get("slots"), list) and isinstance(sent.get("agent_id"), str)
+    if declares_slots and expected_slots_revision is None:
+        raise ValueError("a prompts file that declares slots needs expected_slots_revision")
+    body = {
+        "idempotency_key": idempotency_key or new_idempotency_key("declarations-apply"),
+        "document": sent,
+        "plan_digest": plan_digest,
+    }
+    response: ApiResponse = yield Call(
+        "POST",
+        "/v1/prompts/declarations/apply",
+        body,
+        if_match=expected_slots_revision if declares_slots else None,
+        retry=True,
+    )
+    if response.body.get("plan_digest") != plan_digest or not isinstance(
+        response.body.get("results"), list
+    ):
+        raise _invalid(response, "result of the prompts file")
+    return response.body
+
+
+def _runtime_prompt_id(slot_path: str, taken: set[str]) -> str:
+    base = re.sub(r"_+", "_", "prm_" + slot_path.replace(".", "_"))[:64].rstrip("_-")
+    candidate = base
+    counter = 2
+    while candidate in taken:
+        suffix = f"_{counter}"
+        candidate = base[: 64 - len(suffix)].rstrip("_-") + suffix
+        counter += 1
+    taken.add(candidate)
+    return candidate
+
+
+def _runtime_issue(item: PromptIssue, supported: bool) -> dict[str, Any]:
+    code = item.syntax if item.code == "syntax_error" and item.syntax else item.code
+    severity = ISSUE_SEVERITY.get(item.code, "warning" if supported else "error")
+    if item.code == "syntax_error":
+        message = f"template syntax error: {code}"
+    else:
+        message = ISSUE_MESSAGES.get(code, f"the prompt cannot be imported: {code}")
+    return {"code": code, "severity": severity, "line": None, "column": None, "message": message}
+
+
+def _runtime_candidate(
+    slot_path: str, converted: LangChainImport, taken: set[str]
+) -> dict[str, Any]:
+    construct = (
+        "langchain.chat_prompt_template"
+        if converted.prompt_kind == "chat"
+        else "langchain.prompt_template"
+    )
+    identity = {"path": slot_path, "line": 1, "column": 1, "construct": construct}
+    digest = hashlib.sha256(canonical_json_v1(identity).encode("utf-8")).hexdigest()
+    usage = slot_path.rsplit(".", 1)[1]
+    supported = converted.status == "supported"
+    return {
+        "candidate_id": "cand_" + digest[:16],
+        "status": converted.status,
+        "construct": construct,
+        "source": {
+            "path": slot_path,
+            "line": 1,
+            "column": 1,
+            "end_line": 1,
+            "end_column": 1,
+            "symbol": None,
+            "enclosing_function": None,
+        },
+        "proposal": {
+            "prompt_id": _runtime_prompt_id(slot_path, taken),
+            "prompt_kind": converted.prompt_kind,
+            "slot_path": slot_path,
+            "node_path": None,
+            "usage": usage if usage in _USAGES else "other",
+        },
+        "content": converted.content,
+        "content_digest": converted.content_digest,
+        "issues": [_runtime_issue(item, supported) for item in converted.issues],
+        "secret_findings": [
+            {"pattern": found.pattern, "line": 1, "column": 1, "length": found.length}
+            for found in converted.secret_findings
+        ],
+    }
+
+
+def _runtime_report(slots: Mapping[str, Any]) -> dict[str, Any]:
+    if not slots:
+        raise ValueError("register_runtime needs at least one slot")
+    for slot_path in slots:
+        if (
+            not isinstance(slot_path, str)
+            or len(slot_path) > 128
+            or not _SLOT_PATH.fullmatch(slot_path)
+        ):
+            raise ValueError(f"invalid slot path {slot_path!r}")
+    from agenomic.integrations.langchain_prompts import from_langchain
+
+    taken: set[str] = set()
+    candidates = [
+        _runtime_candidate(slot_path, from_langchain(slots[slot_path]), taken)
+        for slot_path in sorted(slots)
+    ]
+    return {
+        "schema": DISCOVERY_SCHEMA,
+        "scanner": {
+            "name": SCANNER_NAME,
+            "version": __version__[:64] or "0",
+            "python_grammar": PYTHON_GRAMMAR,
+            "secret_patterns": SECRET_PATTERN_SET,
+        },
+        "root": {"label": _RUNTIME_LABEL, "vcs": None},
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "limits": {"max_files": 4000, "max_file_bytes": 512 * 1024},
+        "files": [],
+        "candidates": candidates,
+    }
+
+
+def register_runtime_flow(
+    client: Client, agent_id: str, slots: Mapping[str, Any]
+) -> Flow[ImportPlan]:
+    if _engine(client) is not None:
+        raise _cloud_required("prompts.register_runtime")
+    report = _runtime_report(slots)
+    return (yield from import_report_flow(client, report, agent_id, None))
+
+
+def _observation(item: Any, index: int) -> dict[str, Any]:
+    if not isinstance(item, Mapping):
+        raise TypeError(f"observation {index} must be a mapping")
+    unknown = sorted(set(item) - _OBSERVATION_KEYS)
+    if unknown:
+        raise ValueError(
+            f"observation {index} carries {unknown[0]}; usage reports refs and hashes only"
+        )
+    rendered = item.get("rendered_hash")
+    if not isinstance(rendered, str) or not _SHA256.fullmatch(rendered):
+        raise ValueError(
+            f"observation {index} needs the sha256 rendered_hash, never the tracking input_hash"
+        )
+    observation = dict(item)
+    overlay = item.get("overlay")
+    if overlay is not None:
+        if not isinstance(overlay, Mapping) or set(overlay) - _OVERLAY_KEYS:
+            raise ValueError(f"observation {index} overlay carries only digest and position")
+        observation["overlay"] = dict(overlay)
+    return observation
+
+
+def report_usage_flow(
+    client: Client, agent_id: str, binding_id: str, observations: Sequence[Mapping[str, Any]]
+) -> Flow[None]:
+    if _engine(client) is not None:
+        raise _cloud_required("bindings.report_usage")
+    batch = [_observation(item, index) for index, item in enumerate(observations)]
+    path = f"/v1/agents/{segment(agent_id)}/bindings/{segment(binding_id)}/usage"
+    for start in range(0, len(batch), _USAGE_BATCH):
+        yield Call("POST", path, {"observations": batch[start : start + _USAGE_BATCH]}, retry=True)
 
 
 def _write_json(path: Path, document: Mapping[str, Any]) -> None:
@@ -1137,6 +1465,130 @@ class PromptsResource:
             ),
         )
 
+    def import_report(
+        self,
+        report: Mapping[str, Any],
+        *,
+        agent_id: Optional[str] = None,
+        options: Optional[Mapping[str, Any]] = None,
+    ) -> ImportPlan:
+        return run_flow(self._client, import_report_flow(self._client, report, agent_id, options))
+
+    async def aimport_report(
+        self,
+        report: Mapping[str, Any],
+        *,
+        agent_id: Optional[str] = None,
+        options: Optional[Mapping[str, Any]] = None,
+    ) -> ImportPlan:
+        return await arun_flow(
+            self._client, import_report_flow(self._client, report, agent_id, options)
+        )
+
+    def apply_import(
+        self,
+        import_id: str,
+        *,
+        plan_digest: str,
+        items: Sequence[Mapping[str, Any]],
+        mode: Literal["publish", "draft"] = "publish",
+        declare_slots: bool = False,
+        expected_slots_revision: Optional[int] = None,
+        idempotency_key: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return run_flow(
+            self._client,
+            apply_import_flow(
+                self._client,
+                import_id,
+                plan_digest=plan_digest,
+                items=items,
+                mode=mode,
+                declare_slots=declare_slots,
+                expected_slots_revision=expected_slots_revision,
+                idempotency_key=idempotency_key,
+                agent_id=agent_id,
+            ),
+        )
+
+    async def aapply_import(
+        self,
+        import_id: str,
+        *,
+        plan_digest: str,
+        items: Sequence[Mapping[str, Any]],
+        mode: Literal["publish", "draft"] = "publish",
+        declare_slots: bool = False,
+        expected_slots_revision: Optional[int] = None,
+        idempotency_key: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return await arun_flow(
+            self._client,
+            apply_import_flow(
+                self._client,
+                import_id,
+                plan_digest=plan_digest,
+                items=items,
+                mode=mode,
+                declare_slots=declare_slots,
+                expected_slots_revision=expected_slots_revision,
+                idempotency_key=idempotency_key,
+                agent_id=agent_id,
+            ),
+        )
+
+    def plan_declarations(self, document: Union[Mapping[str, Any], Source]) -> ImportPlan:
+        return run_flow(self._client, plan_declarations_flow(self._client, document))
+
+    async def aplan_declarations(self, document: Union[Mapping[str, Any], Source]) -> ImportPlan:
+        return await arun_flow(self._client, plan_declarations_flow(self._client, document))
+
+    def apply_declarations(
+        self,
+        document: Union[Mapping[str, Any], Source],
+        *,
+        plan_digest: str,
+        idempotency_key: Optional[str] = None,
+        expected_slots_revision: Optional[int] = None,
+    ) -> dict[str, Any]:
+        return run_flow(
+            self._client,
+            apply_declarations_flow(
+                self._client,
+                document,
+                plan_digest=plan_digest,
+                idempotency_key=idempotency_key,
+                expected_slots_revision=expected_slots_revision,
+            ),
+        )
+
+    async def aapply_declarations(
+        self,
+        document: Union[Mapping[str, Any], Source],
+        *,
+        plan_digest: str,
+        idempotency_key: Optional[str] = None,
+        expected_slots_revision: Optional[int] = None,
+    ) -> dict[str, Any]:
+        return await arun_flow(
+            self._client,
+            apply_declarations_flow(
+                self._client,
+                document,
+                plan_digest=plan_digest,
+                idempotency_key=idempotency_key,
+                expected_slots_revision=expected_slots_revision,
+            ),
+        )
+
+    def register_runtime(self, agent_id: str, slots: Mapping[str, Any]) -> ImportPlan:
+        return run_flow(self._client, register_runtime_flow(self._client, agent_id, slots))
+
+    async def aregister_runtime(self, agent_id: str, slots: Mapping[str, Any]) -> ImportPlan:
+        return await arun_flow(self._client, register_runtime_flow(self._client, agent_id, slots))
+
 
 class BindingsResource:
     def __init__(self, client: Client) -> None:
@@ -1239,6 +1691,18 @@ class BindingsResource:
     ) -> ExecutionBinding:
         return await arun_flow(
             self._client, self._counterfactual(agent_id, parent_binding_id, thread_key, release_id)
+        )
+
+    def report_usage(
+        self, agent_id: str, binding_id: str, observations: Sequence[Mapping[str, Any]]
+    ) -> None:
+        run_flow(self._client, report_usage_flow(self._client, agent_id, binding_id, observations))
+
+    async def areport_usage(
+        self, agent_id: str, binding_id: str, observations: Sequence[Mapping[str, Any]]
+    ) -> None:
+        await arun_flow(
+            self._client, report_usage_flow(self._client, agent_id, binding_id, observations)
         )
 
 

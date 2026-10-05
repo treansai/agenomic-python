@@ -383,6 +383,60 @@ rule of the engineering rules above.
   printed or applied. Apply decisions default to the planned action with
   `blocked` turned into `skip`, cite `plan_digest`, carry a generated body
   `idempotency_key` and never send the `Idempotency-Key` header.
+- `client.prompts.import_report`, `apply_import`, `plan_declarations`,
+  `apply_declarations`, `register_runtime` and `client.bindings.report_usage`
+  are flows like the rest of `resources.py`, built on the importer helpers
+  (`build_import_request`, `verify_plan`, `default_decisions`,
+  `new_idempotency_key`, `load_prompts_file`); `upload_report` and
+  `apply_import` of `importer.py` stay for the CLI. All of them need Agenomic
+  Cloud (local mode raises `cloud_required`). All but `report_usage` need a
+  write or admin key: a read key gets the registry's 403
+  `api_key_scope_insufficient` verbatim, and there is no client-side scope
+  check, so the message and the request count are the registry's. The
+  production execution credential stays read-only: `bind_langgraph` refuses a
+  privileged key, and it never registers, imports or reports usage by itself.
+- `apply_import` and `apply_declarations` take an optional body
+  `idempotency_key` and generate one (`import-apply-<hex>`,
+  `declarations-apply-<hex>`) when it is omitted; no `Idempotency-Key` header
+  is sent. The body key, the replay of an identical report and the dedupe of
+  usage observations make these POSTs idempotent, so they retry like reads
+  (`retry=True`). A caller that repeats a whole call after an error passes the
+  same key itself; otherwise the second call is a new request and may get
+  `prompt_import_already_applied`.
+- `ImportPlan` holds the verified plan document, the import record members
+  (`import_id`, `status`, `replayed`, `report_digest`, `expires_at`) for a
+  report, and the slot summary of a prompts file (`slots` with `revision`,
+  `added`, `removed`, `changed`, or `None`). `decisions()` is
+  `default_decisions`. A report answer must carry a plan whose `plan_id` is the
+  `import_id` and whose `agent_id` is the requested one; a prompts file plan
+  must have `source` equal to `{kind: prompts_file, digest}` with the digest of
+  the document that was sent; apply results must echo the import id or the
+  cited `plan_digest`. Anything else is `invalid_response`.
+- `plan_declarations` and `apply_declarations` take a mapping or a YAML or JSON
+  source (text, bytes or a path) and always upload the JSON that
+  `load_prompts_file` builds under `agenomic-yaml/1`; content defaults are
+  left to the registry. Applying a prompts file with `slots` and `agent_id`
+  needs `expected_slots_revision`, sent as `If-Match`, because the plan
+  document cannot carry the slot revision; it comes from
+  `ImportPlan.slots["revision"]`. `apply_import(..., declare_slots=True)`
+  needs it too, and no SDK call reads the slot inventory yet.
+- `register_runtime(agent_id, {slot_path: template})` imports
+  `langchain_prompts` inside the call, converts each template with
+  `from_langchain` (no resolver) and uploads a discovery report labelled
+  `runtime_registration` with no files; it returns the plan and applies
+  nothing. A live object has no file, so each candidate's source path is its
+  slot path at line 1, column 1, which keeps candidate ids stable per slot and
+  construct. Candidates are sorted by slot path; the construct follows the
+  prompt kind; the usage is the last slot segment when it names a usage, else
+  `other`; the prompt id is `prm_` plus the slot path with dots and runs of
+  underscores turned into one underscore, made unique with `_2`, `_3`. Issues
+  carry no position, a syntax error uses its reason as the code, and secret
+  findings keep their pattern and length at line 1, column 1.
+- `report_usage` refuses, before any request, an observation member outside
+  the usage contract (so no raw text can leave the process), an overlay member
+  other than `digest` and `position`, and a `rendered_hash` that is not
+  `sha256:` plus 64 hex digits (the tracking `input_hash` is BLAKE3). It sends
+  nothing for an empty list and splits a longer list into requests of 500.
 - `TrackingCallbackHandler._model_start` turns the `agenomic_*` run metadata
   into the tracking keys `prompt_binding_id`, `prompt_manifest_digest`,
   `agent_version`, `experiment_id`, `experiment_arm_key`,
