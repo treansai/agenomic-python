@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import threading
 import time
 from collections.abc import Sequence
@@ -50,6 +51,17 @@ logger = logging.getLogger("agenomic.integrations.langchain")
 
 NODE_TAG_PREFIX = "graph:step:"
 TURN_TITLE_MAX_CHARS = 120
+PROMPT_SCALARS = (
+    ("agenomic_binding_id", "prompt_binding_id"),
+    ("agenomic_prompt_manifest_digest", "prompt_manifest_digest"),
+    ("agenomic_genome_version", "agent_version"),
+    ("agenomic_experiment_id", "experiment_id"),
+    ("agenomic_experiment_arm_key", "experiment_arm_key"),
+)
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}", re.ASCII)
+_SCALAR = re.compile(r"[A-Za-z0-9_.:\-]{1,256}", re.ASCII)
+_SLOT = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+", re.ASCII)
+_REF = re.compile(r"prm_[a-z0-9]+(?:[_-][a-z0-9]+)*:[1-9][0-9]{0,9}", re.ASCII)
 
 
 def _hash(data: Any) -> str:
@@ -470,6 +482,7 @@ class TrackingCallbackHandler(AsyncCallbackHandler):
         fields = self._span_fields(run)
         fields["model"] = model_meta
         fields["input_hash"] = _hash(prompt)
+        fields.update(_prompt_fields(meta))
         self._emit("model.call.started", fields)
 
     async def on_chat_model_start(
@@ -652,6 +665,45 @@ class TrackingCallbackHandler(AsyncCallbackHandler):
         fields["category"] = "retrieval"
         fields.update(self._error_fields(error))
         self._emit("retrieval.failed", fields)
+
+
+def _prompt_refs(meta: dict[str, Any]) -> list[dict[str, str]]:
+    columns = [
+        meta.get(key)
+        for key in (
+            "agenomic_prompt_slots",
+            "agenomic_prompt_refs",
+            "agenomic_prompt_content_digests",
+        )
+    ]
+    if not all(isinstance(column, str) and column for column in columns):
+        return []
+    slots, refs, digests = (str(column).split(",") for column in columns)
+    if not len(slots) == len(refs) == len(digests):
+        return []
+    entries = []
+    for slot, ref, digest in zip(slots, refs, digests, strict=True):
+        if not (_SLOT.fullmatch(slot) and len(slot) <= 128 and _SHA256.fullmatch(digest)):
+            return []
+        if not (_REF.fullmatch(ref) and int(ref.rsplit(":", 1)[1]) <= 2147483647):
+            return []
+        entries.append({"slot": slot, "ref": ref, "content_digest": digest})
+    return entries
+
+
+def _prompt_fields(meta: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    for source, target in PROMPT_SCALARS:
+        value = meta.get(source)
+        if isinstance(value, str) and _SCALAR.fullmatch(value):
+            fields[target] = value
+    rendered = meta.get("agenomic_rendered_hash")
+    if isinstance(rendered, str) and _SHA256.fullmatch(rendered):
+        fields["prompt_rendered_hash"] = rendered
+    refs = _prompt_refs(meta)
+    if refs:
+        fields["prompt_refs"] = refs
+    return fields
 
 
 def _message_dump(message: Any) -> Any:

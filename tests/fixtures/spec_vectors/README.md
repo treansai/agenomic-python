@@ -5,7 +5,9 @@ These vectors are the parity contract for every implementation of RFC 0012
 secret pattern set `agenomic-secrets/1` passes every vector whose `consumers`
 list names it. The vectors pin four things byte for byte: canonical JSON and
 sha256 digests, the prompt reference grammar, the `agenomic-fstring/v1`
-template grammar with its renderer, and the portable secret patterns.
+template grammar with its renderer, and the portable secret patterns. The
+`prompts-file-yaml` suite also pins the `agenomic-yaml/1` profile that every
+client applies when it converts a YAML prompts file to JSON.
 
 ## Suites
 
@@ -16,6 +18,7 @@ template grammar with its renderer, and the portable secret patterns.
 | digest | `digest/` | D001 to D028 | 28 | canonical JSON, digests of every hashed document, bundle loading by digest pin |
 | ref | `ref/` | F001 to F054 | 54 | prompt reference parsing, context checks and formatting |
 | secrets | `secrets/` | S001 to S014 | 14 | the `agenomic-secrets/1` patterns, scrubbing and the secret-shaped key rule |
+| prompts-file-yaml | `prompts-file-yaml/` | Y001 to Y010 | 10 | the `agenomic-yaml/1` profile and the file-local fragment cycle check of a YAML prompts file (Python only) |
 
 `MANIFEST.json` lists every other file of this directory with the sha256 of its
 raw bytes, keys sorted. It hashes bytes, not canonical JSON, because vendoring
@@ -214,6 +217,27 @@ run by the cloud harness, which always knows the workspace.
   boolean per key.
 - `{ operation: "scrub_json", value }` gives `{ ok, scrubbed }`.
 
+### prompts-file-yaml
+
+Input `{ yaml }`, the full text of an `agenomic.prompts_file/v1` YAML file.
+The operation loads it under the `agenomic-yaml/1` profile (exactly one
+document; no anchors, aliases, merge keys or tags; no duplicate or non-string
+keys; plain `true` and `false` are the only booleans, `null`, `~` and the empty
+plain scalar the only nulls, `[-+]?[0-9]+` the only integers; a plain scalar of
+the YAML 1.2 float form is refused; every other scalar is a string; block
+scalars follow YAML 1.2 chomping), then checks that the file-local fragment
+references (entries with a `prompt_id` and no `version`, naming a prompt of the
+same file) form no cycle. Content defaults are not filled in.
+
+Success `{ ok, json }`: `json` is the loaded document, compared with deep JSON
+equality. Failure
+`{ ok: false, error: { code: "prompt_import_invalid", item: { code } } }`,
+where `item.code` is the profile reason (`float_not_allowed`,
+`yaml_duplicate_key`, `yaml_alias_unsupported`, `yaml_tag_unsupported`,
+`yaml_multiple_documents`) or `fragment_cycle`. Parser line and column marks
+are not asserted. The consumers are Python only: the `agm` CLI accepts JSON
+prompts files only, and servers accept the JSON form only.
+
 ## Authoring
 
 `node scripts/vectors.js` validates every vector against its schema, checks
@@ -221,7 +245,9 @@ names, ids and the manifest, recomputes every digest with `node:crypto`
 (digest documents, artifact sets, rendered documents, content digests) and
 validates the contents and documents against their v0.4 schemas. The `ref` and
 `secrets` suites are checked for shape only; the implementations are their
-semantic checkers. `node scripts/vectors.js --compute <file>` prints the
+semantic checkers. In the `prompts-file-yaml` suite, every success `json` is
+validated against `prompts-file.schema.json`; the YAML profile itself is
+checked by the implementations. `node scripts/vectors.js --compute <file>` prints the
 canonical JSON and the digest of the hashable members of a vector, or of a
 whole JSON document. A vector changes only together with the implementations
 that consume it.

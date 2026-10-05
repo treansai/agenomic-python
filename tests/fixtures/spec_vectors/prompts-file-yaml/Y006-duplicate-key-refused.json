@@ -1,0 +1,21 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "prompts-file-yaml",
+  "id": "Y006",
+  "intent": "a mapping that repeats prompt_id is refused instead of keeping the last value",
+  "consumers": [
+    "python"
+  ],
+  "input": {
+    "yaml": "schema: agenomic.prompts_file/v1\nprompts:\n  - prompt_id: prm_support_planner\n    kind: text\n    name: Support planner\n    prompt_id: prm_support_writer\n    content:\n      kind: text\n      body: Plan the next support step.\n      variables: {}\n"
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_import_invalid",
+      "item": {
+        "code": "yaml_duplicate_key"
+      }
+    }
+  }
+}

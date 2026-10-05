@@ -38,9 +38,10 @@ anthropic = ["anthropic>=0.34"]
 huggingface = ["huggingface-hub>=0.20"]
 langgraph = ["langgraph>=0.2"]
 langchain = ["langchain-core>=1.6.3,<2"]
+yaml = ["pyyaml>=6,<7"]
 mcp = ["mcp>=1.0"]
 otel = ["opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
-all = ["openai>=1.40", "anthropic>=0.34", "huggingface-hub>=0.20", "langgraph>=0.2", "langchain-core>=1.6.3,<2", "mcp>=1.0", "opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
+all = ["openai>=1.40", "anthropic>=0.34", "huggingface-hub>=0.20", "langgraph>=0.2", "langchain-core>=1.6.3,<2", "pyyaml>=6,<7", "mcp>=1.0", "opentelemetry-api>=1.20", "opentelemetry-sdk>=1.20"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -52,6 +53,7 @@ dev = [
     "langchain-core>=0.3",
     "freezegun>=1.5",
     "jsonschema>=4.18",
+    "pyyaml>=6,<7",
     "opentelemetry-api>=1.20",
     "opentelemetry-sdk>=1.20",
 ]

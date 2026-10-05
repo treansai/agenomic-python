@@ -18,6 +18,7 @@ The emitter is runtime-agnostic; the LangGraph adapter
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
@@ -40,6 +41,7 @@ RunStatus = Literal["success", "error", "cancelled"]
 
 _SPEC_VERSION = "agenomic/v0.3"
 _ADAPTER_VERSION = "agenomic-python/0.1"
+_SHA256_URI = re.compile(r"sha256:[0-9a-f]{64}", re.ASCII)
 
 
 def _sha256_uri(text: str) -> str:
@@ -68,6 +70,7 @@ class CanonicalRun:
         agent_id: str,
         agent_version: str = "0.0.0",
         genome_version: str | None = None,
+        prompt_manifest_digest: str | None = None,
         runtime_name: str = "python",
         runtime_version: str = "0.0.0",
         provider: str = "unknown",
@@ -112,8 +115,10 @@ class CanonicalRun:
             "top_p": top_p,
             "seed": seed,
         }
+        if prompt_manifest_digest is not None and not _SHA256_URI.fullmatch(prompt_manifest_digest):
+            raise ValueError("prompt_manifest_digest must be sha256:<64 lowercase hex>")
         self._components = {
-            "prompt_version": _sha256_uri("prompt"),
+            "prompt_version": prompt_manifest_digest or _sha256_uri("prompt"),
             "policy_version": _sha256_uri("policy"),
             "memory_version": _sha256_uri("memory"),
             "knowledge_version": _sha256_uri("knowledge"),

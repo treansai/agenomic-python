@@ -13,11 +13,13 @@ from agenomic.prompts.bundle import PromptBundle
 from agenomic.prompts.digest import canonical_json_v1, prompt_digest
 from agenomic.prompts.errors import (
     AjsError,
+    PromptImportError,
     PromptIntegrityError,
     PromptRefError,
     PromptRenderError,
     PromptTemplateError,
 )
+from agenomic.prompts.importer import load_prompts_file
 from agenomic.prompts.models import ManagedPromptVersion, PromptVersionRecord
 from agenomic.prompts.refs import PromptUri, PromptVersionRef, parse_execution_ref, parse_prompt_ref
 from agenomic.prompts.render import (
@@ -30,7 +32,7 @@ from agenomic.prompts.secrets import is_secret_shaped_key, scan, scrub, scrub_js
 
 VECTORS = Path(__file__).parent / "fixtures" / "spec_vectors"
 CONSUMER = "python"
-SUITES = ("render", "template", "digest", "ref", "secrets")
+SUITES = ("render", "template", "digest", "ref", "secrets", "prompts-file-yaml")
 LOCAL_FILES = ("MANIFEST.json", "SPEC_VECTORS.lock")
 VECTOR_WORKSPACE = "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f"
 
@@ -321,12 +323,21 @@ def _run_secrets(data: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "scrubbed": scrub_json(data["value"])}
 
 
+def _run_yaml(data: dict[str, Any]) -> dict[str, Any]:
+    try:
+        document = load_prompts_file(data["yaml"], format="yaml")
+    except PromptImportError as error:
+        return {"ok": False, "error": {"code": error.code, "item": error.details["errors"][0]}}
+    return {"ok": True, "json": document}
+
+
 RUNNERS = {
     "render": _run_render,
     "template": _run_template,
     "digest": _run_digest,
     "ref": _run_ref,
     "secrets": _run_secrets,
+    "prompts-file-yaml": _run_yaml,
 }
 
 
@@ -342,7 +353,14 @@ def test_vector(vector: dict[str, Any]) -> None:
 def test_every_python_vector_ran() -> None:
     vectors = _python_vectors()
     counts = {suite: sum(1 for v in vectors if v["suite"] == suite) for suite in SUITES}
-    assert counts == {"render": 66, "template": 69, "digest": 28, "ref": 54, "secrets": 14}
+    assert counts == {
+        "render": 66,
+        "template": 69,
+        "digest": 28,
+        "ref": 54,
+        "secrets": 14,
+        "prompts-file-yaml": 10,
+    }
     assert (
         sum(1 for v in vectors if v["suite"] == "render" and v["expected"].get("langchain_parity"))
         > 0

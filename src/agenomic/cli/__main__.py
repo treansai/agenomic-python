@@ -18,12 +18,15 @@ import os
 import sys
 from collections import Counter
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 from agenomic._version import __version__
 from agenomic.atep.segment import SegmentReader
 from agenomic.crypto.signing import SigningKey, VerifyingKey
-from agenomic.exceptions import AtepError
+from agenomic.exceptions import ApiError, AtepError
+
+if TYPE_CHECKING:
+    from agenomic._client import Client
 
 
 def _cmd_atep_verify(args: argparse.Namespace) -> int:
@@ -161,6 +164,234 @@ def _cmd_benchmark_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cloud_client() -> Optional[Client]:
+    from agenomic._client import Client
+
+    client = Client.from_env()
+    return client if client.is_cloud else None
+
+
+def _print_json(document: Any, out: Optional[str] = None) -> None:
+    text = json.dumps(document, indent=2, ensure_ascii=False) + "\n"
+    if out is None:
+        sys.stdout.write(text)
+    else:
+        Path(out).write_text(text, encoding="utf-8")
+
+
+def _api_failure(error: ApiError) -> int:
+    reason = f" ({error.reason})" if error.reason else ""
+    print(f"error: {error.code}{reason}: {error.message}", file=sys.stderr)
+    return 1
+
+
+def _cmd_prompts_scan(args: argparse.Namespace) -> int:
+    from agenomic.prompts.discovery import DEFAULT_EXCLUDES, scan_paths
+
+    target = Path(args.path)
+    if not target.exists():
+        print(f"error: {target} not found", file=sys.stderr)
+        return 2
+    root = Path(args.root) if args.root else (target if target.is_dir() else target.parent)
+    try:
+        report = scan_paths(
+            [target],
+            root=root,
+            max_files=args.max_files,
+            max_file_bytes=args.max_file_bytes,
+            exclude=(*DEFAULT_EXCLUDES, *args.exclude),
+            label=args.label,
+            commit=args.commit,
+        )
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    _print_json(report, args.out)
+    statuses = Counter(candidate["status"] for candidate in report["candidates"])
+    scanned = sum(1 for entry in report["files"] if entry["status"] == "scanned")
+    summary = ", ".join(f"{name} {statuses[name]}" for name in sorted(statuses)) or "none"
+    print(f"scanned {scanned} file(s); candidates: {summary}", file=sys.stderr)
+    return 0
+
+
+def _cmd_prompts_import(args: argparse.Namespace) -> int:
+    from agenomic.prompts.importer import apply_import, new_idempotency_key, upload_report
+
+    try:
+        report = json.loads(Path(args.report).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        print(f"error: cannot read {args.report}: {error}", file=sys.stderr)
+        return 2
+    if args.declare_slots and args.slots_revision is None:
+        print("error: --declare-slots needs --slots-revision", file=sys.stderr)
+        return 2
+    client = _cloud_client()
+    if client is None:
+        print("error: set AGENOMIC_ENDPOINT and AGENOMIC_API_KEY", file=sys.stderr)
+        return 2
+    try:
+        record = upload_report(client, report, agent_id=args.agent_id)
+        plan = record["plan"]
+        _print_json(record)
+        print(f"plan {plan['plan_id']} {plan['plan_digest']}", file=sys.stderr)
+        if not args.apply:
+            return 0
+        result = apply_import(
+            client,
+            plan,
+            idempotency_key=args.idempotency_key or new_idempotency_key(),
+            agent_id=args.agent_id,
+            mode=args.mode,
+            declare_slots=args.declare_slots,
+            expected_slots_revision=args.slots_revision,
+        )
+        _print_json(result)
+    except ApiError as error:
+        return _api_failure(error)
+    finally:
+        client.close()
+    return 0
+
+
+def _cmd_prompts_render(args: argparse.Namespace) -> int:
+    from agenomic.prompts.importer import load_prompt_file
+    from agenomic.prompts.render import RenderedMessage, render_content
+
+    try:
+        variables = json.loads(Path(args.vars).read_text(encoding="utf-8")) if args.vars else {}
+    except (OSError, ValueError) as error:
+        print(f"error: cannot read {args.vars}: {error}", file=sys.stderr)
+        return 2
+    if not isinstance(variables, dict):
+        print("error: --vars must hold a JSON object", file=sys.stderr)
+        return 2
+    try:
+        if Path(args.target).exists():
+            document = load_prompt_file(Path(args.target))
+            result = render_content(
+                document["content"], variables, fragments=lambda prompt_id, version, digest: None
+            )
+        else:
+            client = _cloud_client()
+            if client is None:
+                print("error: set AGENOMIC_ENDPOINT and AGENOMIC_API_KEY", file=sys.stderr)
+                return 2
+            try:
+                result = client.prompts.get(args.target).render(variables)
+            finally:
+                client.close()
+    except ApiError as error:
+        return _api_failure(error)
+    messages = None
+    if result.messages is not None:
+        messages = [
+            item.to_dict() if isinstance(item, RenderedMessage) else item
+            for item in result.messages
+        ]
+    _print_json(
+        {
+            "kind": result.kind,
+            "text": result.text,
+            "messages": messages,
+            "content_digest": result.content_digest,
+            "rendered_hash": result.rendered_hash,
+        }
+    )
+    return 0
+
+
+def _cmd_prompts_digest(args: argparse.Namespace) -> int:
+    from agenomic.prompts.digest import prompt_digest
+    from agenomic.prompts.errors import AjsError
+    from agenomic.prompts.importer import load_prompt_file
+
+    try:
+        document = load_prompt_file(Path(args.file))
+        print(prompt_digest(document["content"]))
+    except ApiError as error:
+        return _api_failure(error)
+    except AjsError as error:
+        print(f"error: {error.reason} at {error.value_path or '/'}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _cmd_prompts_bundle_verify(args: argparse.Namespace) -> int:
+    from agenomic.prompts.bundle import BundleTrust, PromptBundle
+
+    try:
+        trust = BundleTrust.from_pem_files(*args.trust_key) if args.trust_key else None
+        bundle = PromptBundle.load(
+            Path(args.bundle),
+            expected_workspace_id=args.workspace,
+            expected_agent_id=args.agent,
+            trust=trust,
+            expected_bundle_digest=args.expect_bundle_digest,
+        )
+    except ApiError as error:
+        return _api_failure(error)
+    except (OSError, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    _print_json(
+        {
+            "prompt_bundle_digest": bundle.prompt_bundle_digest,
+            "prompt_manifest_digest": bundle.prompt_manifest_digest,
+            "prompt_refs": bundle.prompt_refs,
+            "slots": bundle.slots(),
+        }
+    )
+    return 0
+
+
+def _add_prompts_parser(sub: Any) -> None:
+    prompts = sub.add_parser("prompts", help="managed prompt utilities")
+    prompts_sub = prompts.add_subparsers(dest="prompts_command", required=True)
+
+    scan = prompts_sub.add_parser(
+        "scan", help="discover prompts statically; the code is never imported or run"
+    )
+    scan.add_argument("path", help="directory or Python file to scan")
+    scan.add_argument("--out", default=None, help="write the report to this file")
+    scan.add_argument("--root", default=None, help="repository root (default: PATH)")
+    scan.add_argument("--label", default=None, help="root label recorded in the report")
+    scan.add_argument("--commit", default=None, help="git commit recorded in the report")
+    scan.add_argument("--exclude", action="append", default=[], help="glob to exclude")
+    scan.add_argument("--max-files", type=int, default=4000)
+    scan.add_argument("--max-file-bytes", type=int, default=512 * 1024)
+    scan.set_defaults(func=_cmd_prompts_scan)
+
+    importer = prompts_sub.add_parser(
+        "import", help="upload a discovery report and print the import plan"
+    )
+    importer.add_argument("report", help="discovery report JSON")
+    importer.add_argument("--agent-id", required=True)
+    importer.add_argument("--apply", action="store_true", help="apply the plan (write key)")
+    importer.add_argument("--mode", choices=("publish", "draft"), default="publish")
+    importer.add_argument("--declare-slots", action="store_true")
+    importer.add_argument("--slots-revision", type=int, default=None)
+    importer.add_argument("--idempotency-key", default=None)
+    importer.set_defaults(func=_cmd_prompts_import)
+
+    render = prompts_sub.add_parser("render", help="render a prompt file or a prompt reference")
+    render.add_argument("target", help="prompt file path, or a prm_x:N reference")
+    render.add_argument("--vars", default=None, help="JSON file with the variables")
+    render.set_defaults(func=_cmd_prompts_render)
+
+    digest = prompts_sub.add_parser("digest", help="print the content digest of a prompt file")
+    digest.add_argument("file")
+    digest.set_defaults(func=_cmd_prompts_digest)
+
+    verify = prompts_sub.add_parser("bundle-verify", help="verify an offline prompt bundle")
+    verify.add_argument("bundle")
+    verify.add_argument("--workspace", required=True)
+    verify.add_argument("--agent", required=True)
+    anchor = verify.add_mutually_exclusive_group(required=True)
+    anchor.add_argument("--trust-key", action="append", default=None, help="trusted key PEM")
+    anchor.add_argument("--expect-bundle-digest", default=None)
+    verify.set_defaults(func=_cmd_prompts_bundle_verify)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agenomic-py",
@@ -213,6 +444,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--idle-timeout", type=float, default=None, help="stop after this many idle seconds"
     )
     serve.set_defaults(func=_cmd_benchmark_serve)
+
+    _add_prompts_parser(sub)
 
     return parser
 

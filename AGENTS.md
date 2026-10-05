@@ -132,8 +132,8 @@ rule of the engineering rules above.
   never by hand: `tests/test_prompts_conformance.py` checks the lock, the file
   set and every hash before running the `python` vectors, and fails on an
   unknown suite. `.gitattributes` marks the directory `-text` so a Windows
-  checkout keeps the bytes the manifest hashes. The YAML suite is added with
-  the prompts file importer.
+  checkout keeps the bytes the manifest hashes. The `prompts-file-yaml` suite
+  runs `importer.load_prompts_file`.
 - `render.py` ports the reference algorithm of the vectors. The order of the
   checks decides `errors[0]`, so every name-keyed map is visited in UTF-16 key
   order (`digest.sorted_keys`), secret findings are collected before the chat
@@ -292,3 +292,101 @@ rule of the engineering rules above.
   no em dash. Their code samples carry no new comments. The umbrella leak
   check skips Markdown, so the public-marker check of the added lines is what
   keeps private names out of these files.
+- Static discovery (`prompts/discovery.py`) only parses: `ast.parse` with
+  `feature_version=(3, 10)`, so a report does not depend on the interpreter
+  that ran the scan (the report says `python_grammar: "3.10"`). Nothing is
+  imported, executed or evaluated; `textwrap.dedent`, `inspect.cleandoc` and
+  argument-less `strip`, `lstrip` and `rstrip` are applied to literals because
+  they are pure. Sources are decoded with PEP 263 and universal newlines, so a
+  literal equals its runtime value; a file that does not decode is skipped as
+  `not_utf8`, one that does not parse as `syntax_error`. Excluded directory
+  names are pruned without being listed; a file that matches an exclude
+  pattern is listed as `excluded`. Symlinks that leave the root are ignored.
+- Names are resolved only through explicit imports: a LangChain or LangGraph
+  class or function counts when it was imported from a `langchain*` or
+  `langgraph` module, and a constant of another scanned file counts when it
+  was imported with `from <module> import NAME` (root-relative module paths,
+  a `src/` layout and relative imports). Star imports and attribute chains are
+  not followed. A module constant is a top-level name bound exactly once and
+  never rebound (`global`, augmented assignment, loop targets, a second
+  assignment); anything else is a runtime value. A constant whose name ends in
+  `prompt`, `template`, `instruction(s)` or `system_message` becomes a
+  `python.string_constant` candidate unless a recognized constructor consumed
+  it, in which case it is reported once, at that constructor; otherwise one
+  text would become two prompts in the import plan.
+- Positions are the start of the value node, in 1-based code points (AST
+  columns are UTF-8 byte offsets and are converted). Secret findings are
+  located through a small decoder of the string tokens, so the line and column
+  are exact for plain and raw literals, escapes and implicit concatenation.
+  After `dedent` or `cleandoc` the finding falls back to the start of the
+  literal, and the literal pieces of an f-string are located at the start of
+  the f-string, because the positions of nodes inside an f-string changed in
+  Python 3.12. A report never carries a matched value.
+- A static message (`SystemMessage`, and the string `prompt` of
+  `create_react_agent` or `system_prompt` of `create_agent`) is literal text
+  for LangChain, so its braces are escaped on import (`static_message_escaped`).
+  Proposals: agent prompts and system messages get usage `system`, human
+  messages `user`, AI messages `other`, chat templates `chat`; text templates
+  and constants are named by their symbol (`system`, `instruction`,
+  `user`/`human`/`question`, `tool`/`description`), else `instructions`. The
+  slot path is `<node or name>.<usage>`, made unique with `_2`, `_3` in report
+  order with node-linked candidates first, and the prompt id is `prm_` plus the
+  slot path with dots turned into underscores. Unresolved candidates propose a
+  slot but no prompt id or kind.
+- The status split follows the SPEC schema and fixtures: `unsupported` is a
+  recognized construct with a refused feature (mustache, jinja2, a format spec,
+  a callable or non-scalar partial, a custom role, content blocks), while
+  `unresolved` is a construction only the runtime knows (f-strings with fields,
+  `.format`, `%`, `+` with a runtime value, call results, `hub.pull`,
+  composed templates, callable prompts). Graph node rules are the syntactic
+  ones of RFC 0012: a prompt referenced by two different nodes keeps
+  `node_path: null` with `node_unresolved`, and a node built inline from a call
+  result is not linked.
+- Report issues have no `syntax` member, so a template syntax error is reported
+  with its reason as the code (for example `format_spec`); `from_langchain`
+  returns `PromptIssue(code="syntax_error", syntax=...)` like the content
+  validator. Issue messages never quote source text.
+- `prompts/importer.py` holds one framework-neutral mapping (`SourcePrompt` to
+  `convert_prompt`) that the scanner and `from_langchain` both use, so static
+  and runtime imports follow the same table. Secrets are scanned on the raw
+  strings, before braces are escaped, so offsets point into what the developer
+  wrote, and blocked content is never returned. `from_langchain` reads the
+  `agenomic_prompt_content_digest` metadata key that `to_langchain` writes; the
+  exact path needs a resolver and a structurally equal object, otherwise the
+  info `export_metadata_stale` precedes the structural import. Its result also
+  carries `secret_findings` (path, offset, length, pattern) for the runtime
+  registration that builds a report from it.
+- The YAML profile is implemented on PyYAML events (`yaml.parse`), imported
+  inside the function, so `agenomic.prompts` never imports yaml and a missing
+  extra raises `yaml_support_not_installed` only for YAML input. A parse error
+  is `yaml_syntax_error` and a JSON document with a repeated key is
+  `duplicate_key`; neither is in the profile's list. Loading never fills the
+  content defaults (`complete_content` does), and a file-local fragment entry
+  without a version must name a prompt of the same file and must not cycle.
+- The import plan is a server document (plan id, workspace, base versions), so
+  the client only builds the upload (`build_import_request`) after checking the
+  report: repository-relative paths, content only on supported candidates,
+  content digests, and no secret in any content. Every plan received is
+  verified (`plan_digest`, `summary`, unresolved items skipped) before it is
+  printed or applied. Apply decisions default to the planned action with
+  `blocked` turned into `skip`, cite `plan_digest`, carry a generated body
+  `idempotency_key` and never send the `Idempotency-Key` header.
+- `TrackingCallbackHandler._model_start` turns the `agenomic_*` run metadata
+  into the tracking keys `prompt_binding_id`, `prompt_manifest_digest`,
+  `agent_version`, `experiment_id`, `experiment_arm_key`,
+  `prompt_rendered_hash` and `prompt_refs`. A malformed value is dropped, and
+  `prompt_refs` is dropped whole unless the three comma lists have the same
+  length and every slot, ref and digest is well formed. No text is added; the
+  existing `input_hash` is unchanged and is never the rendered hash.
+- `CanonicalRun` accepts `prompt_manifest_digest` for the `prompt_version`
+  component; without it the placeholder stays, so existing traces keep their
+  hashes.
+- `agenomic-py prompts` exits 0 on success, 1 when the registry or a prompt
+  check refuses, and 2 for usage, configuration or file errors. `scan` prints
+  the report on stdout (or `--out`) and a summary on stderr; `import` uploads
+  and prints the plan, and applies it only with `--apply`.
+- `tests/schemas/v0.4/` (three schemas) and `tests/fixtures/prompt_imports/`
+  (a report, two plans and a YAML prompts file) are copies from agenomic-spec
+  commit `fcfe12a`, the commit of `SPEC_VECTORS.lock`; refresh them with the
+  vectors. `tests/fixtures/prompt_sources/` is a scanned tree, never imported:
+  `app/raises_on_import.py` would write a marker file and raise if it ran.
