@@ -328,11 +328,16 @@ def test_slots_and_children_fail_closed() -> None:
     assert pinned.agent_id == AGENT
     assert pinned.prompt_manifest_digest == loaded.prompt_manifest_digest
     assert pinned.children == {CHILD: bundle["children"][CHILD]["prompt_manifest_digest"]}
-    assert pinned.agent_for_node("writer") == CHILD
+    assert pinned.agent_for_node("writer|leaf") == CHILD
+    assert pinned.agent_for_node("writer") == AGENT
     assert pinned.agent_for_node("planner") == AGENT
     assert pinned.version("writer.response", agent_id=CHILD).ref.prompt_id == "prm_writer"
-    with pytest.raises(PromptBindingError):
-        loaded.pinned_set(binding_id="bnd_test", node_children={"x": OTHER_AGENT})
+    unpinned = loaded.pinned_set(binding_id="bnd_test", node_children={"x": OTHER_AGENT})
+    assert unpinned.agent_for_node("x|leaf") == OTHER_AGENT
+    assert not unpinned.is_pinned(OTHER_AGENT)
+    with pytest.raises(PromptBindingError) as late:
+        unpinned.release_id_for(OTHER_AGENT)
+    assert late.value.code == "child_agent_not_pinned"
 
 
 def test_trust_store_refuses_non_ed25519_keys(tmp_path: Path) -> None:

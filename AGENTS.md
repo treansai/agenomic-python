@@ -405,3 +405,101 @@ rule of the engineering rules above.
   exist, so later test files join it without a workflow change. The SQLite
   saver (`langgraph-checkpoint-sqlite`) is a dev dependency only, for the
   restart tests.
+- `integrations/langgraph_binding.py` imports LangGraph and LangChain at
+  module import. `agenomic.integrations` exposes its public names through a
+  module `__getattr__` and keeps them out of `__all__`, so neither
+  `import agenomic.integrations` nor a star import loads LangGraph; a
+  subprocess test checks it.
+- `ManagedGraph` is a `PregelProtocol` proxy around an untouched compiled
+  graph (or an `AgentFactory`). Its signatures take and return `Any`, like
+  LangGraph's own, because the proxy does not know the graph's state types.
+  Every run and state update entry point admits first; state reads, graph
+  drawing and other members are forwarded. `Runnable` defines the schema
+  members (`InputType`, `get_input_schema`, `config_specs` and friends) on
+  the class, so they are forwarded explicitly; everything else reaches the
+  inner graph through `__getattr__`, which never forwards private names.
+  `copy` is refused because a copy of the inner graph would drop the binding.
+  Overridden framework members carry `typing_extensions.override`, which is
+  also what lets the linter accept their capitalized names.
+- Admission is written once, as a generator that yields effects (binding
+  create or read, resolution, checkpoint read, cache read or write); `_admit`
+  and `_aadmit` drive it with the sync or async authority and saver methods,
+  so the sync and async entry points cannot drift apart.
+- Order of admission: a config that already carries a consistent pinned set
+  is a nested managed call (scope switch to this agent, no binding I/O; the
+  agent must be the root or a pinned child). A config without the set while
+  LangChain's run context variable carries one raises
+  `nested_bind_unsupported`; that variable reaches sync code and asyncio
+  tasks on Python 3.11 and later only, so on 3.10 async the case cannot be
+  detected. Then reserved keys are refused, the thread key is computed, the
+  binding is created or read, its target is checked, the pinned set is built
+  and, for a new thread-scope binding, the thread's latest checkpoint stamp is
+  compared with the binding (`binding_checkpoint_mismatch`; unstamped threads
+  are adopted). The thread id may come from graph-level config bound with
+  `with_config`; it is then passed explicitly in the call config, because
+  langgraph 1.0.10 does not merge it into the checkpoint config.
+- Thread keys are hashed with the workspace (`thread:sha256:`,
+  `exec:sha256:`); a non-string `thread_id` is hashed as `str(thread_id)`,
+  the form SQLite savers store. A pre-issued binding (runner mode) is
+  compared with the raw thread id, because its key is server made
+  (`exp:...`) and no request leaves the process.
+- Execution scope needs `agenomic_execution_key`; nothing mints one, except
+  the runnable returned by `ManagedGraph.with_retry`, which mints one per
+  logical input before LangGraph's retry wrapper so every attempt shares it.
+  `ManagedGraph.batch` never mints, since a retried batch would get new keys.
+  A resume, a `None` input or a state update reads the binding id from the
+  checkpoint (the one named by `checkpoint_id` when the caller time travels)
+  and the authority confirms it.
+- LangGraph copies scalar `configurable` values into checkpoint metadata and
+  skips keys that start with `__`, which is why the pin scalars are stamped
+  and `__agenomic_prompt_set` is not. LangGraph does put the caller config in
+  `checkpoints` and `debug` chunks, so the proxy strips the set from
+  `config` and `parent_config` there (and from `invoke` results asked with
+  those stream modes), copying only the chunks it changes.
+- `PinnedPromptSet` is immutable: copies return the same object, pickling
+  raises `prompt_set_not_serializable` and `repr` shows only the binding id
+  and digest. A `children` key `K` routes node paths that start with `K|`
+  (longest key wins), never `K` itself. A mapped child that the binding does
+  not pin fails when a node reads it, not when the set is built, so adding a
+  subagent mapping to the code does not break threads pinned to an older
+  release that never reach that node.
+- `prompt_set_unavailable` has two triggers: the accessor receives a config
+  that carries the pin scalars but no pinned set (a config rebuilt from
+  checkpoint metadata or a stripped stream chunk, or one that crossed a
+  process boundary), and a factory-backed graph is asked for a graph before
+  any was built (drawing, schemas, or an execution-scope state read, whose
+  binding is only known from a checkpoint). `binding_missing` stays the case
+  with no pin at all.
+- `LocalBindingStore(directory)` stores one JSON file per workspace, agent
+  and sha256 of the thread key, with a `record_digest` over its own
+  `agenomic.local_execution_binding/v1` document. A write goes to a `.tmp-`
+  file in the same directory, is fsynced and published with `os.link` (first
+  writer wins), then the directory is fsynced on POSIX only (Windows cannot
+  open a directory). A file that does not parse or verify raises
+  `binding_store_corrupt`; it is never treated as absent. Finding a binding
+  by id scans the agent's directory, which only an execution-scope resume
+  does.
+- The offline authority writes `resolved_from` from the proxy's selector and
+  serves each thread the bundle whose release and manifest digest match its
+  binding, among `bundle` and `retained_bundles`. A pre-loaded `PromptBundle`
+  is trusted as loaded; `trust` or `expected_bundle_digest` is only needed to
+  load a path or a document. Offline-only arguments are refused online.
+- `AgentFactory` caches graphs by workspace, agent, manifest digest and
+  genome version, builds each key once under a per-key lock and keeps the
+  first graph as the reference for topology checks (same nodes, same
+  checkpointer object) and for state reads; the reference is never evicted.
+  A thread-scope state read before any build admits the thread to build one.
+- `managed_prompt` renders a text slot as one system message before the
+  history, fills a chat slot's placeholder named `history_key`, composes a
+  chat slot without placeholder, and refuses another placeholder name
+  (`history_conflict`). `config_for` adds `agenomic_rendered_hash` only when
+  exactly one of its slots was rendered through the same accessor object,
+  since one hash cannot describe two renders.
+- `counters()["langgraph_binding_inflight"]` is a process-wide gauge of runs
+  between admission and the end of delegation; the untested-version warning
+  is emitted once per process.
+- The adapter tests share `tests/langgraph_world.py` (seeded registry,
+  graphs, a streaming fake model), so `tests/prompt_fakes.py` stays free of
+  LangChain. `tests/langgraph_restart_child.py` is the subprocess of the real
+  restart tests; they need the SQLite saver dev dependency and skip without
+  it, and the async interrupt tests skip below Python 3.11.
