@@ -1360,6 +1360,18 @@ def test_import_answers_are_verified(client: Client, server: ImportServer) -> No
         payload["import"] = "planned"
         return payload
 
+    def other_report(request: Any, payload: dict[str, Any]) -> dict[str, Any]:
+        if "import" in payload:
+            plan = payload["import"]["plan"]
+            plan["source"]["digest"] = "sha256:" + "0" * 64
+            del plan["plan_digest"]
+            plan["plan_digest"] = prompt_digest(plan)
+        return payload
+
+    server.rewrite = other_report
+    with pytest.raises(ApiError) as other_source:
+        client.prompts.import_report(report, agent_id=AGENT)
+    assert other_source.value.code == "invalid_response"
     server.rewrite = no_record
     with pytest.raises(ApiError) as shapeless:
         client.prompts.import_report(report, agent_id=AGENT)

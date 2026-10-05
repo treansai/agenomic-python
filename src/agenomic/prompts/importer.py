@@ -730,6 +730,15 @@ def load_prompt_file(source: Source, *, format: Format = None) -> dict[str, Any]
     return cast(dict[str, Any], document)
 
 
+def valid_label(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= 128
+        and "\0" not in value
+        and re.match(r"(/|\\|~|[A-Za-z]:)", value) is None
+    )
+
+
 def _repo_path(value: Any) -> bool:
     return (
         isinstance(value, str)
@@ -758,7 +767,7 @@ def check_report(report: Mapping[str, Any]) -> dict[str, Any]:
     root = document.get("root")
     label = root.get("label") if isinstance(root, dict) else None
     _expect(
-        isinstance(label, str) and _repo_path(label) and not label.startswith("~"),
+        valid_label(label),
         "invalid_field_type",
         "root.label must be a short name, never an absolute path",
         "/root/label",

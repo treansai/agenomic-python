@@ -330,7 +330,11 @@ rule of the engineering rules above.
   relative path holds a backslash is left out, a node name that is empty,
   longer than 256 code points or holds a NUL is treated like a dynamic node
   name (`node_unresolved`), and a longer symbol or enclosing function is
-  reported as `null`.
+  reported as `null`. The root label follows the schema rule (1 to 128 code
+  points, no NUL, no leading `/`, `\`, `~` or drive letter) in the scanner and
+  in `check_report` alike (`valid_label`), so the importer never refuses a
+  report the scanner wrote. A skipped file also releases the constants its
+  templates consumed, so they are reported at their own definition.
 - Names are resolved only through explicit imports: a LangChain or LangGraph
   class or function counts when it was imported from a `langchain*` or
   `langgraph` module, and a constant of another scanned file counts when it
@@ -425,7 +429,10 @@ rule of the engineering rules above.
   report, and the slot summary of a prompts file (`slots` with `revision`,
   `added`, `removed`, `changed`, or `None`). `decisions()` is
   `default_decisions`. A report answer must carry a plan whose `plan_id` is the
-  `import_id` and whose `agent_id` is the requested one; a prompts file plan
+  `import_id`, whose `agent_id` is the requested one and whose `source` is
+  `{kind: discovery_report, digest}` with the digest of the report that was
+  sent (the registry digests the report as received and redacts only the
+  plan items and its stored copy); a prompts file plan
   must have `source` equal to `{kind: prompts_file, digest}` with the digest of
   the document that was sent; apply results must echo the import id or the
   cited `plan_digest`. Anything else is `invalid_response`.

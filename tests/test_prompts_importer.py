@@ -246,7 +246,17 @@ def test_reports_are_checked_before_upload() -> None:
     traversal["candidates"][0]["source"]["path"] = "../outside.py"
     home = copy.deepcopy(report)
     home["root"]["label"] = "~/agents"
+    for label in ("team/../agent", "team\\agent", "a" * 128):
+        free_text = copy.deepcopy(report)
+        free_text["root"]["label"] = label
+        assert check_report(free_text)["root"]["label"] == label
+    long_label = copy.deepcopy(report)
+    long_label["root"]["label"] = "a" * 129
+    drive = copy.deepcopy(report)
+    drive["root"]["label"] = "C:agents"
     for document, code in [
+        (long_label, "invalid_field_type"),
+        (drive, "invalid_field_type"),
         (leaked, "invalid_field_type"),
         (secret, "secret_detected"),
         (tampered, "prompt_digest_mismatch"),

@@ -617,7 +617,8 @@ for candidate in report["candidates"]:
   `DEFAULT_EXCLUDES` (`.git`, `.venv`, `node_modules`, `build`, `dist`, ...)
   and your `exclude` globs, and parses at most `max_files` files (4000) of
   at most `max_file_bytes` each (512 KiB). Every file is listed in the
-  report with its sha256, as `scanned` or `skipped` with the reason.
+  report with its sha256, as `scanned` or `skipped` with the reason, except
+  a file whose path holds a backslash, which the report format cannot carry.
 - It finds LangChain `PromptTemplate`, `ChatPromptTemplate`, messages and
   message templates, the prompt of `create_react_agent` and
   `create_agent`, and module string constants whose name ends in `prompt`,

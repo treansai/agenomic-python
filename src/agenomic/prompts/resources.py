@@ -688,6 +688,7 @@ def import_report_flow(
     if _engine(client) is not None:
         raise _cloud_required("prompts.import_report")
     body = build_import_request(report, agent_id=agent_id, options=options)
+    source = {"kind": "discovery_report", "digest": prompt_digest(body["report"])}
     response = yield Call("POST", "/v1/prompts/imports", body, retry=True)
     record = _member(response, "import")
     if not isinstance(record, Mapping):
@@ -698,6 +699,7 @@ def import_report_flow(
         not isinstance(import_id, str)
         or plan.get("plan_id") != import_id
         or plan.get("agent_id") != agent_id
+        or plan.get("source") != source
     ):
         raise _invalid(response, "import plan for the request")
     return ImportPlan(

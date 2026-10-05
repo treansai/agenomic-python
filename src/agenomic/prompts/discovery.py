@@ -27,6 +27,7 @@ from agenomic.prompts.importer import (
     SourcePartial,
     SourcePrompt,
     convert_prompt,
+    valid_label,
 )
 from agenomic.prompts.secrets import SECRET_PATTERN_SET, scan
 
@@ -500,6 +501,7 @@ class _Scanner:
             key: found for key, found in self.by_dotted.items() if found is not module
         }
         self.drafts = [draft for draft in self.drafts if draft.rel != module.rel]
+        self.consumed = {key for draft in self.drafts for key in draft.consumed}
         self.add_nodes = [entry for entry in self.add_nodes if entry[0] is not module]
 
     def resolve(
@@ -1651,13 +1653,7 @@ def _parse(text: str, rel: str) -> Optional[ast.Module]:
 
 def _label(root: Path, label: Optional[str]) -> str:
     value = label if label is not None else (root.name or "repository")
-    invalid = (
-        not value
-        or len(value) > 128
-        or "\0" in value
-        or re.match(r"(/|\\|~|[A-Za-z]:)", value) is not None
-    )
-    if invalid:
+    if not valid_label(value):
         if label is not None:
             raise ValueError("label must be a short name, never an absolute path")
         return "repository"

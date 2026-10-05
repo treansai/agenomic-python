@@ -372,6 +372,24 @@ def test_a_file_too_deep_to_analyze_is_skipped_not_the_scan(tmp_path: Path) -> N
     assert schema_errors(result) == []
 
 
+def test_a_skipped_file_releases_the_constants_it_used(tmp_path: Path) -> None:
+    write(tmp_path, "shared.py", 'SHARED_PROMPT = "Shared {x}."\n')
+    chain = " + ".join(['"a"'] * 1000)
+    write(
+        tmp_path,
+        "user.py",
+        "from langchain_core.prompts import PromptTemplate\n"
+        "from shared import SHARED_PROMPT\n"
+        "T = PromptTemplate.from_template(SHARED_PROMPT)\n"
+        f"def build():\n    return {chain}\n",
+    )
+    result = scan_paths([tmp_path], root=tmp_path, now=NOW)
+    reasons = {entry["path"]: entry["skip_reason"] for entry in result["files"]}
+    assert reasons == {"shared.py": None, "user.py": "syntax_error"}
+    shared = candidate(result, "shared.py", symbol="SHARED_PROMPT")
+    assert shared["content"]["body"] == "Shared {x}."
+
+
 def test_names_outside_the_report_bounds_are_never_reported(tmp_path: Path) -> None:
     long_function = "build_" + "x" * 300
     write(
