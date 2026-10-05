@@ -102,9 +102,10 @@ class PromptCache:
 
     def _write(self, path: Path, payload: Any) -> None:
         assert self._root is not None
-        directory = self._root
+        directories = [self._root]
         for part in path.parent.relative_to(self._root).parts:
-            directory = directory / part
+            directories.append(directories[-1] / part)
+        for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
             if os.name == "posix":
                 os.chmod(directory, 0o700)
@@ -187,6 +188,8 @@ class PromptCache:
 
     def put_version(self, workspace_id: str, version: ManagedPromptVersion) -> None:
         _uuid(workspace_id)
+        _prompt_id(version.ref.prompt_id)
+        _version(version.ref.version)
         if version.workspace_id != workspace_id:
             raise _conflict(f"{version.ref} belongs to another workspace")
         version.verify()

@@ -53,6 +53,18 @@ MAX_OUTPUT_CONTRACT_DEPTH = 32
 MAX_CHAT_MESSAGES = 256
 MAX_VARIABLES = 128
 MAX_FRAGMENTS = 32
+CONTENT_TOO_LARGE_REASONS = (
+    "content_too_large",
+    "template_too_large",
+    "too_many_messages",
+    "too_many_variables",
+    "too_many_fragments",
+)
+NAMED_CONTENT_CODES = {
+    "prompt_kind_mismatch": "prompt_kind_mismatch",
+    "fragment_cycle": "prompt_fragment_cycle",
+    "fragment_depth_exceeded": "prompt_fragment_depth_exceeded",
+}
 
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
 _PROMPT_ID = re.compile(r"prm_[a-z0-9]+(?:[_-][a-z0-9]+)*", re.ASCII)
@@ -397,20 +409,15 @@ class ValidationReport:
             raise PromptTemplateError(
                 "prompt_secret_detected", status, "the prompt content contains a secret", details
             )
-        if first.code == "prompt_kind_mismatch":
-            raise PromptTemplateError(
-                "prompt_kind_mismatch", status, "the content kind does not fit the prompt", details
-            )
-        if first.code in ("content_too_large", "template_too_large"):
+        if first.code in CONTENT_TOO_LARGE_REASONS:
             raise PromptTemplateError(
                 "prompt_content_too_large",
                 status,
                 f"prompt content too large: {first.code}",
                 details,
             )
-        raise PromptTemplateError(
-            "prompt_template_invalid", status, f"prompt content invalid: {first.code}", details
-        )
+        code = NAMED_CONTENT_CODES.get(first.code, "prompt_template_invalid")
+        raise PromptTemplateError(code, status, f"prompt content invalid: {first.code}", details)
 
 
 class _Validation:

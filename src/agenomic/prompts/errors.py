@@ -55,6 +55,8 @@ _CODE_CLASSES: dict[str, type[ApiError]] = {
     "prompt_secret_detected": PromptTemplateError,
     "prompt_content_too_large": PromptTemplateError,
     "prompt_kind_mismatch": PromptTemplateError,
+    "prompt_fragment_cycle": PromptTemplateError,
+    "prompt_fragment_depth_exceeded": PromptTemplateError,
     "prompt_render_error": PromptRenderError,
     "prompt_digest_mismatch": PromptIntegrityError,
     "manifest_digest_mismatch": PromptIntegrityError,

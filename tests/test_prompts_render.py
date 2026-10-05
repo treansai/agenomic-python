@@ -357,6 +357,82 @@ def test_template_errors_map_to_top_level_codes() -> None:
     validate_content(text_content("ok"), fragments=no_fragments).raise_for_errors()
 
 
+def _pinned(prompt_id: str, content: dict[str, Any]) -> dict[str, Any]:
+    return {"prompt_id": prompt_id, "version": 1, "content_digest": prompt_digest(content)}
+
+
+def _nested_fragments(levels: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    entries: dict[str, Any] = {}
+    inner = text_content("leaf")
+    for level in range(levels, 0, -1):
+        prompt_id = f"prm_f{level}"
+        entries[f"{prompt_id}:1"] = {"prompt_kind": "fragment", "content": inner}
+        inner = text_content("{>n}", fragments={"n": _pinned(prompt_id, inner)})
+    return inner, entries
+
+
+def _fragment_cycle() -> tuple[dict[str, Any], dict[str, Any]]:
+    looping = text_content(
+        "{>again}",
+        fragments={
+            "again": {"prompt_id": "prm_loop", "version": 1, "content_digest": "sha256:" + "0" * 64}
+        },
+    )
+    entries = {"prm_loop:1": {"prompt_kind": "fragment", "content": looping}}
+    return text_content("{>loop}", fragments={"loop": _pinned("prm_loop", looping)}), entries
+
+
+@pytest.mark.parametrize(
+    ("case", "reason", "code"),
+    [
+        (
+            (chat_content([{"role": "user", "content": "x"}] * 257), {}),
+            "too_many_messages",
+            "prompt_content_too_large",
+        ),
+        (
+            (text_content("x", {f"v{i}": required() for i in range(129)}), {}),
+            "too_many_variables",
+            "prompt_content_too_large",
+        ),
+        (
+            (
+                {
+                    **text_content("x"),
+                    "fragments": {
+                        f"f{i}": {
+                            "prompt_id": "prm_f",
+                            "version": 1,
+                            "content_digest": "sha256:" + "0" * 64,
+                        }
+                        for i in range(33)
+                    },
+                },
+                {},
+            ),
+            "too_many_fragments",
+            "prompt_content_too_large",
+        ),
+        (_nested_fragments(9), "fragment_depth_exceeded", "prompt_fragment_depth_exceeded"),
+        (_fragment_cycle(), "fragment_cycle", "prompt_fragment_cycle"),
+    ],
+)
+def test_validation_codes_follow_the_registry(
+    case: tuple[dict[str, Any], dict[str, Any]], reason: str, code: str
+) -> None:
+    content, entries = case
+    report = validate_content(content, fragments=lambda pid, v, d: entries.get(f"{pid}:{v}"))
+    with pytest.raises(PromptTemplateError) as raised:
+        report.raise_for_errors(400)
+    assert (raised.value.reason, raised.value.code, raised.value.status) == (reason, code, 400)
+
+
+def test_eight_nested_fragments_are_valid() -> None:
+    content, entries = _nested_fragments(8)
+    report = validate_content(content, fragments=lambda pid, v, d: entries.get(f"{pid}:{v}"))
+    assert report.ok
+
+
 def test_prompt_kind_mismatch_and_tokenize_errors() -> None:
     report = validate_content(text_content("x"), fragments=no_fragments, prompt_kind="chat")
     assert report.errors[0].code == "prompt_kind_mismatch"

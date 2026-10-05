@@ -544,13 +544,17 @@ class LocalPromptEngine:
             pending.extend(record.content["fragments"].values())
         return prompts
 
-    def _target(
-        self, agent_id: str, channel: Optional[str], release_id: Optional[str]
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    @staticmethod
+    def _require_selector(channel: Optional[str], release_id: Optional[str]) -> None:
         if (channel is None) == (release_id is None):
             raise _error(
                 "agent_selector_required", 400, "name exactly one of channel and release_id"
             )
+
+    def _target(
+        self, agent_id: str, channel: Optional[str], release_id: Optional[str]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        self._require_selector(channel, release_id)
         if channel is not None:
             state = self.get_channel(agent_id, channel)
             if state["release_id"] is None:
@@ -637,6 +641,7 @@ class LocalPromptEngine:
             raise _error("thread_key_invalid", 400, "invalid thread key", reason=reason)
         if scope not in ("thread", "execution"):
             raise _error("validation_error", 400, "scope must be thread or execution")
+        self._require_selector(channel, release_id)
         with self._lock:
             existing = self._state["bindings"].get(agent_id, {}).get(thread_key)
             if existing is not None:
@@ -655,6 +660,9 @@ class LocalPromptEngine:
                         409,
                         "the thread is already bound to another selector, scope or manifest",
                         binding_id=existing["binding_id"],
+                        release_id=existing["release_id"],
+                        resolved_from=copy.deepcopy(bound),
+                        prompt_manifest_digest=existing["prompt_manifest_digest"],
                     )
                 return copy.deepcopy(existing), self._binding_artifacts(existing), False
             release, resolved_from = self._target(agent_id, channel, release_id)

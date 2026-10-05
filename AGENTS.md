@@ -151,7 +151,12 @@ rule of the engineering rules above.
 - Building a `ManagedPromptVersion` runs the full content validation, secret
   patterns included, so a stored version that matches a pattern added later
   fails closed with `prompt_secret_detected`, as a bundle export would.
-  `prompt_kind_mismatch` keeps its own top-level code.
+  The top-level code of a failed validation follows the server and the error
+  registry: `prompt_secret_detected` when any secret was found, then
+  `prompt_content_too_large` for every size and count limit, then
+  `prompt_kind_mismatch`, `prompt_fragment_cycle` and
+  `prompt_fragment_depth_exceeded` for those items, else
+  `prompt_template_invalid`.
 - `PromptUri.to_version_ref(workspace_id)` takes the workspace so a URI can
   never be reduced to a local `prm_x:n` without the workspace check.
 - `PromptBundle.load` runs AJS, schema, authenticity, expiry, entry digests,
@@ -165,6 +170,9 @@ rule of the engineering rules above.
   file stem (save the key of `GET /v1/signing-keys/:key_id` as
   `<key_id>.pem`); `BundleTrust.from_pems` takes explicit ids.
   `from_online_response` refuses a document that carries a signature.
+  `expires_at` must be exactly `YYYY-MM-DDTHH:MM:SSZ`, the SPEC timestamp,
+  because `datetime.fromisoformat` accepts different forms on Python 3.10 and
+  3.11.
 - `_transport.py` keeps one pooled `httpx.Client` per `Client`, and one
   `httpx.AsyncClient` per running event loop, in weak maps keyed by the
   `Client`, so the client facade does not need to change for pooling;
@@ -181,15 +189,19 @@ rule of the engineering rules above.
   level `_sleep` and `_asleep`.
 - `PromptCache` keys always include the workspace. Disk entries are written
   atomically (temporary file then `os.replace`, files 0600, directories 0700),
-  every path segment is validated first (a bad segment is a `ValueError`, so no
-  traversal is possible), and every read is re-verified. A mismatch raises
-  `cache_conflict`; whether that is a miss (online) or a failure (offline) is
-  the caller's decision.
+  every path segment is validated first, on writes as on reads, since a
+  version record does not check the prompt id grammar itself (a bad segment is
+  a `ValueError`, so no traversal is possible), and every read is re-verified.
+  The SDK-owned `v1` directory is 0700 too; the caller's directory is left as
+  it is. A mismatch raises `cache_conflict`; whether that is a miss (online)
+  or a failure (offline) is the caller's decision.
 - `LocalPromptEngine` is a simulation of the governed path: in Agenomic Cloud a
   channel move is a session-only action with approvals. It returns the server
-  codes and statuses. It never invents genome addresses (`genome_version` stays
-  `null`), and its runtime `bundle_id` and `bundle_hash` are deterministic
-  placeholders derived from the agent id.
+  codes and statuses; a binding request checks its selector before looking up
+  an existing binding, and a conflict carries the server's details (binding
+  id, release id, `resolved_from`, manifest digest). It never invents genome
+  addresses (`genome_version` stays `null`), and its runtime `bundle_id` and
+  `bundle_hash` are deterministic placeholders derived from the agent id.
 - `to_langchain` refuses `integer`, `boolean` and `json` variables because
   LangChain would print `True` and Python reprs. Its metadata uses the key
   `agenomic_prompt_content_digest`, which the LangChain importer must read.

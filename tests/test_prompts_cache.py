@@ -18,9 +18,12 @@ from prompt_fakes import (
 
 from agenomic.prompts import (
     ExecutionBinding,
+    ManagedPromptVersion,
     PromptBundle,
     PromptCache,
     PromptIntegrityError,
+    PromptVersionRecord,
+    prompt_digest,
     thread_key,
 )
 
@@ -123,11 +126,30 @@ def test_disk_paths_reject_traversal(tmp_path: Path) -> None:
     assert not any(tmp_path.iterdir())
 
 
+def test_put_version_rejects_traversal(tmp_path: Path) -> None:
+    content = text_content("hello")
+    for prompt_id, number in (("../../../../escape", 1), ("prm_x", 0)):
+        record = PromptVersionRecord(
+            prompt_id=prompt_id,
+            version=number,
+            prompt_kind="text",
+            content_digest=prompt_digest(content),
+            content=content,
+        )
+        version = ManagedPromptVersion.from_record(
+            record, workspace_id=WORKSPACE, lookup=lambda pid, v: None
+        )
+        for cache in (PromptCache(), PromptCache(tmp_path / "a" / "cache")):
+            with pytest.raises(ValueError):
+                cache.put_version(WORKSPACE, version)
+    assert not any(tmp_path.iterdir())
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
 def test_disk_modes(tmp_path: Path) -> None:
     cache = PromptCache(tmp_path)
     cache.put_version(WORKSPACE, seeded_engine().get_version("prm_writer", 1))
-    for path in (tmp_path / "v1").rglob("*"):
+    for path in (tmp_path / "v1", *(tmp_path / "v1").rglob("*")):
         mode = stat.S_IMODE(path.stat().st_mode)
         assert mode == (0o700 if path.is_dir() else 0o600), path
 

@@ -4,6 +4,7 @@ import base64
 import binascii
 import json
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ from agenomic.prompts.models import ManagedPromptVersion, PromptVersionRecord, R
 from agenomic.prompts.pinned import PinnedPromptSet
 
 BUNDLE_SCHEMA = "agenomic.prompt_bundle/v1"
+_TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", re.ASCII)
 _REQUIRED_MEMBERS: tuple[tuple[str, type], ...] = (
     ("workspace_id", str),
     ("agent_id", str),
@@ -87,15 +89,13 @@ def _incomplete(message: str, **details: Any) -> Exception:
 
 
 def _parse_time(value: Any) -> datetime:
-    if not isinstance(value, str):
+    if not isinstance(value, str) or _TIMESTAMP.fullmatch(value) is None:
         raise _incomplete("expires_at is not a timestamp", reason="invalid_field_type")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError as error:
         raise _incomplete("expires_at is not a timestamp", reason="invalid_field_type") from error
-    if parsed.tzinfo is None:
-        raise _incomplete("expires_at has no time zone", reason="invalid_field_type")
-    return parsed
+    return parsed.replace(tzinfo=timezone.utc)
 
 
 def _read(source: Union[str, os.PathLike[str], Mapping[str, Any]]) -> Any:

@@ -253,6 +253,19 @@ def test_bindings_first_writer_wins() -> None:
         ),
     )
     assert isinstance(error, PromptBindingError)
+    assert error.details == {
+        "binding_id": binding["binding_id"],
+        "release_id": root,
+        "resolved_from": {"channel": "production", "generation": 1},
+        "prompt_manifest_digest": binding["prompt_manifest_digest"],
+    }
+    for selectors in ({}, {"channel": "production", "release_id": root}):
+        raises(
+            "agent_selector_required",
+            lambda selectors=selectors: engine.create_binding(
+                AGENT, thread_key="t", scope="thread", **selectors
+            ),
+        )
     raises(
         "execution_binding_conflict",
         lambda: engine.create_binding(

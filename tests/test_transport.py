@@ -228,6 +228,9 @@ def test_error_codes_map_to_classes() -> None:
     expected = {
         "prompt_ref_invalid": PromptRefError,
         "prompt_secret_detected": PromptTemplateError,
+        "prompt_content_too_large": PromptTemplateError,
+        "prompt_fragment_cycle": PromptTemplateError,
+        "prompt_fragment_depth_exceeded": PromptTemplateError,
         "prompt_render_error": PromptRenderError,
         "artifact_integrity_error": PromptIntegrityError,
         "prompt_import_plan_stale": PromptImportError,
