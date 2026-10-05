@@ -477,7 +477,11 @@ rule of the engineering rules above.
   and prints the plan, and applies it only with `--apply`. `import`, and
   `render` of a registry reference, exit 2 before any request unless both
   `AGENOMIC_ENDPOINT` and `AGENOMIC_API_KEY` are set, as their error says;
-  the client would otherwise send the request without a key.
+  the client would otherwise send the request without a key. `digest` runs
+  the content validator first and refuses on any error but
+  `fragment_not_found`, because a file without its defaulted members, or any
+  other document, would otherwise print a digest the registry never computes,
+  while fragment pins cannot be resolved offline and do not change the digest.
 - `tests/schemas/v0.4/` (three schemas) and `tests/fixtures/prompt_imports/`
   (a report, two plans and a YAML prompts file) are copies from agenomic-spec
   commit `fcfe12a`, the commit of `SPEC_VECTORS.lock`; refresh them with the

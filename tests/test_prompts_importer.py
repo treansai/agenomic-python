@@ -498,6 +498,36 @@ def test_cli_render_and_digest(
     floating = tmp_path / "float.json"
     floating.write_text('{"schema": "agenomic.prompt_content/v1", "x": 1.5}', encoding="utf-8")
     assert cli.main(["prompts", "digest", str(floating)]) == 1
+    capsys.readouterr()
+    shapeless = tmp_path / "shapeless.json"
+    shapeless.write_text('{"schema": "agenomic.prompt_content/v1", "x": 1}', encoding="utf-8")
+    assert cli.main(["prompts", "digest", str(shapeless)]) == 1
+    assert "prompt_template_invalid" in capsys.readouterr().err
+    incomplete = tmp_path / "incomplete.json"
+    authored = {key: content[key] for key in ("kind", "body", "variables")}
+    incomplete.write_text(
+        json.dumps({"schema": "agenomic.prompt_file/v1", "content": authored}), encoding="utf-8"
+    )
+    assert cli.main(["prompts", "digest", str(incomplete)]) == 1
+    assert "prompt_template_invalid" in capsys.readouterr().err
+    pinned_content = complete_content(
+        {
+            "kind": "text",
+            "body": "Plan. {>safety}",
+            "variables": {},
+            "fragments": {
+                "safety": {
+                    "prompt_id": "prm_safety",
+                    "version": 1,
+                    "content_digest": "sha256:" + "1" * 64,
+                }
+            },
+        }
+    )
+    pinned = tmp_path / "pinned.json"
+    pinned.write_text(json.dumps(pinned_content), encoding="utf-8")
+    assert cli.main(["prompts", "digest", str(pinned)]) == 0
+    assert capsys.readouterr().out.strip() == prompt_digest(pinned_content)
     engine = seeded_engine()
 
     class FakePrompts:

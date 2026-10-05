@@ -304,9 +304,15 @@ def _cmd_prompts_digest(args: argparse.Namespace) -> int:
     from agenomic.prompts.digest import prompt_digest
     from agenomic.prompts.errors import AjsError
     from agenomic.prompts.importer import load_prompt_file
+    from agenomic.prompts.render import validate_content
 
     try:
         document = load_prompt_file(Path(args.file))
+        report = validate_content(
+            document["content"], fragments=lambda prompt_id, version, digest: None
+        )
+        if any(item.code != "fragment_not_found" for item in report.errors):
+            report.raise_for_errors()
         print(prompt_digest(document["content"]))
     except ApiError as error:
         return _api_failure(error)

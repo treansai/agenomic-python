@@ -826,9 +826,10 @@ agenomic-py prompts bundle-verify prompt-bundle.json \
 - `render` renders a prompt file with the variables of a JSON file, or
   fetches a version such as `prm_planner:1` with the environment settings.
   It prints the text or messages with `content_digest` and `rendered_hash`.
-  `digest` prints the content digest of a prompt file. A prompt file is an
-  `agenomic.prompt_file/v1` with the full content of one prompt, or a bare
-  content document, as JSON or YAML.
+  `digest` prints the content digest of a prompt file, and refuses a content
+  that fails the offline content checks (fragment pins are not resolved). A
+  prompt file is an `agenomic.prompt_file/v1` with the full content of one
+  prompt, or a bare content document, as JSON or YAML.
 - `bundle-verify` runs the checks of `PromptBundle.load` and prints the
   bundle and manifest digests, the refs and the slots. Repeat `--trust-key`
   for several keys, or pin the bundle with `--expect-bundle-digest`.
