@@ -169,7 +169,23 @@ def egress_restricted(
     return True
 
 
+# The supervisor targets POSIX hosts (process groups, uids, read only mounts); these
+# fallbacks only keep the module importable and type checked on Windows.
+if sys.platform == "win32":
+    _KILL_SIGNAL = signal.SIGTERM
+else:
+    _KILL_SIGNAL = signal.SIGKILL
+
+
+def _current_uid() -> int:
+    if sys.platform == "win32":
+        return -1
+    return os.getuid()
+
+
 def _readonly_fs(path: Path) -> bool:
+    if sys.platform == "win32":
+        return False
     try:
         return bool(os.statvfs(path).f_flag & os.ST_RDONLY)
     except OSError:
@@ -448,7 +464,7 @@ class Supervisor:
             try:
                 proc.wait(self.settings.grace_s)
             except subprocess.TimeoutExpired:
-                self._signal(proc, signal.SIGKILL)
+                self._signal(proc, _KILL_SIGNAL)
                 proc.wait()
         self.exit_code = proc.returncode
         self.state = "stopped"
@@ -456,6 +472,10 @@ class Supervisor:
 
     @staticmethod
     def _signal(proc: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+        if sys.platform == "win32":
+            with contextlib.suppress(ProcessLookupError):
+                proc.send_signal(sig)
+            return
         try:
             os.killpg(os.getpgid(proc.pid), sig)
         except (ProcessLookupError, PermissionError):
@@ -466,6 +486,8 @@ class Supervisor:
     def _gids(self) -> list[int]:
         if self.settings.child_gid is not None:
             return [self.settings.child_gid]
+        if sys.platform == "win32":
+            return []
         return list({os.getgid(), *os.getgroups()})
 
     def isolation(self) -> dict[str, Any]:
@@ -478,7 +500,9 @@ class Supervisor:
         skills_paths += self.settings.readonly_paths
         return isolation_report(
             self.child_env,
-            child_uid=os.getuid() if self.settings.child_uid is None else self.settings.child_uid,
+            child_uid=_current_uid()
+            if self.settings.child_uid is None
+            else self.settings.child_uid,
             child_gids=self._gids(),
             config_paths=config_paths,
             skills_paths=skills_paths,
@@ -629,6 +653,9 @@ def main(
         child = args_list[idx + 1 :]
         args_list = args_list[:idx]
     args = _parser().parse_args(args_list)
+    if sys.platform == "win32":
+        print("agenomic-hermes-supervisor requires a POSIX host", file=sys.stderr)
+        return 2
     env = dict(os.environ if environ is None else environ)
     if not child:
         logger.error("no Hermes command given after --")

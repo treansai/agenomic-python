@@ -23,6 +23,9 @@ from agenomic.integrations.hermes.supervisor import (
     writable_by,
 )
 
+# The supervisor targets POSIX hosts: mode bits, uids, process groups and signal exit codes.
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only supervisor behaviour")
+
 PARENT_ENV = {
     "PATH": "/usr/bin:/bin",
     "HOME": "/home/agent",
@@ -101,6 +104,7 @@ def test_egress_check() -> None:
     assert not egress_restricted(["host:notaport"], connect=refuse)
 
 
+@posix_only
 def test_writability_by_mode_bits(tmp_path: Path) -> None:
     ro_dir = tmp_path / "ro"
     ro_dir.mkdir()
@@ -199,6 +203,8 @@ def make_supervisor(tmp_path: Path, api: FakeApi, argv: list[str]) -> Supervisor
 
 
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
+# SIGTERM ends a POSIX child with -15; on Windows it is TerminateProcess with exit code 1.
+TERM_EXIT = 1 if sys.platform == "win32" else -15
 
 
 def test_quarantine_stops_and_refuses_restart_then_resume(tmp_path: Path) -> None:
@@ -219,7 +225,7 @@ def test_quarantine_stops_and_refuses_restart_then_resume(tmp_path: Path) -> Non
     assert [(c, st) for c, st, _ in api.acks] == [("q1", "received"), ("q1", "applied")]
     detail = api.acks[-1][2]
     assert detail["process_state"] == "stopped"
-    assert detail["exit_code"] == -15
+    assert detail["exit_code"] == TERM_EXIT
     assert s.refuse_restart
     assert not s.start_child()
     api.commands = [{"id": "q1", "kind": "quarantine", "status": "received"}]
@@ -235,9 +241,10 @@ def test_quarantine_stops_and_refuses_restart_then_resume(tmp_path: Path) -> Non
     api.commands = [{"id": "x1", "kind": "pause", "status": "requested"}]
     s.heartbeat()
     assert api.acks[-1][:2] == ("x1", "refused")
-    assert s.stop_child() == -15
+    assert s.stop_child() == TERM_EXIT
 
 
+@posix_only
 def test_sigkill_after_grace(tmp_path: Path) -> None:
     api = FakeApi()
     stubborn = [
@@ -289,6 +296,7 @@ def test_main_argument_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     assert sup.main(["--endpoint", "https://a.example", "--", "hermes"], environ={}) == 2
 
 
+@posix_only
 def test_main_runs_child_until_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hermes_fakes import FakeAgenomic
 
@@ -334,6 +342,7 @@ def test_main_runs_child_until_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         server.close()
 
 
+@posix_only
 def test_no_restart_supervisor_exits_with_its_child(tmp_path: Path) -> None:
     from hermes_fakes import FakeAgenomic
 
