@@ -503,3 +503,18 @@ rule of the engineering rules above.
   LangChain. `tests/langgraph_restart_child.py` is the subprocess of the real
   restart tests; they need the SQLite saver dev dependency and skip without
   it, and the async interrupt tests skip below Python 3.11.
+- The LangGraph examples 12 to 16 run offline on `GenericFakeChatModel`,
+  carry no comments or docstrings, print what they show and check their own
+  claims with `assert`, so `tests/test_examples.py` fails when a behaviour
+  regresses, not only when a script crashes. They copy no helper from
+  `tests/`, because an example must run on its own. Every node passes
+  `prompts.config_for(slot)` to the model and returns only the reply: the
+  rendered system prompt never enters checkpointed history, and token
+  streaming works on Python 3.10 async. Example 15 starts itself again with
+  `sys.executable` and `--resume` as the restarted process; without the
+  SQLite saver (the repository `.venv` has none, CI installs it through
+  `dev`) it prints a hint and exits 0. Example 16 moves the channel while it
+  consumes `stream` between the two nodes, before LangGraph starts the next
+  step, so the second node of the in-flight run proves the admission pin.
+  Examples 15 and 16 move channels on the local engine, a simulation of the
+  governed path, and say so in their output.

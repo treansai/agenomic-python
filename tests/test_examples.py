@@ -17,6 +17,11 @@ OFFLINE_EXAMPLES = [
     "05_langgraph_traced.py",
     "07_offline_signed_release.py",
     "09_rmp.py",
+    "12_managed_prompts_stategraph.py",
+    "13_langgraph_subagent_prompts.py",
+    "14_langgraph_async_streaming.py",
+    "15_langgraph_interrupt_restart.py",
+    "16_langgraph_promotion_pinning.py",
 ]
 
 

@@ -44,6 +44,11 @@ jobs:
           python examples/03_atep_local.py > /dev/null
           python examples/05_langgraph_traced.py > /dev/null
           python examples/07_offline_signed_release.py > /dev/null
+          python examples/12_managed_prompts_stategraph.py > /dev/null
+          python examples/13_langgraph_subagent_prompts.py > /dev/null
+          python examples/14_langgraph_async_streaming.py > /dev/null
+          python examples/15_langgraph_interrupt_restart.py > /dev/null
+          python examples/16_langgraph_promotion_pinning.py > /dev/null
 
   langgraph-floor:
     if: github.event_name != 'schedule'
