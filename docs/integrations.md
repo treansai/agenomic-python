@@ -328,12 +328,17 @@ which each client asks once and then remembers.
   any binding request is sent. A 401, 403 or 404 is raised, and when the
   call names a thread key (a thread binding, a new execution, or
   `revalidate="never"`) it also evicts that thread's cached binding.
-- While the registry is unavailable, the proxy sends no binding request. A
-  thread whose binding is cached with the same scope and target resumes on
-  it after its cached closure is verified again; one WARNING is logged on
-  `agenomic.prompts` and `registry_outage_cached_binding_total` increments.
-  Any other thread raises `registry_unavailable` before a node runs. No
-  channel is resolved and nothing falls back to the latest release.
+- While the registry is unavailable, no binding request gets through. A
+  proxy whose check is pending sends none, because `GET /v1/whoami` fails
+  first; a proxy whose check has passed sends the request with the usual
+  retries, and it fails. Either way, a thread whose binding is cached with
+  the same scope and target resumes on it after its cached closure is
+  verified again; one WARNING is logged on `agenomic.prompts` and
+  `registry_outage_cached_binding_total` increments. With
+  `revalidate="never"`, a cached binding is used without a binding request,
+  as at any other time. Any other thread raises `registry_unavailable`
+  before a node runs. No channel is resolved and nothing falls back to the
+  latest release.
 - A restarted process finds a thread's binding only in a disk cache: set
   `AGENOMIC_PROMPT_CACHE_DIR` (or pass `prompt_cache=PromptCache(directory)`
   to the `Client`) together with `workspace_id`.
