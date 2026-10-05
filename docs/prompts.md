@@ -13,12 +13,14 @@ the other Agenomic implementations.
 ```bash
 pip install agenomic
 pip install "agenomic[langchain]"
+pip install "agenomic[yaml]"
 ```
 
-The core package holds the registry client, the renderer and bundle
-verification: `agenomic.prompts` needs only the core dependencies and never
-imports LangChain or LangGraph. The `langchain` extra adds the conversion to
-LangChain prompt templates.
+The core package holds the registry client, the renderer, bundle
+verification and the prompt scanner: `agenomic.prompts` needs only the core
+dependencies and never imports LangChain or LangGraph. The `langchain` extra
+adds the conversion to and from LangChain prompt templates, and the `yaml`
+extra reads YAML prompts files.
 
 ## Concepts
 
@@ -323,6 +325,9 @@ turned off. Use the client as a context manager, or call `close()`
   execution bindings, and every publishing call refuses it.
 - `create`, `publish` and `drafts.save` need a `write` or `admin` key. A
   `read` key gets the registry's 403 `api_key_scope_insufficient` as is.
+- So does every import call, planning included: `import_report`,
+  `apply_import`, `plan_declarations`, `apply_declarations`,
+  `register_runtime` and `agenomic-py prompts import`.
 - Alias moves and channel moves need a signed-in session in Agenomic Cloud;
   every API key gets `session_required`.
 - An API key binds, resolves or exports only a release that is `approved`,
@@ -398,6 +403,46 @@ binding, bundle = client.bindings.get(agent_id, binding.binding_id)
 after page) and `move_preview`. There is no promote and no rollback in the
 SDK: moving a channel is a signed-in, approved action in Agenomic Cloud.
 Registries that do not serve move previews yet answer 404 to `move_preview`.
+
+### Reporting prompt usage
+
+`client.bindings.report_usage` tells Agenomic Cloud which prompts a binding
+rendered, which feeds its inventory of observed prompts:
+
+```python
+result = client.prompts.render(
+    "prm_planner:1", {"customer": "Acme", "question": "Where is my order?"}
+)
+client.bindings.report_usage(
+    agent_id,
+    binding.binding_id,
+    [
+        {
+            "slot_path": "planner.instructions",
+            "prompt_ref": str(result.ref),
+            "content_digest": result.content_digest,
+            "rendered_hash": result.rendered_hash,
+            "count": 1,
+            "first_at": "2026-10-05T09:00:00Z",
+            "last_at": "2026-10-05T09:00:00Z",
+        }
+    ],
+)
+```
+
+- An observation carries references and hashes only. Its members are
+  `slot_path`, `node_path`, `prompt_ref`, `content_digest`, `rendered_hash`,
+  `overlay` (`digest` and `position`), `alias`, `alias_generation`,
+  `unmanaged`, `role_layout`, `count`, `first_at` and `last_at`. The SDK
+  raises `ValueError` before sending anything else, prompt text included.
+- `prompt_ref` names a version, never an alias or a bare id. A prompt that
+  is not managed is reported with `"unmanaged": True` instead.
+- `rendered_hash` is the `rendered_hash` of a render (`sha256:`); the
+  BLAKE3 `input_hash` of the tracking handler is refused.
+- For a version read through an alias, add `alias` and `alias_generation`
+  from `version.resolved_from`.
+- Long lists are sent 500 observations per request, and an empty list sends
+  nothing. `bind_langgraph` never reports usage on its own.
 
 ## Offline bundles
 
@@ -528,6 +573,268 @@ binding, bundle, created = authority.create_or_get(
 print(counters()["registry_outage_cached_binding_total"])
 ```
 
+## Importing existing prompts
+
+Prompts that already live in your code come under management in three
+steps, and nothing is written before the last one:
+
+1. `agenomic-py prompts scan` reads your source files statically and writes
+   a discovery report.
+2. The report, never the source code, is uploaded. Agenomic Cloud answers
+   with an import plan that proposes one action per prompt found.
+3. You review the plan and apply it. The apply call cites the plan's
+   `plan_digest`, so exactly the reviewed plan is written.
+
+Neither the scanner nor the import ever changes a source file. Replacing a
+string in your code by a managed prompt stays your change: the SDK has no
+rewrite command. The report and plan formats
+(`agenomic.prompt_discovery_report/v1`, `agenomic.prompt_import_plan/v1`)
+are defined by agenomic-spec.
+
+### Scanning code
+
+```bash
+agenomic-py prompts scan . --out report.json
+```
+
+The command writes the report and prints the number of scanned files and
+of candidates per status on standard error. `scan_paths` does the same from
+Python:
+
+```python
+from agenomic.prompts.discovery import scan_paths
+
+report = scan_paths(["app"], root=".", label="support-agent")
+for candidate in report["candidates"]:
+    proposal = candidate["proposal"]
+    print(candidate["status"], proposal["slot_path"], proposal["prompt_id"])
+```
+
+- The scanner parses with the Python 3.10 grammar and nothing more: no
+  module is imported, executed or evaluated, so a module that fails on
+  import is scanned like any other.
+- It reads the `.py` files under the given paths, skips
+  `DEFAULT_EXCLUDES` (`.git`, `.venv`, `node_modules`, `build`, `dist`, ...)
+  and your `exclude` globs, and parses at most `max_files` files (4000) of
+  at most `max_file_bytes` each (512 KiB). Every file is listed in the
+  report with its sha256, as `scanned` or `skipped` with the reason.
+- It finds LangChain `PromptTemplate`, `ChatPromptTemplate`, messages and
+  message templates, the prompt of `create_react_agent` and
+  `create_agent`, and module string constants whose name ends in `prompt`,
+  `template`, `instructions` or `system_message`. A prompt used by exactly
+  one LangGraph node (`add_node`) gets that node as its `node_path`, and a
+  node that runs a compiled subgraph or an agent is listed for mapping to
+  a child agent.
+- The report holds repository-relative paths, file hashes and the extracted
+  templates only. `label` (default: the root directory name) names the
+  root, and `commit` records a git commit; the SDK never reads git itself.
+
+Each candidate has a status:
+
+- `supported`: the template was ported exactly to `agenomic-fstring/v1`.
+  Only these candidates carry `content` and its `content_digest`.
+- `unsupported`: a known construct with a refused feature, such as a
+  mustache or jinja2 template, a format spec or a callable partial.
+- `unresolved`: the prompt is built at runtime: an f-string, `.format`,
+  `hub.pull`, the result of a call, a subgraph node.
+- `blocked_secret`: the template contains a credential. The report keeps
+  the pattern id and its position (`secret_findings`), never the text.
+
+Each candidate also proposes a prompt id, a slot path such as
+`planner.instructions` and a usage, and explains every decision with issue
+codes (`python_fstring`, `dynamic_template`, `callable_partial`,
+`variable_types_defaulted`, ...) that never quote the source. Imported
+variables are typed `string`: review the types in the plan.
+
+### Import plans
+
+Upload the report with a `write` key:
+
+```bash
+agenomic-py prompts import report.json --agent-id "$AGENT_ID"
+```
+
+The command reads the client settings from the environment
+(`AGENOMIC_ENDPOINT` and `AGENOMIC_API_KEY` are required), prints the
+import with its plan, and the plan id and `plan_digest` on standard error.
+`--apply` applies every proposed action right away. From Python:
+
+```python
+plan = client.prompts.import_report(report, agent_id=agent_id)
+print(plan.import_id, plan.plan_digest, plan.plan["summary"])
+for item in plan.items:
+    print(item["item_id"], item["action"], item["prompt_id"])
+```
+
+- The server computes one item per candidate with a proposed action:
+  `create_prompt`, `create_version` (on top of `base_version`, the latest
+  version when the plan was made), `reuse_version` (a version with the same
+  content digest exists), `map_slot_only`, `skip` or `blocked`.
+- An unresolved candidate is always `skip` with slot status `unresolved`. A
+  plan never claims complete coverage: `plan.plan["summary"]["unresolved"]`
+  counts what the scanner could not port.
+- `import_report` verifies the plan digest and the summary before it
+  returns. Uploading the same report for the same agent again returns the
+  same plan (`plan.replayed`) until it expires (`plan.expires_at`).
+
+Applying cites the digest of the plan you reviewed:
+
+```python
+result = client.prompts.apply_import(
+    plan.import_id, plan_digest=plan.plan_digest, items=plan.decisions()
+)
+for outcome in result["results"]:
+    print(outcome["item_id"], outcome["outcome"], outcome.get("version"))
+```
+
+- `plan.decisions()` accepts every proposed action and skips blocked items.
+  Edit a decision to rename its `prompt_id`, change its `slot_path` or skip
+  it; every item of the plan is listed once.
+- A plan that changed, or a `create_version` whose base is no longer the
+  latest version, raises `PromptImportError("prompt_import_plan_stale")` and
+  writes nothing. A plan is applied once (`prompt_import_already_applied`),
+  and an expired plan raises `prompt_import_expired`: upload the report
+  again for a new plan.
+- The SDK generates `idempotency_key` when you omit it. Pass your own to
+  retry an apply safely: the same key returns the first result.
+- `mode="draft"` saves each item as the prompt's draft instead of
+  publishing a version. Outcomes are `created`, `versioned`, `unchanged`,
+  `drafted`, `mapped` or `skipped`.
+- `declare_slots=True` also records the slots in the agent's slot
+  declarations, and needs `expected_slots_revision`, the agent's current
+  slot revision. No SDK call reads that revision for a report import yet;
+  `plan_declarations` returns it for a prompts file.
+
+### Prompts files
+
+An `agenomic.prompts_file/v1` declares a family of prompts and, optionally,
+the slots of one agent. Keep it in your repository as `prompts.yaml`:
+
+```yaml
+schema: agenomic.prompts_file/v1
+agent_id: 2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c
+prompts:
+  - prompt_id: prm_support_safety
+    kind: fragment
+    name: Support safety rules
+    content:
+      kind: text
+      body: Never share internal notes.
+      variables: {}
+  - prompt_id: prm_support_planner
+    kind: chat
+    name: Support planner
+    content:
+      kind: chat
+      body:
+        - role: system
+          content: |-
+            You plan support work for locale {locale}.
+            {>safety}
+        - role: user
+          content: "{question}"
+      variables:
+        locale: { type: string, required: false }
+        question: { type: string, required: true }
+      partials: { locale: en }
+      fragments:
+        safety: { prompt_id: prm_support_safety }
+slots:
+  - slot_path: planner.instructions
+    node_path: planner
+    usage: instructions
+    prompt_id: prm_support_planner
+```
+
+```python
+from pathlib import Path
+
+planned = client.prompts.plan_declarations(Path("prompts.yaml"))
+print(planned.plan_digest, planned.slots)
+applied = client.prompts.apply_declarations(
+    Path("prompts.yaml"),
+    plan_digest=planned.plan_digest,
+    expected_slots_revision=planned.slots["revision"],
+)
+```
+
+- Pass a file as a `Path`. A `str` or `bytes` value is read as the document
+  text itself, and a mapping is sent as it is.
+- YAML needs `agenomic[yaml]` (`yaml_support_not_installed` otherwise). The
+  SDK converts it to JSON under the `agenomic-yaml/1` profile before upload,
+  so every Agenomic client reads a file the same way: one document, no
+  anchors, aliases, merge keys or tags, no duplicate keys, no floats, and
+  only `true` and `false` are booleans (`yes` and `on` stay strings).
+- In each `content`, `schema`, `template_format`, `renderer_version`,
+  `partials`, `output_contract` and `fragments` may be omitted. A fragment
+  entry `{ prompt_id }` names a prompt of the same file, and
+  `{ prompt_id, version }` an existing version.
+- `plan_declarations` is a dry run: the plan is not stored, and
+  `planned.slots` summarizes the slot changes with the agent's current
+  `revision`. `apply_declarations` cites the plan digest; the server
+  computes the plan again and raises `prompt_import_plan_stale` when
+  anything moved, including the `expected_latest_version` of a prompt.
+- A file that declares slots needs `expected_slots_revision`. A revision
+  that moved raises `PromptConflictError("agent_prompt_slots_conflict")`.
+- Applying creates prompts and publishes the versions whose content
+  changed. It never moves an alias or a channel and never creates a
+  release.
+
+### Runtime registration
+
+Templates that exist only as live LangChain objects are registered from the
+running application, with `agenomic[langchain]`:
+
+```python
+from langchain_core.prompts import ChatPromptTemplate
+
+triage = ChatPromptTemplate.from_messages(
+    [("system", "Sort the ticket for the {team} team."), ("human", "{ticket}")]
+)
+runtime_plan = client.prompts.register_runtime(
+    agent_id, {"triage.system": triage}
+)
+print(runtime_plan.plan_digest, runtime_plan.plan["summary"])
+```
+
+- Each template is converted with `from_langchain` ([LangChain](#langchain))
+  into a discovery report labeled `runtime_registration`, which is uploaded
+  like a scanned one. Slot paths are lowercase, such as `triage.system`.
+- It returns the plan only. Apply it with `apply_import`, as above. Nothing
+  calls it implicitly, and `bind_langgraph` never registers prompts.
+
+### Command line
+
+`agenomic-py prompts` has five commands:
+
+```bash
+agenomic-py prompts scan . --out report.json --exclude "tests"
+agenomic-py prompts import report.json --agent-id "$AGENT_ID" --apply
+agenomic-py prompts render planner.yaml --vars vars.json
+agenomic-py prompts digest planner.yaml
+agenomic-py prompts bundle-verify prompt-bundle.json \
+  --workspace "$WORKSPACE_ID" --agent "$AGENT_ID" \
+  --trust-key keys/orgkey_01.pem
+```
+
+- `scan` takes `--root` (default: the scanned directory), `--label`,
+  `--commit`, `--exclude` (repeatable), `--max-files` and
+  `--max-file-bytes`.
+- `import` takes `--apply`, `--mode publish|draft`, `--declare-slots` with
+  `--slots-revision`, and `--idempotency-key`.
+- `render` renders a prompt file with the variables of a JSON file, or
+  fetches a version such as `prm_planner:1` with the environment settings.
+  It prints the text or messages with `content_digest` and `rendered_hash`.
+  `digest` prints the content digest of a prompt file. A prompt file is an
+  `agenomic.prompt_file/v1` with the full content of one prompt, or a bare
+  content document, as JSON or YAML.
+- `bundle-verify` runs the checks of `PromptBundle.load` and prints the
+  bundle and manifest digests, the refs and the slots. Repeat `--trust-key`
+  for several keys, or pin the bundle with `--expect-bundle-digest`.
+- The exit code is 0 on success, 1 when Agenomic or a check refused
+  (`error: <code> (<reason>): <message>`), and 2 for a usage, configuration
+  or file error.
+
 ## Errors
 
 Every error is an `agenomic.exceptions.ApiError` with `code`, `status` (0
@@ -546,24 +853,33 @@ by `agenomic.prompts`:
 - `PromptBindingError`: `execution_binding_conflict`, `binding_mismatch`,
   `slot_not_in_manifest`, `child_agent_not_pinned`, `release_not_bindable`,
   `session_required`.
-- `PromptConflictError`: stale versions, revisions and generations, with
-  the current value in `error.details["current"]` when the registry
-  provides it.
+- `PromptImportError`: `prompt_import_invalid` (an invalid report, prompts
+  file or YAML document, with the failures in `error.errors`),
+  `prompt_import_plan_stale`,
+  `prompt_import_expired`, `prompt_import_already_applied`,
+  `prompt_import_item_blocked` and `yaml_support_not_installed`.
+- `PromptConflictError`: stale versions, revisions and generations,
+  `agent_prompt_slots_conflict` included, with the current value in
+  `error.details["current"]` when the registry provides it.
 - `RegistryUnavailableError`: `registry_unavailable`.
 
 Unknown codes stay a plain `ApiError`. Calls that need Agenomic Cloud raise
 `ApiError("cloud_required")` in local mode: `prompts.list`,
 `versions.list`, `channels.list`, `channels.move_preview`,
-`bindings.counterfactual`, `child_selectors`, `whoami` and
+`bindings.counterfactual`, `child_selectors`, `whoami`,
 `prompts.export_bundle` (use `client.prompts.local.export_bundle` with a
-signer). `client.prompts.local` raises it on a cloud client.
+signer), the import calls (`import_report`, `apply_import`,
+`plan_declarations`, `apply_declarations`, `register_runtime`) and
+`bindings.report_usage`. `client.prompts.local` raises it on a cloud
+client.
 
 ## Async
 
 Every call has an `a*` twin (`aget`, `arender`, `acreate`, `apublish`,
-`aresolve_agent`, `aexport_bundle`, `bindings.acreate`, `channels.ahistory`,
-...). The async side uses one connection pool per event loop and runs disk
-cache work in a thread, so it never blocks the loop.
+`aresolve_agent`, `aexport_bundle`, `aimport_report`, `aapply_import`,
+`bindings.acreate`, `bindings.areport_usage`, `channels.ahistory`, ...).
+The async side uses one connection pool per event loop and runs disk cache
+work in a thread, so it never blocks the loop.
 
 ```python
 import asyncio
@@ -603,6 +919,30 @@ messages = to_langchain_messages(version.render_messages(variables))
 - `to_langchain_messages` maps `system`, `user` and `assistant` to LangChain
   messages and passes LangChain messages through.
 
+`from_langchain` goes the other way, from a LangChain template to a content
+document:
+
+```python
+from agenomic.integrations.langchain_prompts import from_langchain
+
+imported = from_langchain(template, resolver=client.prompts.get)
+print(imported.status, imported.exact, imported.content_digest)
+```
+
+- It accepts f-string templates within the `agenomic-fstring/v1` grammar,
+  `MessagesPlaceholder` and scalar partials. Mustache and jinja2 templates,
+  format specs, callable partials, content blocks and other message roles
+  give status `unsupported`, and a credential gives `blocked_secret` with
+  `secret_findings` but no text. `issues` explains each decision, and only
+  a `supported` result carries `content`.
+- A template made by `to_langchain` carries its ref and digest in its
+  metadata. With a `resolver` (a function from a ref to a version, such as
+  `client.prompts.get`), an unchanged template returns that published
+  version exactly (`imported.exact`). A changed one is imported from its
+  structure, with the issue `export_metadata_stale`.
+- Any other object raises `TypeError`. `register_runtime` uses
+  `from_langchain` to plan an import of live templates.
+
 ## LangGraph
 
 `bind_langgraph` pins every thread of a LangGraph graph to one release and
@@ -612,7 +952,12 @@ the [LangGraph version matrix](langgraph-matrix.md).
 
 ## Not in this release
 
-These parts of managed prompts are not in this SDK release yet: importing
-prompts from existing code (scan, import plans, declaration files, runtime
-registration), `from_langchain`, usage reporting, experiments and the
-`agenomic-py prompts` commands.
+These parts of managed prompts are not in this SDK release yet:
+
+- experiments;
+- reading an agent's slot declarations and its candidate agent versions;
+- reading or listing stored import plans, and registering a prompt family
+  in one call;
+- the inventory of observed prompts, which `report_usage` feeds;
+- rewriting source code to use managed prompts: neither the scanner nor the
+  import modifies a file.

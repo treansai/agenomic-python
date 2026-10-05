@@ -56,7 +56,8 @@ account required.
 - Async-first cloud client with idempotency keys + retry
 - Managed prompts (`agenomic.prompts`): versioned, digest-verified prompts,
   a strict renderer, per-thread execution bindings and signed offline
-  bundles, with a local registry for development
+  bundles, with a local registry for development and a static scanner that
+  imports the prompts of existing code
 
 ## Documentation
 
@@ -209,9 +210,23 @@ system = bundle.version("planner.instructions")
 
 Run production agents with a `read` key. Publishing needs a `write` or
 `admin` key, and channel and alias moves are session-only actions in Agenomic
-Cloud, so the SDK has no promote and no rollback. See
-[docs/prompts.md](docs/prompts.md) for references, rendering, bundles, the
-cache and outage behaviour.
+Cloud, so the SDK has no promote and no rollback.
+
+Prompts that already live in your code are imported in reviewable steps.
+The scanner parses your files without importing or running them, only the
+report is uploaded, and nothing is written before you apply the plan you
+reviewed. No source file is ever modified.
+
+```bash
+agenomic-py prompts scan . --out report.json
+agenomic-py prompts import report.json --agent-id "$AGENT_ID"
+```
+
+Prompts files declare a family of prompts and the slots of an agent (YAML
+needs `agenomic[yaml]`), and `client.prompts.register_runtime` plans the
+import of live LangChain templates. See [docs/prompts.md](docs/prompts.md)
+for references, rendering, bundles, the cache, outage behaviour and
+imports.
 
 ## Examples
 

@@ -292,13 +292,21 @@ rule of the engineering rules above.
   (use `client.prompts.local.export_bundle` with a signer) raise
   `cloud_required`, and so does `client.prompts.local` on a cloud client.
 - `docs/prompts.md` documents only what this package ships, and its "Not in
-  this release" list names what is still missing; shorten that list as the
-  importer, the LangGraph adapter, experiments and the CLI commands land.
+  this release" list names what is still missing; shorten that list as
+  experiments and the remaining registry reads land.
   Its Python blocks are meant to run in order: the local ones as written, the
   cloud ones against `FakePromptServer` (`tests/prompt_fakes.py`) with
   `transport=` added to the `Client`. No test executes them, so run them again
   after an API change. The `AGENT.md` recipe and the `README.md` example
-  follow the same rule.
+  follow the same rule. Since the import sections, the cloud blocks run
+  against `ImportServer` (`tests/test_prompts_resources.py`), built over the
+  engine of the local blocks in workspace
+  `0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f` and signing with a key named
+  `orgkey_01` whose public PEM is `keys/orgkey_01.pem`. The working
+  directory holds a copy of `tests/fixtures/prompt_sources/app` as `app/`
+  and the YAML block as `prompts.yaml`. `ImportServer` does not complete the
+  file-local fragment pin of a prompts file (`{ prompt_id }` without a
+  version) as the registry does, so the run completes it before writing.
 - The Markdown files touched for managed prompts pass `markdownlint-cli` with
   its default rules (80 columns, tables and code blocks included) and contain
   no em dash. Their code samples carry no new comments. The umbrella leak

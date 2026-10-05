@@ -43,7 +43,8 @@ cryptography, ulid-py. Integration modules import their SDKs lazily:
 `import agenomic.integrations.openai` is safe without `openai` installed;
 the `ImportError` fires only when you call `instrument_openai()`.
 Managed prompts need no extra; `agenomic[langchain]` adds the conversion to
-LangChain prompt templates.
+and from LangChain prompt templates, and `agenomic[yaml]` reads YAML prompts
+files.
 
 ## The 90% recipe: decorator + JSONL
 
@@ -244,6 +245,31 @@ offline = PromptBundle.load(
 - Render errors (`PromptRenderError`) are raised before anything reaches a
   model. `render_text` is for `text` prompts, `render_messages` for `chat`.
 
+Prompts that already live in the user's code are imported with a `write`
+key, in reviewable steps:
+
+```python
+from agenomic.prompts.discovery import scan_paths
+
+report = scan_paths(["app"], root=".")
+plan = client.prompts.import_report(report, agent_id=agent_id)
+result = client.prompts.apply_import(
+    plan.import_id, plan_digest=plan.plan_digest, items=plan.decisions()
+)
+```
+
+- `agenomic-py prompts scan . --out report.json` and
+  `agenomic-py prompts import report.json --agent-id UUID [--apply]` do the
+  same from the shell. The scanner never imports or runs the code, and
+  nothing modifies a source file.
+- Only `supported` candidates are imported. Unresolved ones (f-strings,
+  `.format`, `hub.pull`, ...) are always skipped and counted in
+  `plan.plan["summary"]["unresolved"]`.
+- A prompts file (`agenomic.prompts_file/v1`) goes through
+  `client.prompts.plan_declarations(Path("prompts.yaml"))` and
+  `apply_declarations(...)`; `register_runtime(agent_id, {slot: template})`
+  plans the import of live LangChain templates. See `docs/prompts.md`.
+
 ## Import map (copy-paste correct)
 
 ```python
@@ -294,9 +320,12 @@ from agenomic.prompts import (BundleTrust, PromptBundle, PromptCache,
 from agenomic.prompts import (PromptRefError, PromptTemplateError,
                               PromptRenderError, PromptIntegrityError,
                               PromptBindingError, PromptConflictError,
-                              RegistryUnavailableError)
-from agenomic.prompts.resources import Page, PinnedRefs, RenderResult
+                              PromptImportError, RegistryUnavailableError)
+from agenomic.prompts.resources import (Page, PinnedRefs, RenderResult,
+                                        ImportPlan)
 from agenomic.prompts.authority import CloudBindingAuthority, counters
+from agenomic.prompts.discovery import scan_paths, DEFAULT_EXCLUDES
+from agenomic.prompts.importer import load_prompts_file, load_prompt_file
 ```
 
 The LangChain bridge needs `agenomic[langchain]` and raises `ImportError` at
@@ -304,7 +333,18 @@ import without it:
 
 ```python
 from agenomic.integrations.langchain_prompts import (to_langchain,
-                                                     to_langchain_messages)
+                                                     to_langchain_messages,
+                                                     from_langchain,
+                                                     LangChainImport)
+```
+
+The LangGraph adapter (`docs/integrations.md`) needs `agenomic[langgraph]`:
+
+```python
+from agenomic.integrations import (bind_langgraph, prompts_for,
+                                   scope_config, managed_prompt,
+                                   ManagedGraph, PinnedPrompts,
+                                   AgentFactory, LocalBindingStore)
 ```
 
 The top-level package intentionally exports only `Client` and
@@ -363,6 +403,13 @@ The top-level package intentionally exports only `Client` and
 16. **A fresh local registry per client.** Each `Client()` without
     `base_url` starts an empty in-memory prompt registry in a new random
     workspace. Keep one client, or use `LocalPromptEngine(state_path=...)`.
+17. **A file name passed as a string.** `plan_declarations`,
+    `apply_declarations` and `load_prompts_file` read a `str` as the
+    document text itself. Pass `Path("prompts.yaml")` for a file.
+18. **Declaring slots without a revision.** `apply_import(...,
+    declare_slots=True)` and a prompts file with `slots` need
+    `expected_slots_revision`; `plan_declarations(...).slots["revision"]`
+    gives it for a prompts file.
 
 ## Environment variables
 
@@ -374,6 +421,7 @@ CLI, the providers and the examples read the rest:
 | `AGENOMIC_ENDPOINT`, `AGENOMIC_API_KEY` | `Client.from_env()` |
 | `AGENOMIC_WORKSPACE_ID`, `AGENOMIC_TIMEOUT` | `Client.from_env()` |
 | `AGENOMIC_PROMPT_CACHE_DIR` | `Client.from_env()` (disk prompt cache) |
+| `AGENOMIC_ENDPOINT`, `AGENOMIC_API_KEY` | `agenomic-py prompts` |
 | `AGENOMIC_BASE_URL`, `AGENOMIC_API_KEY` | `agenomic-py benchmark serve` |
 | `HUGGINGFACE_API_TOKEN`, else `HF_TOKEN` | `HuggingFaceConfig.from_env()` |
 | `HUGGINGFACE_ENDPOINT_URL` | `HuggingFaceConfig.from_env()` |
