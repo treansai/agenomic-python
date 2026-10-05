@@ -301,6 +301,10 @@ class PromptBundle:
     ) -> PromptBundle:
         document = _shape(_read(source))
         signed = "signature" in document
+        if signed and document.get("expires_at") is None:
+            raise _incomplete(
+                "a signed bundle carries no expires_at", reason="missing_field", path="/expires_at"
+            )
         if trust is not None and signed:
             _verify_signature(document, trust)
         elif expected_bundle_digest is None:

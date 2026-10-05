@@ -273,9 +273,16 @@ class CloudBindingAuthority:
             closure = None
         if isinstance(closure, ResolvedClosure):
             return bundle_from_closure(binding, closure)
-        fetched, bundle = yield from get_binding_flow(
-            self._client, binding.agent_id, binding.binding_id
-        )
+        try:
+            fetched, bundle = yield from get_binding_flow(
+                self._client, binding.agent_id, binding.binding_id
+            )
+        except ApiError as error:
+            if error.status in _EVICTING_STATUSES:
+                yield partial(
+                    self._cache.evict_binding, workspace_id, binding.agent_id, binding.thread_key
+                )
+            raise
         if fetched.prompt_manifest_digest != binding.prompt_manifest_digest:
             raise binding_error(
                 "binding_mismatch",

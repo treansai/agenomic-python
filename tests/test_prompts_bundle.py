@@ -213,6 +213,21 @@ def test_expired_bundle() -> None:
     assert code_of(bundle, trust=trust_for(key), now=later) == "bundle_expired"
 
 
+def test_signed_bundle_without_expiry_refused() -> None:
+    bundle, key = make_signed_bundle()
+    unbounded = build_bundle({**bundle, "expires_at": None}, signer=key)
+    for options in (
+        {"trust": trust_for(key)},
+        {"trust": trust_for(key), "allow_ungoverned_bundle": True},
+        {"expected_bundle_digest": unbounded["prompt_bundle_digest"]},
+    ):
+        with pytest.raises(PromptIntegrityError) as raised:
+            load(unbounded, **options)
+        assert raised.value.code == "bundle_incomplete"
+        assert raised.value.details["reason"] == "missing_field"
+        assert raised.value.details["path"] == "/expires_at"
+
+
 def test_integrity_failures() -> None:
     bundle, key = make_signed_bundle()
     pin = bundle["prompt_bundle_digest"]

@@ -172,7 +172,10 @@ rule of the engineering rules above.
   `from_online_response` refuses a document that carries a signature.
   `expires_at` must be exactly `YYYY-MM-DDTHH:MM:SSZ`, the SPEC timestamp,
   because `datetime.fromisoformat` accepts different forms on Python 3.10 and
-  3.11.
+  3.11. `load` refuses a document with a `signature` and a null or missing
+  `expires_at` (`bundle_incomplete`, `missing_field`), signed or pinned: an
+  export always carries an expiry (SPEC schema, the registry's own bundle
+  parser), and a validly signed bundle without one would stay usable forever.
 - `_transport.py` keeps one pooled `httpx.Client` per `Client`, and one
   `httpx.AsyncClient` per running event loop, in weak maps keyed by the
   `Client`, so the client facade does not need to change for pooling;
@@ -241,9 +244,11 @@ rule of the engineering rules above.
   is the caller's job), sends no `Idempotency-Key` (create-or-get on the thread
   key), always asks for `include: ["artifacts"]`, and loads them with
   `from_online_response` pinned to the binding's manifest digest. It also
-  refuses an answer whose workspace, agent, thread key, scope or release differs
-  from the request, or whose child manifest digests differ from
-  `binding.children` (`binding_mismatch`, `manifest_digest_mismatch`).
+  refuses an answer whose workspace, agent, thread key or scope differs from
+  the request, whose artifacts name another release than the binding, or whose
+  child manifest digests differ from `binding.children` (`binding_mismatch`,
+  `manifest_digest_mismatch`). Comparing `resolved_from` with the requested
+  selector is the adapter's target check, not this resource's.
 - `client.bindings.create` never falls back: the outage policy lives in
   `CloudBindingAuthority` (`prompts/authority.py`). On `registry_unavailable`
   it serves a binding only when the same thread key is cached with the same
@@ -251,7 +256,12 @@ rule of the engineering rules above.
   `created=False`, logs one WARNING on `agenomic.prompts` and increments
   `counters()["registry_outage_cached_binding_total"]` (a process-wide counter,
   since the SDK has no metrics dependency). Every other case re-raises. A 401,
-  403 or 404 evicts the cached binding before raising; a 409 does not. A
+  403 or 404 evicts the cached binding before raising; a 409 does not. This
+  holds for `create_or_get` and for the binding read that `resolution` makes on
+  a closure miss, because a closure cached by another thread on the same
+  manifest would otherwise let a later outage serve a binding the registry had
+  refused. `get(agent_id, binding_id)` knows no thread key, so it cannot evict;
+  the next `create_or_get` of that thread does. A
   cached binding is rebuilt into a bundle from the binding record plus the
   cached closure and goes through the same online verification again.
 - `export_bundle` loads the signed export with `PromptBundle.load`, trusting the

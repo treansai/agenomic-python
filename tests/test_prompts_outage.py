@@ -166,6 +166,30 @@ def test_403_evicts_and_never_uses_cache(server: FakePromptServer, tmp_path: Pat
     assert cache.get_binding(WORKSPACE, AGENT, key) is not None
 
 
+@pytest.mark.parametrize(("mode", "status"), [("http_403", 403), ("http_404", 404)])
+def test_resolution_refusal_evicts_the_cached_binding(
+    server: FakePromptServer, mode: str, status: int
+) -> None:
+    key = thread_key(WORKSPACE, "revoked-resolution")
+    binding, bundle, _ = authority_for(server).create_or_get(AGENT, key, "thread", PRODUCTION)
+    cache = PromptCache()
+    cache.put_binding(WORKSPACE, binding)
+    authority = authority_for(server, cache)
+    server.outage = "transport_error"
+    with pytest.raises(RegistryUnavailableError):
+        authority.resolution(binding)
+    assert cache.get_binding(WORKSPACE, AGENT, key) is not None
+    server.outage = mode
+    with pytest.raises(ApiError) as raised:
+        authority.resolution(binding)
+    assert raised.value.status == status
+    assert cache.get_binding(WORKSPACE, AGENT, key) is None
+    cache.put_closure(WORKSPACE, bundle.closure())
+    server.outage = "transport_error"
+    with pytest.raises(RegistryUnavailableError):
+        authority.create_or_get(AGENT, key, "thread", PRODUCTION)
+
+
 def test_alias_outage_fails(server: FakePromptServer) -> None:
     client = make_client(server)
     server.engine.move_alias("prm_planner", "prod", version=1, expected_generation=0)

@@ -378,8 +378,10 @@ binding, bundle = client.bindings.get(agent_id, binding.binding_id)
   `created=False`, even after the channel has moved. A call with another
   selector, scope or expected manifest digest raises
   `PromptBindingError("execution_binding_conflict")`.
-- Pass exactly one of `channel` and `release_id`. `child_selectors` choose
-  the release of child agents that the manifest does not pin.
+- Pass exactly one of `channel` and `release_id`. `child_selectors` name the
+  release of child agents that the manifest does not pin; the registry
+  validates them but, in this release, pins child agents from the release
+  manifest only.
 - The SDK sends the thread key as given. Compute it with
   `thread_key(workspace_id, thread_id)` (or `execution_key` for a single
   execution), which hashes the identifier, so the registry never sees an
@@ -441,7 +443,8 @@ system = bundle.version("planner.instructions")
 2. it is signed by a key in `trust` (the embedded public key is never
    trusted), or its `prompt_bundle_digest` equals `expected_bundle_digest`;
    a bundle that is neither is refused with `bundle_untrusted_key`;
-3. `expires_at` has not passed (`bundle_expired`);
+3. a signed bundle carries an `expires_at` (`bundle_incomplete` otherwise)
+   and it has not passed (`bundle_expired`);
 4. every prompt matches its digest, and so does the whole closure;
 5. every manifest matches its digest (and `expected_manifest_digest`);
 6. the closure is exact: every slot, fragment and child is present, and
