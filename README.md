@@ -4,7 +4,8 @@
 [![PyPI](https://img.shields.io/pypi/v/agenomic.svg)](https://pypi.org/project/agenomic/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-Python SDK for [Agenomic](https://agenomic.io) — agent-native versioning, tracing, and ATEP signed event logs.
+Python SDK for [Agenomic](https://agenomic.io): agent-native versioning,
+tracing, and ATEP signed event logs.
 
 Works fully offline. Cloud upload is optional.
 
@@ -53,6 +54,9 @@ account required.
 - Exporters: JSONL, ATEP local, HTTP batched, multi fan-out
 - Optional, lazy-imported integrations: OpenAI, Anthropic, LangGraph, MCP
 - Async-first cloud client with idempotency keys + retry
+- Managed prompts (`agenomic.prompts`): versioned, digest-verified prompts,
+  a strict renderer, per-thread execution bindings and signed offline
+  bundles, with a local registry for development
 
 ## Documentation
 
@@ -60,7 +64,9 @@ Full index at [docs/](docs/README.md).
 
 - [Quickstart](docs/quickstart.md) · [API reference](docs/api-reference.md)
 - [Tracing](docs/tracing.md) · [Decorator](docs/decorator.md) · [Exporters](docs/exporters.md)
-- [Canonical v0.3 runs](docs/canonical.md) · [Online tracking](docs/tracking.md) · [RMP](docs/rmp.md)
+- [Canonical v0.3 runs](docs/canonical.md) ·
+  [Online tracking](docs/tracking.md) · [RMP](docs/rmp.md)
+- [Managed prompts](docs/prompts.md)
 - [ATEP](docs/atep.md) · [Keys & signing](docs/keys-and-signing.md) · [Redaction](docs/redaction.md)
 - [Integrations](docs/integrations.md) · [Cloud upload](docs/cloud-upload.md)
 - [Workflow & system manifests](docs/orchestration.md)
@@ -69,7 +75,7 @@ Full index at [docs/](docs/README.md).
 - [Non-determinism disclaimer](docs/non-determinism.md)
 
 Using an AI coding agent (Claude Code, Cursor, Copilot)? Point it at
-[`AGENT.md`](AGENT.md) — a condensed SDK guide written for agents:
+[`AGENT.md`](AGENT.md), a condensed SDK guide written for agents:
 import maps, canonical recipes, and pitfalls.
 
 ## Tool execution for replays (Tool Gateway and Tool Mock Engine)
@@ -86,18 +92,23 @@ from agenomic.tools import ToolCallError
 
 tools = Client(api_key="agm_...", base_url="https://cloud.example").tools
 plan = tools.preflight(config_text=open("tool_execution.yaml").read(), repetitions=3)
-run = tools.create_run(name="hybrid", config_text=open("tool_execution.yaml").read(), repetitions=3)
+run = tools.create_run(
+    name="hybrid", config_text=open("tool_execution.yaml").read(), repetitions=3
+)
 if run["status"] == "planned":
     run = tools.approve_run(run["id"], plan_hash=run["plan_hash"])
 tools.start_run(run["id"])
 
 router = tools.router(run["id"], repetition=1)
-customer = router.call("crm.get_customer", {"id": "c_1"})   # live or mock, per binding
+customer = router.call(
+    "crm.get_customer", {"id": "c_1"}
+)  # live or mock, per binding
 try:
     router.call("email.send", {"to": "ops@example.test"})
 except ToolCallError as error:
     print(error.code, error.envelope.provenance)
-print(router.summary())   # {'calls': 2, 'by_source': {...}, 'has_real_calls': ..., 'unreported': 0}
+# {'calls': 2, 'by_source': {...}, 'has_real_calls': ..., 'unreported': 0}
+print(router.summary())
 tools.complete_run(run["id"])
 ```
 
@@ -167,9 +178,44 @@ matrix. The local engine refuses `protect` configurations
 (`protect_cloud_required`): policies are evaluated by the gateway only. See
 `docs/protect.md`.
 
+## Managed prompts
+
+`client.prompts` reads versioned prompts from the Agenomic Cloud registry, or
+from an in-process registry when the client has no `base_url`. Every version
+is verified by digest and rendered by a strict renderer before anything
+reaches a model. An execution binding pins a thread to one release, and a
+signed bundle renders the same prompts offline.
+
+```python
+from agenomic import Client
+from agenomic.prompts import thread_key
+
+client = Client(api_key="agm_...", base_url="https://agenomic.example")
+planner = client.prompts.get("prm_planner:1")
+messages = planner.render_messages(
+    {"customer": "Acme", "question": "Where is my order?"}
+)
+
+agent_id = "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c"
+workspace_id = client.workspace_id or client.whoami()["org_id"]
+binding, bundle, created = client.bindings.create(
+    agent_id,
+    thread_key=thread_key(workspace_id, "conversation-42"),
+    scope="thread",
+    channel="production",
+)
+system = bundle.version("planner.instructions")
+```
+
+Run production agents with a `read` key. Publishing needs a `write` or
+`admin` key, and channel and alias moves are session-only actions in Agenomic
+Cloud, so the SDK has no promote and no rollback. See
+[docs/prompts.md](docs/prompts.md) for references, rendering, bundles, the
+cache and outage behaviour.
+
 ## Examples
 
-See [`examples/`](examples/) — minimal trace, decorator + JSONL, ATEP local,
+See [`examples/`](examples/): minimal trace, decorator + JSONL, ATEP local,
 OpenAI traced, LangGraph traced, cloud upload, and a full offline signed
 release.
 

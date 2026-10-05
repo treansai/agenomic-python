@@ -1,4 +1,4 @@
-# agenomic-python — agent instructions
+# agenomic-python: agent instructions
 
 Public Python SDK for Agenomic. Apache-2.0.
 
@@ -261,10 +261,24 @@ rule of the engineering rules above.
   offline loading applies the governance step again.
 - `client.channels` is read only (no promote, no rollback: moves are session
   only). `history` follows `next_after` until the log ends, because the registry
-  pages it, and refuses a `next_after` that does not advance. `aliases.move` sends `If-Match` but every API key gets the registry's
+  pages it, and refuses a `next_after` that does not advance. `aliases.move`
+  sends `If-Match` but every API key gets the registry's
   `session_required`, because alias moves are session only too.
 - Local mode (no `base_url`) delegates to `LocalPromptEngine` wherever the engine
   has an equivalent. Listing, version lists, channel lists, move previews,
   counterfactual bindings, `child_selectors`, `whoami` and `export_bundle`
   (use `client.prompts.local.export_bundle` with a signer) raise
   `cloud_required`, and so does `client.prompts.local` on a cloud client.
+- `docs/prompts.md` documents only what this package ships, and its "Not in
+  this release" list names what is still missing; shorten that list as the
+  importer, the LangGraph adapter, experiments and the CLI commands land.
+  Its Python blocks are meant to run in order: the local ones as written, the
+  cloud ones against `FakePromptServer` (`tests/prompt_fakes.py`) with
+  `transport=` added to the `Client`. No test executes them, so run them again
+  after an API change. The `AGENT.md` recipe and the `README.md` example
+  follow the same rule.
+- The Markdown files touched for managed prompts pass `markdownlint-cli` with
+  its default rules (80 columns, tables and code blocks included) and contain
+  no em dash. Their code samples carry no new comments. The umbrella leak
+  check skips Markdown, so the public-marker check of the added lines is what
+  keeps private names out of these files.
