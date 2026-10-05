@@ -390,3 +390,18 @@ rule of the engineering rules above.
   commit `fcfe12a`, the commit of `SPEC_VECTORS.lock`; refresh them with the
   vectors. `tests/fixtures/prompt_sources/` is a scanned tree, never imported:
   `app/raises_on_import.py` would write a marker file and raise if it ran.
+- The `langgraph` and `all` extras accept `langgraph>=1.0.10,<2` with
+  `langchain-core>=1.6.3,<2`, but only the points CI runs are supported:
+  `ci/constraints/langgraph-1.2.11.txt` (primary, used by the main matrix) and
+  `ci/constraints/langgraph-1.0.10.txt` (floor). The floor pins
+  `langgraph-prebuilt==1.0.8` because langgraph 1.0.10 with its default
+  prebuilt 1.0.13 fails at import. An unpinned install would test whatever
+  was released last, so every CI install passes a constraint file except the
+  `langgraph-latest` job, which runs weekly or on demand, may fail and only
+  reports drift. Supporting another version means editing the constraint
+  files and the matrix document together. The `langgraph-floor` job runs
+  whichever of `tests/test_langgraph_binding_*.py`,
+  `tests/test_experiments_counterfactual.py` and `tests/test_examples.py`
+  exist, so later test files join it without a workflow change. The SQLite
+  saver (`langgraph-checkpoint-sqlite`) is a dev dependency only, for the
+  restart tests.
