@@ -13,9 +13,10 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Literal, Mapping, Optional, Union
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Mapping, Optional, Union
 
 import httpx
+from pydantic import JsonValue
 
 from agenomic.tools.local import LocalToolEngine
 from agenomic.tools.models import (
@@ -28,6 +29,9 @@ from agenomic.tools.models import (
     ToolExecutionError,
     ToolProvenance,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from agenomic.vault.models import ExecuteResult, ExecutionStatus
 
 _IDEMPOTENCY_NAMESPACE = uuid.UUID("6b1f7a2e-9c44-4d0e-8f1a-2e7c0d9b5a31")
 _APPROVAL_GRANTED = ("approved", "consumed")
@@ -851,6 +855,87 @@ class ToolsResource:
             response = await asend_request(self._client, "POST", path, body, idempotency_key=key)
             return _parse_invoke(tool, "POST", path, response)
         return ToolCallResult.from_response(self.local.invoke(run_id, body))
+
+    def execute(
+        self,
+        *,
+        tool: str,
+        binding: str,
+        arguments: Optional[Mapping[str, JsonValue]] = None,
+        action_id: Optional[str] = None,
+        deadline_ms: Optional[int] = None,
+    ) -> ExecuteResult:
+        """Execute one action with a credential binding of Agents Vault.
+
+        An optional commercial module of Agenomic Cloud/Enterprise (Agents
+        Vault add-on). The agent holds an authorization, the executor holds the
+        credential: the result is the business answer the server already
+        filtered, plus a ``receipt_id``. ``action_id`` (a UUID, generated when
+        absent) names the logical action; technical retries reuse it and the
+        server de-duplicates. ``outcome_unknown`` is never retried: it raises
+        ``VaultOutcomeUnknown`` carrying the ``action_id``. Needs a client
+        built with ``runtime_token=...`` (or a ``vault_replay`` fixture set).
+
+        Example:
+            >>> from agenomic import Client
+            >>> from agenomic.vault import ReplayFixture, ReplayOutcome, VaultReplay
+            >>> replay = VaultReplay([ReplayFixture(fixture_id="f", tool="crm.get_customer",
+            ...     binding="crm-read", arguments={"id": "c_1"},
+            ...     outcome=ReplayOutcome(result={"name": "Ada"}, receipt_id="rcpt-1"))])
+            >>> out = Client(vault_replay=replay).tools.execute(
+            ...     tool="crm.get_customer", binding="crm-read", arguments={"id": "c_1"})
+            >>> (out.result, out.receipt_id, out.status)
+            ({'name': 'Ada'}, 'rcpt-1', 'succeeded')
+        """
+        result: ExecuteResult = self._client.vault.runtime.execute(
+            tool=tool,
+            binding=binding,
+            arguments=arguments,
+            action_id=action_id,
+            deadline_ms=deadline_ms,
+        )
+        return result
+
+    async def aexecute(
+        self,
+        *,
+        tool: str,
+        binding: str,
+        arguments: Optional[Mapping[str, JsonValue]] = None,
+        action_id: Optional[str] = None,
+        deadline_ms: Optional[int] = None,
+    ) -> ExecuteResult:
+        """Async counterpart of :meth:`execute`.
+
+        Example:
+            >>> from agenomic import Client
+            >>> callable(Client().tools.aexecute)
+            True
+        """
+        result: ExecuteResult = await self._client.vault.runtime.aexecute(
+            tool=tool,
+            binding=binding,
+            arguments=arguments,
+            action_id=action_id,
+            deadline_ms=deadline_ms,
+        )
+        return result
+
+    def get_execution(self, action_id: str) -> ExecutionStatus:
+        """The stored state of one vault execution (any state, including ``outcome_unknown``).
+
+        Example:
+            >>> from agenomic import Client
+            >>> callable(Client().tools.get_execution)
+            True
+        """
+        status: ExecutionStatus = self._client.vault.runtime.get_execution(action_id)
+        return status
+
+    async def aget_execution(self, action_id: str) -> ExecutionStatus:
+        """Async counterpart of :meth:`get_execution`."""
+        status: ExecutionStatus = await self._client.vault.runtime.aget_execution(action_id)
+        return status
 
     def authorize_local(
         self,

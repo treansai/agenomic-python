@@ -17,6 +17,7 @@ OFFLINE_EXAMPLES = [
     "05_langgraph_traced.py",
     "07_offline_signed_release.py",
     "09_rmp.py",
+    "12_vault_langgraph.py",
 ]
 
 

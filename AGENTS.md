@@ -117,3 +117,49 @@ This file governs **developing this repository**. If you are an agent
   idempotent (first system message or `system` prefix compared verbatim).
 - The pre-existing `ruff format --check` failures on markdown files are not
   touched by this feature.
+
+## Vault
+
+`agenomic.vault` is the client of the optional commercial Agents Vault module
+(`/v1/vault` contract of agenomic-cloud). Decisions that outlive the code:
+
+- No public name may read, reveal, export or decrypt a secret value
+  (`tests/test_vault_no_secret_surface.py` scans the whole package for
+  `read_value|get_value|reveal|export_secret|decrypt`). A value enters only
+  through `Sensitive` (`__slots__`, no accessor, masked repr/str/format/pickle/
+  copy/JSON/pydantic) and is read by `_unseal` in the transport, nowhere else.
+  The one-time runtime token is an `IssuedToken` taken with `consume()`.
+- The transport raises failures outside the `except` that caught them, so no
+  chained exception keeps a request (and its body) alive; secret-bearing
+  bodies are the only place `Sensitive` is serialized, everywhere else it is a
+  local `sensitive_not_allowed`; response models use `extra="ignore"`, request
+  models `extra="forbid"`; server text in errors is scrubbed of the submitted
+  value (raw and JSON-escaped).
+- `action_id` names one logical action. Technical retries (network, 429, 502,
+  503, 504) reuse it and the body; the server de-duplicates. `outcome_unknown`
+  is raised as `VaultOutcomeUnknown` and never retried, whatever the HTTP
+  status; settlement is `executions.resolve`, a human act that never re-sends.
+  Admin POSTs are retried only on 429 (the vault routes are outside the
+  idempotency middleware).
+- Planes never share a credential: `api_key` for `/v1/vault/*`, `runtime_token`
+  for `/v1/vault/runtime/*`. `Client._http(bearer=...)` replaces the key for
+  one plane. A missing credential or `base_url` is `VaultNotConfigured` before
+  any request.
+- Replay is mock by default and the only offline mode: `Client(vault_replay=)`
+  answers `tools.execute` from fixtures, goes through the same `outcome_of` as
+  a live reply, and a miss is `ReplayFixtureMissing` (code `mock_unmatched`,
+  the code of the tool mock engine). Nothing falls back to live; grants have
+  no replay counterpart (`ReplayUnsupported`).
+- The SDK never decides entitlement: `VaultNotEntitled` and `VaultStatus`
+  mirror the server's `capability` fields and expose `upgrade_hint` only from
+  the server's `reason`. No plan, quota or price appears in the code or docs.
+- Exceptions subclass `ToolExecutionError` and are picklable through
+  `VaultError.__reduce__` (the base `ToolExecutionError` is not). N818 is
+  ignored for `vault/errors.py` and `vault/sensitive.py`: names carry the
+  outcome (`VaultApprovalRequired`), as `ToolCallDenied` does.
+- Every route of the contract has an `Op` builder in `vault/ops.py` run by a
+  sync and an async method; `tests/test_vault_admin.py` keeps a snapshot of the
+  contract and fails when a route is unreachable from the SDK. List filters
+  (`environment`, `state`, `agent_id`, `binding_id`, `provider_id`,
+  `action_id`, `limit`) follow the gateway handlers; the OpenAPI document does
+  not list them yet.

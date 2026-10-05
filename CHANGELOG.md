@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Agents Vault (optional commercial module of Agenomic Cloud/Enterprise; needs
+  the Agents Vault add-on). `client.tools.execute(tool=, binding=, arguments=,
+  action_id=)` (and `aexecute`, `get_execution`) performs one logical action
+  with a credential binding and returns the filtered business result, the
+  `receipt_id` and the status; the agent holds a runtime token, never a
+  credential. A UUID `action_id` is generated when absent and exposed;
+  technical retries (network, 429, 502, 503, 504) reuse it, and an
+  `outcome_unknown` outcome is never retried (`VaultOutcomeUnknown`).
+- `client.vault`: status, providers, secrets (write-only create, add version,
+  rotate, revoke, references, metadata), rotations, bindings (create, propose,
+  submit, approve, activate, revoke), grants, runtime identities (the token is
+  shown once), executions (list, get, resolve), receipts, revocations (retry,
+  lift), kill switch and the runtime plane (execute, grants, delegation).
+  Every operation of the `/v1/vault` contract has a sync and an async method.
+  Rotations, revocation retry and lift, execution resolve and grant delegation
+  need a server version that includes them.
+- `agenomic.vault.Sensitive`: write-only wrapper for secret values, masked
+  (constant mask) in repr, str, format, pickle, copy, JSON and pydantic. Request
+  bodies never appear in exceptions or logs; response models drop unknown
+  fields.
+- Typed errors mapped from the server codes, all subclasses of
+  `ToolExecutionError`: `VaultNotEntitled` (locked add-on, with
+  `upgrade_hint`), `VaultApprovalRequired`, `VaultPolicyDenied`,
+  `VaultGrantUnusable`, `VaultRevoked`, `VaultOutcomeUnknown`,
+  `VaultRateLimited`, `VaultValidationError` and more.
+- `Client(runtime_token=, vault_replay=, vault_retry=)` and
+  `agenomic.vault.VaultReplay`: replay answers vault executions from fixtures,
+  raises the same errors as a live call and raises `ReplayFixtureMissing`
+  (`mock_unmatched`) for a call without fixture; it never falls back to live.
+- `examples/12_vault_langgraph.py` and `docs/vault.md`: a LangGraph graph whose
+  state and checkpoints carry opaque references only.
+
+### Changed
+
+- `Client._http` and `Client._ahttp` accept an optional `bearer` so a plane
+  other than the API key plane (the vault runtime) carries its own credential.
+
 ## [0.1.2] - 2026-09-20
 
 ### Changed
