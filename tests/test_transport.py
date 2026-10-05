@@ -33,7 +33,7 @@ from agenomic.prompts.errors import (
 
 @pytest.fixture
 def server() -> FakePromptServer:
-    return FakePromptServer(seeded_engine())
+    return FakePromptServer(seeded_engine(), api_key_scopes=["write"])
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ def test_get_returns_body_and_etag(client: Client) -> None:
     response = api_request(client, "GET", f"/v1/agents/{AGENT}/channels/production")
     assert response.status == 200
     assert response.etag == 0
-    assert response.body["name"] == "production"
+    assert response.body["channel"]["name"] == "production"
     assert response.headers["etag"] == '"0"'
 
 

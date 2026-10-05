@@ -208,3 +208,63 @@ rule of the engineering rules above.
 - `agenomic.prompts` never imports langchain or langgraph, and
   `agenomic.integrations` does not import `langchain_prompts`; a subprocess
   test checks both.
+- `client.prompts`, `client.bindings` and `client.channels`
+  (`prompts/resources.py`) write each operation once, as a generator that
+  yields `Call` requests and cache steps (plain callables). `run_flow` drives
+  it with the pooled `httpx.Client`; `arun_flow` drives it with the per-loop
+  `AsyncClient` and runs cache steps in `asyncio.to_thread`, so the disk tier
+  never blocks the event loop. Errors are thrown back into the generator, which
+  lets a flow (the binding authority) catch them. The sync and `a*` methods
+  therefore cannot drift apart.
+- Request bodies follow the gateway's request types: unknown members are
+  refused and list or map members cannot be `null`, so empty `child_selectors`,
+  `variable_descriptions` and the optional `expect` are omitted rather than sent
+  as `null`. Responses are read in their wrapped form (`{draft}`, `{alias}`,
+  `{channel}`, `{prompt}`, `{version, created}`), a counter in the body must
+  equal the `ETag`, and a shape mismatch raises `invalid_response`.
+- `get` with `prm_x:n` or a URI reads the cache first, then
+  `GET .../versions/n?include=fragments`, verifies the version and its fragment
+  closure and caches it; the answered `prompt_id` and version must equal the
+  request, and `canonical_uri` must name the client's workspace
+  (`workspace_mismatch` otherwise). An alias always goes through
+  `POST /v1/prompts/resolve`; only the concrete version is cached, its digest
+  must equal the resolved digest, and the result carries `resolved_from`. An
+  alias inside a managed run raises `alias_in_managed_run`; the check reads
+  LangChain's `var_child_runnable_config` only when
+  `langchain_core.runnables.config` is already in `sys.modules`, so
+  `agenomic.prompts` still never imports LangChain. Online, a cache conflict is
+  a miss on read and is ignored on write (the cache logs it).
+- `Client.workspace_id` is the configured value or the `org_id` of one
+  memoized `GET /v1/whoami`; once both are known and differ, every call raises
+  `workspace_mismatch`. `whoami()` also feeds the later privileged-key check.
+- `client.bindings` passes the caller's thread key through unchanged (hashing
+  is the caller's job), sends no `Idempotency-Key` (create-or-get on the thread
+  key), always asks for `include: ["artifacts"]`, and loads them with
+  `from_online_response` pinned to the binding's manifest digest. It also
+  refuses an answer whose workspace, agent, thread key, scope or release differs
+  from the request, or whose child manifest digests differ from
+  `binding.children` (`binding_mismatch`, `manifest_digest_mismatch`).
+- `client.bindings.create` never falls back: the outage policy lives in
+  `CloudBindingAuthority` (`prompts/authority.py`). On `registry_unavailable`
+  it serves a binding only when the same thread key is cached with the same
+  scope and selector and its closure re-verifies; it then returns
+  `created=False`, logs one WARNING on `agenomic.prompts` and increments
+  `counters()["registry_outage_cached_binding_total"]` (a process-wide counter,
+  since the SDK has no metrics dependency). Every other case re-raises. A 401,
+  403 or 404 evicts the cached binding before raising; a 409 does not. A
+  cached binding is rebuilt into a bundle from the binding record plus the
+  cached closure and goes through the same online verification again.
+- `export_bundle` loads the signed export with `PromptBundle.load`, trusting the
+  key of `GET /v1/signing-keys/:key_id` (the same TLS and API key trust as every
+  online answer) unless the caller passes `trust`. It allows an unapproved
+  release, because exporting the target of an unprotected channel is legitimate;
+  offline loading applies the governance step again.
+- `client.channels` is read only (no promote, no rollback: moves are session
+  only). `history` follows `next_after` until the log ends, because the registry
+  pages it, and refuses a `next_after` that does not advance. `aliases.move` sends `If-Match` but every API key gets the registry's
+  `session_required`, because alias moves are session only too.
+- Local mode (no `base_url`) delegates to `LocalPromptEngine` wherever the engine
+  has an equivalent. Listing, version lists, channel lists, move previews,
+  counterfactual bindings, `child_selectors`, `whoami` and `export_bundle`
+  (use `client.prompts.local.export_bundle` with a signer) raise
+  `cloud_required`, and so does `client.prompts.local` on a cloud client.

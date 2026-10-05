@@ -216,6 +216,7 @@ def api_request(
     idempotency_key: Optional[str] = None,
     if_match: Optional[int] = None,
     retry: bool = False,
+    params: Optional[Mapping[str, str]] = None,
 ) -> ApiResponse:
     http = pool_for(client).sync()
     attempts = len(BACKOFF) + 1 if retry else 1
@@ -225,7 +226,11 @@ def api_request(
         last = attempt + 1 >= attempts
         try:
             response = http.request(
-                method, path, json=None if body is None else dict(body), headers=headers
+                method,
+                path,
+                json=None if body is None else dict(body),
+                headers=headers,
+                params=None if params is None else dict(params),
             )
         except httpx.HTTPError as error:
             if last:
@@ -251,6 +256,7 @@ async def aapi_request(
     idempotency_key: Optional[str] = None,
     if_match: Optional[int] = None,
     retry: bool = False,
+    params: Optional[Mapping[str, str]] = None,
 ) -> ApiResponse:
     http = pool_for(client).current()
     attempts = len(BACKOFF) + 1 if retry else 1
@@ -260,7 +266,11 @@ async def aapi_request(
         last = attempt + 1 >= attempts
         try:
             response = await http.request(
-                method, path, json=None if body is None else dict(body), headers=headers
+                method,
+                path,
+                json=None if body is None else dict(body),
+                headers=headers,
+                params=None if params is None else dict(params),
             )
         except httpx.HTTPError as error:
             if last:
