@@ -1141,3 +1141,42 @@ def test_deadline_reported_as_agent_timeout(server: FakeRunnerServer) -> None:
     result = server.trials[trial].result
     assert result["outcome"] == "agent_timeout"
     assert result["error"] == {"code": "deadline_exceeded"}
+
+
+def test_unexpected_errors_never_stop_the_runner(server: FakeRunnerServer) -> None:
+    class BrokenResolver:
+        def names(self) -> list[str]:
+            return ["env:BROKEN"]
+
+        def resolve(self, ref: str) -> str:
+            raise KeyError(ref)
+
+    broken = server.add_trial("v1", agent_case("broken"), secret_refs=["env:BROKEN"])
+    healthy = server.add_trial("v1", agent_case("healthy"))
+    runner = make_runner(
+        server, single_node(render_plan), runner_options={"secrets": BrokenResolver()}
+    )
+    assert serve(runner) == 2
+    failure = server.trials[broken].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "runner_configuration",
+        "secret_unresolved",
+    )
+    assert server.trials[healthy].accepts == 1
+    crashed = server.add_trial("v1", agent_case("crashed"))
+    survivor = server.add_trial("v1", agent_case("survivor"))
+    original = runner._aexecute
+
+    async def flaky(assignment: Any, state: Any) -> Any:
+        if assignment.view.case.case_id == "crashed":
+            raise RuntimeError("internal bug")
+        return await original(assignment, state)
+
+    runner._aexecute = flaky
+    assert serve(runner) == 2
+    failure = server.trials[crashed].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "infrastructure",
+        "runner_internal_error",
+    )
+    assert server.trials[survivor].accepts == 1

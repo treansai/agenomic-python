@@ -1038,11 +1038,15 @@ class ExperimentRunner:
         started = time.monotonic()
         turns: list[dict[str, Any]] = []
         view = assignment.view
+        stage = "assignment_invalid"
         try:
             agent_id, target, binding, bundle = self._prepare(assignment)
+            stage = "secret_unresolved"
             secrets = self._resolve_secrets(view.secret_refs)
         except RunnerConfigurationError as refused:
             return self._failure("runner_configuration", refused.code, str(refused), state)
+        except Exception as error:
+            return self._failure("runner_configuration", stage, str(error), state)
         state.literals = self._literals(secrets)
         context, saver_kind, store_kind = None, "per_trial_in_memory", "per_trial_namespace"
         fork = "state_values_only" if view.case.is_snapshot else "none"
@@ -1308,13 +1312,25 @@ class ExperimentRunner:
             try:
                 run = await trial
             except asyncio.CancelledError:
+                if control.reason is None:
+                    raise
                 run = self._interrupted(control.reason, assignment, state, started)
+            except Exception:
+                log.exception("the runner failed while executing trial %s", assignment.trial_id)
+                run = TrialRun(
+                    "failure",
+                    error_class="infrastructure",
+                    error_code="runner_internal_error",
+                    message="the runner failed while executing the trial",
+                )
         finally:
             beat.cancel()
         try:
             await self._deliver(http, assignment, run)
         except ApiError as error:
             log.warning("delivery for trial %s failed: %s", assignment.trial_id, error.code)
+        except Exception:
+            log.exception("delivery for trial %s failed", assignment.trial_id)
         return run
 
     def _interrupted(
