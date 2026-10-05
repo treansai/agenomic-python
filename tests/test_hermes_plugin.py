@@ -26,6 +26,24 @@ from agenomic.integrations.hermes.config import AdapterConfig, ConfigError
 from agenomic.integrations.hermes.plugin import APPROVAL_MESSAGE, HermesAdapter
 
 
+@pytest.fixture(autouse=True)
+def _shutdown_adapters(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Stop every adapter a test creates, so no exporter thread outlives its test and
+    posts into another test's HTTP mock."""
+    created: list[HermesAdapter] = []
+    original = HermesAdapter.__init__
+
+    def tracking_init(self: HermesAdapter, *args: Any, **kwargs: Any) -> None:
+        created.append(self)
+        original(self, *args, **kwargs)
+
+    monkeypatch.setattr(HermesAdapter, "__init__", tracking_init)
+    yield
+    for adapter in created:
+        if hasattr(adapter, "exporter"):
+            adapter.shutdown()
+
+
 @pytest.fixture
 def server() -> Iterator[FakeAgenomic]:
     s = FakeAgenomic()
