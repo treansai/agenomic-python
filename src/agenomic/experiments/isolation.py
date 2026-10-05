@@ -98,7 +98,7 @@ def jsonable(value: Any) -> Any:
     if isinstance(value, BaseMessage):
         return {"role": _ROLES.get(value.type, value.type), "content": jsonable(value.content)}
     if isinstance(value, BaseModel):
-        return jsonable(value.model_dump(mode="json"))
+        return jsonable(value.model_dump(mode="json", warnings=False))
     raise RunnerConfigurationError(
         "output_not_serializable", f"a {type(value).__name__} value is not a JSON value"
     )

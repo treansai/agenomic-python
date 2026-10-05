@@ -289,11 +289,28 @@ class _ProxiedTool(BaseTool):
             return cast(Optional[dict[str, Any]], state.live_reports.get(logical))
 
     def _remember_live(
-        self, logical: str, report: dict[str, Any], value: Any, error: Optional[BaseException]
-    ) -> None:
+        self,
+        logical: str,
+        value: Any,
+        error: Optional[BaseException],
+        started: float,
+        decision: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        permit = decision.get("permit")
+        try:
+            report = self._report_body(value, error is not None, started, permit)
+        except Exception as raised:
+            refused = RunnerConfigurationError(
+                "output_not_serializable", "the live tool returned a value that cannot be reported"
+            )
+            refused.__cause__ = raised
+            error = self._fail(refused)
+            report = self._report_body({"error": refused.message}, True, started, permit)
+        cached = {"body": report, "value": value, "error": error}
         state = self._context._state
         with state.lock:
-            state.live_reports[logical] = {"body": report, "value": value, "error": error}
+            state.live_reports[logical] = cached
+        return cached
 
     def _run_live(
         self, logical: str, arguments: dict[str, Any], decision: Mapping[str, Any], proxy: ToolProxy
@@ -309,9 +326,7 @@ class _ProxiedTool(BaseTool):
                     raised,
                     {"error": redact_message(str(raised), self._context._state.literals)},
                 )
-            report = self._report_body(value, error is not None, started, decision.get("permit"))
-            self._remember_live(logical, report, value, error)
-            cached = {"body": report, "value": value, "error": error}
+            cached = self._remember_live(logical, value, error, started, decision)
         try:
             self._check_report(proxy.report(logical, cached["body"]))
         except ApiError as refused:
@@ -334,9 +349,7 @@ class _ProxiedTool(BaseTool):
                     raised,
                     {"error": redact_message(str(raised), self._context._state.literals)},
                 )
-            report = self._report_body(value, error is not None, started, decision.get("permit"))
-            self._remember_live(logical, report, value, error)
-            cached = {"body": report, "value": value, "error": error}
+            cached = self._remember_live(logical, value, error, started, decision)
         try:
             self._check_report(await proxy.areport(logical, cached["body"]))
         except ApiError as refused:

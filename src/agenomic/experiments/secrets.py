@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -7,6 +8,7 @@ import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any, NoReturn, Optional, Protocol, runtime_checkable
+from urllib.parse import quote, quote_plus
 
 from agenomic.experiments.errors import SecretResolutionError
 from agenomic.prompts.secrets import scrub
@@ -120,8 +122,20 @@ class SecretValues(Mapping[str, str]):
         return sorted({value for value in self._values.values() if value}, key=len, reverse=True)
 
 
+def _forms(literal: str) -> set[str]:
+    return {
+        literal,
+        repr(literal)[1:-1],
+        json.dumps(literal)[1:-1],
+        quote(literal, safe=""),
+        quote(literal),
+        quote_plus(literal),
+    }
+
+
 def replace_secrets(value: Any, literals: Iterable[str]) -> Any:
-    ordered = sorted({item for item in literals if item}, key=len, reverse=True)
+    forms = {form for item in literals if item for form in _forms(item)}
+    ordered = sorted(forms, key=len, reverse=True)
     if not ordered:
         return value
     return _replace(value, ordered)
@@ -147,16 +161,16 @@ def redact_outbound(value: Any, literals: Iterable[str]) -> Any:
     return replace_secrets(engine.apply(value), literals)
 
 
-def redact_message(text: str, literals: Iterable[str]) -> str:
-    cleaned = replace_secrets(scrub(text), literals)
-    encoded = str(cleaned).encode("utf-8")
-    if len(encoded) <= MAX_MESSAGE_BYTES:
-        return str(cleaned)
-    return encoded[:MAX_MESSAGE_BYTES].decode("utf-8", errors="ignore")
-
-
-def _redact_log_text(text: str, literals: Iterable[str]) -> str:
+def _redact_text(text: str, literals: Iterable[str]) -> str:
     return _RUNNER_TOKEN.sub(REDACTED, scrub(str(replace_secrets(text, literals))))
+
+
+def redact_message(text: str, literals: Iterable[str]) -> str:
+    cleaned = _redact_text(text, literals)
+    encoded = cleaned.encode("utf-8")
+    if len(encoded) <= MAX_MESSAGE_BYTES:
+        return cleaned
+    return encoded[:MAX_MESSAGE_BYTES].decode("utf-8", errors="ignore")
 
 
 class LogRedactor(logging.Filter):
@@ -184,13 +198,13 @@ class LogRedactor(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             literals = self.literals()
-            record.msg = _redact_log_text(record.getMessage(), literals)
+            record.msg = _redact_text(record.getMessage(), literals)
             if record.exc_info:
                 record.exc_text = _FORMATTER.formatException(record.exc_info)
             if record.exc_text:
-                record.exc_text = _redact_log_text(record.exc_text, literals)
+                record.exc_text = _redact_text(record.exc_text, literals)
             if record.stack_info:
-                record.stack_info = _redact_log_text(record.stack_info, literals)
+                record.stack_info = _redact_text(record.stack_info, literals)
         except Exception:
             record.msg, record.exc_text, record.stack_info = WITHHELD, None, None
         record.args = ()

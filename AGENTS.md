@@ -767,7 +767,11 @@ rule of the engineering rules above.
   become `[REDACTED]`. `experiment_tool_call_in_progress` waits 0.5, 1 and
   2 s, then fails as infrastructure. A live call runs the user's tool once
   per logical id: the report body is cached and resent identically, so a
-  resent permit or a lost report never repeats the side effect.
+  resent permit or a lost report never repeats the side effect. Nothing may
+  raise between the effect and that cache: a value that cannot be reported
+  as JSON is reported as an error placeholder and ends the trial with
+  `output_not_serializable`, otherwise a retried node would run the effect
+  again while the server counts the call as indeterminate.
 - A result is built once, redacted (the key rules of
   `DEFAULT_RUNNER_REDACTION_RULES`, then every resolved secret value), and
   frozen in an outbox keyed by `uuid5(trial, attempt, lease token)`; retries
@@ -775,9 +779,15 @@ rule of the engineering rules above.
   header is sent, as the route is idempotent on lease and result digest.
   `experiment_result_secret_detected` and `experiment_result_invalid` turn
   into `failure(runner_configuration, ...)`; a stale lease drops the trial.
-  Failure messages are scrubbed with the `agenomic-secrets/1` patterns,
-  then the literals, then cut to 2 KiB; envelopes are never scrubbed
-  (`scrub_json` would mask `lease_token`).
+  Failure and agent-error messages are redacted like log text (the
+  literals, then the `agenomic-secrets/1` patterns, then any `agr_` token)
+  and then cut to 2 KiB; envelopes are never scrubbed (`scrub_json` would
+  mask `lease_token`). Every replacement of resolved values also covers
+  their `repr`, JSON and percent-encoded forms, because exception text
+  carries values that way (a `KeyError`, a provider URL in an
+  `HTTPStatusError`). `TrialState` keeps its literals, lease token and live
+  reports out of `repr`, and `jsonable` dumps models with `warnings=False`
+  because pydantic serializer warnings quote the offending value.
 - Runner logs use only the `agenomic.experiments` logger, which carries
   `LOG_REDACTOR`. A logger filter runs before every handler but only on
   records of its own logger, so experiments modules never log through

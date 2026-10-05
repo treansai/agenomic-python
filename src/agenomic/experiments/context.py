@@ -16,14 +16,14 @@ __all__ = ["TrialContext", "TrialState"]
 
 @dataclass
 class TrialState:
-    proxy: Optional[ToolProxy]
-    lease_token: str
-    literals: list[str]
+    proxy: Optional[ToolProxy] = field(repr=False)
+    lease_token: str = field(repr=False)
+    literals: list[str] = field(repr=False)
     terminal: Optional[BaseException] = None
     model_calls: list[dict[str, Any]] = field(default_factory=list)
     model_call_count: int = 0
     tokens_used: int = 0
-    live_reports: dict[str, dict[str, Any]] = field(default_factory=dict)
+    live_reports: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def mark_terminal(self, error: BaseException) -> None:

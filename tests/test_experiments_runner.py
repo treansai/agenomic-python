@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
+import datetime
 import json
 import logging
 import pickle
 import sys
 import types
+import warnings
 from collections.abc import Iterator
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 import httpx
 import pytest
@@ -28,11 +32,12 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import START, StateGraph
-from langgraph.prebuilt import ToolNode
+from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import interrupt
 from langgraph_world import World
 from prompt_fakes import AGENT
+from pydantic import BaseModel
 
 import agenomic._transport as transport_module
 import agenomic.experiments.runner as runner_module
@@ -48,6 +53,7 @@ from agenomic.experiments import (
     TrialContext,
     classify,
 )
+from agenomic.experiments.context import TrialState
 from agenomic.experiments.errors import error_code
 from agenomic.experiments.isolation import NamespacedStore, jsonable
 from agenomic.experiments.runner import (
@@ -65,6 +71,8 @@ from agenomic.prompts.digest import prompt_digest
 
 SECRET = "s3cr3t-runner-value-0123456789"
 FOREIGN_TOKEN = "agr_" + "fedcba9876543210" * 4
+ENCODED = "p\\a\"ss'w+rd/x=y-runner-value"
+SHAPED = "sk-" + "a" * 24 + ".tail-part-9876"
 
 
 @pytest.fixture(autouse=True)
@@ -1419,3 +1427,200 @@ def test_runner_logs_never_carry_secrets(
     assert [record.getMessage() for record in caplog.records] == [
         "a log record was withheld because it could not be redacted"
     ]
+
+
+def secret_forms(value: str) -> set[str]:
+    return {
+        value,
+        repr(value)[1:-1],
+        json.dumps(value)[1:-1],
+        quote(value, safe=""),
+        quote(value),
+        quote_plus(value),
+    }
+
+
+def sent_strings(server: FakeRunnerServer) -> list[str]:
+    found: list[str] = []
+
+    def walk(item: Any) -> None:
+        if isinstance(item, str):
+            found.append(item)
+        elif isinstance(item, dict):
+            for key, value in item.items():
+                found.append(str(key))
+                walk(value)
+        elif isinstance(item, list):
+            for value in item:
+                walk(value)
+
+    for request in server.requests:
+        if request.content:
+            walk(json.loads(request.content))
+    return found
+
+
+def test_encoded_and_pattern_shaped_secrets_never_reported_or_logged(
+    server: FakeRunnerServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="agenomic.experiments")
+    resolver = EnvSecretResolver(
+        allow=["SERVICE_KEY", "MODEL_KEY"], environ={"SERVICE_KEY": ENCODED, "MODEL_KEY": SHAPED}
+    )
+
+    def provider_error(status: int, key: str) -> None:
+        request = httpx.Request("GET", "https://provider.test/v1", params={"key": key})
+        httpx.Response(status, request=request).raise_for_status()
+
+    async def node(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        value = ctx.secrets["env:SERVICE_KEY"]
+        case_id = ctx.case.case_id
+        if case_id == "repr":
+            raise KeyError(value)
+        if case_id in ("client", "server"):
+            provider_error(401 if case_id == "client" else 503, value)
+        if case_id == "shaped":
+            raise RuntimeError(f"provider rejected {ctx.secrets['env:MODEL_KEY']}")
+        return {"log": ["ok"]}
+
+    def broken(case: Any, output: Any) -> bool:
+        try:
+            raise KeyError(ENCODED)
+        except KeyError as inner:
+            error = ValueError(f"evaluator failed near {SHAPED}")
+            error.__cause__ = inner
+        group = getattr(builtins, "ExceptionGroup", None)
+        raise group("evaluators", [error]) if group is not None else error
+
+    evaluator = RunnerEvaluator(broken, version=1)
+    custom = {
+        "evaluator_id": "custom",
+        "kind": "runner_custom",
+        "version": 1,
+        "config": {"name": "broken", "version": 1, "code_digest": evaluator.digest()},
+    }
+    refs = ["env:SERVICE_KEY", "env:MODEL_KEY"]
+    trials = {
+        name: server.add_trial(
+            "v1",
+            agent_case(name),
+            secret_refs=refs,
+            runner_evaluators=[custom] if name == "evaluated" else [],
+        )
+        for name in ("repr", "client", "server", "shaped", "evaluated")
+    }
+    runner = make_runner(
+        server,
+        single_node(node),
+        evaluators={"broken": evaluator},
+        runner_options={"secrets": resolver},
+    )
+    assert serve(runner) == 5
+    results = {name: server.trials[trial_id].result for name, trial_id in trials.items()}
+    assert results["repr"]["error"]["message"] == "'[REDACTED]'"
+    assert results["client"]["outcome"] == "agent_error"
+    assert "https://provider.test/v1?key=[REDACTED]" in results["client"]["error"]["message"]
+    assert results["shaped"]["error"]["message"] == "provider rejected [REDACTED]"
+    assert results["evaluated"]["runner_metrics"]["broken"]["value"] is None
+    failure = server.trials[trials["server"]].failures[0]
+    assert failure["error_class"] == "infrastructure"
+    assert "https://provider.test/v1?key=[REDACTED]" in failure["message"]
+    assert "KeyError: '[REDACTED]'" in caplog.text
+    assert "ValueError: evaluator failed near [REDACTED]" in caplog.text
+    leaks = [*secret_forms(ENCODED), *secret_forms(SHAPED), ".tail-part-9876"]
+    for text in [*sent_strings(server), caplog.text]:
+        for form in leaks:
+            assert form not in text
+
+
+def test_trial_state_repr_hides_secrets_and_lease() -> None:
+    state = TrialState(proxy=None, lease_token="lease-4b8c0b9e", literals=[SECRET, TOKEN])
+    state.live_reports["call_1"] = {"body": {}, "value": f"raw {SECRET}", "error": None}
+    text = repr(state)
+    assert text.startswith("TrialState(")
+    for hidden in (SECRET, TOKEN, "lease-4b8c0b9e"):
+        assert hidden not in text
+
+
+def test_output_model_serializer_warning_never_carries_secret(server: FakeRunnerServer) -> None:
+    class Verdict(BaseModel):
+        count: int
+
+    def adapt(values: Any) -> list[Verdict]:
+        verdict = Verdict(count=1)
+        object.__setattr__(verdict, "count", SECRET)
+        return [verdict]
+
+    trial = server.add_trial("v1", agent_case(), secret_refs=["env:SERVICE_KEY"])
+    runner = make_runner(
+        server,
+        single_node(render_plan),
+        output_adapter=adapt,
+        runner_options={
+            "secrets": EnvSecretResolver(allow=["SERVICE_KEY"], environ={"SERVICE_KEY": SECRET})
+        },
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert serve(runner) == 1
+    assert all(SECRET not in str(item.message) for item in caught)
+    assert server.trials[trial].result["output"]["final"] == [{"count": "[REDACTED]"}]
+
+
+@pytest.mark.parametrize("path", ["tool_node", "sync_invoke"])
+def test_live_tool_unreportable_value_reported_once_and_fails_trial(
+    server: FakeRunnerServer, path: str
+) -> None:
+    booked: list[str] = []
+
+    @tool(description="Book a slot.")
+    def book_slot(day: str) -> Any:
+        booked.append(day)
+        return datetime.date(2026, 10, 5)
+
+    call_b = tool_call(name="book_slot", args={"day": "mon"}, id="call_b")
+
+    def factory(ctx: TrialContext) -> Any:
+        tools = ctx.wrap_tools([book_slot])
+        builder = StateGraph(GraphState)
+        if path == "tool_node":
+            replies = iter([[call_b], [call_b]])
+
+            def agent(state: dict[str, Any]) -> dict[str, Any]:
+                return {"messages": [AIMessage(content="", tool_calls=next(replies, []))]}
+
+            builder.add_node("agent", agent)
+            builder.add_node("tools", ToolNode(tools, handle_tool_errors=True))
+            builder.add_edge(START, "agent")
+            builder.add_conditional_edges("agent", tools_condition)
+            builder.add_edge("tools", "agent")
+        else:
+
+            def node(state: dict[str, Any]) -> dict[str, Any]:
+                seen = []
+                for _ in range(2):
+                    try:
+                        seen.append(str(tools[0].invoke(call_b).content))
+                    except Exception as error:
+                        seen.append(type(error).__name__)
+                return {"log": seen}
+
+            builder.add_node("plan", node)
+            builder.add_edge(START, "plan")
+        return builder.compile(checkpointer=ctx.checkpointer, store=ctx.store)
+
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "live"})
+    runner = make_runner(server, factory, live_tools=True)
+    assert serve(runner) == 1
+    assert booked == ["mon"]
+    reports = [json.loads(r.content) for r in server.requests if r.url.path.endswith("/report")]
+    assert len(reports) == 1
+    assert reports[0]["is_error"] is True
+    assert server.trials[trial].result is None
+    failure = server.trials[trial].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "runner_configuration",
+        "output_not_serializable",
+    )
