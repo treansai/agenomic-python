@@ -785,6 +785,20 @@ rule of the engineering rules above.
   ran, so the server keeps it as indeterminate. A misconfigured or
   compromised server, or a replayed permit, thus cannot cause a side effect
   on a runner that did not opt in, nor in a mock or recorded trial.
+- A live call is reserved under the trial lock before the inner tool runs:
+  the first caller of a logical id inserts an empty entry, and a concurrent
+  caller of the same id (duplicate ids in one `ToolNode` message, threads)
+  finds it without a report body and ends the trial with
+  `live_call_concurrent` instead of waiting, since a waiter could block the
+  event loop the first caller needs. The server answers that resend with
+  the stored permit, so only this reservation keeps the effect single.
+- Once the trial state is terminal, every proxied tool call re-raises the
+  terminal error before any request, whatever the mode, so a swallowed
+  `stop_trial` miss, budget stop or unreportable value cannot be followed
+  by another external effect in a trial whose outcome is already decided.
+  The fixture-miss policy is read from the view only: the result echoes
+  `runner_view_digest`, so a per-response `on_fixture_miss` must not
+  change how the trial ran.
 - A result is built once, redacted (the key rules of
   `DEFAULT_RUNNER_REDACTION_RULES`, then every resolved secret value), and
   frozen in an outbox keyed by `uuid5(trial, attempt, lease token)`; retries

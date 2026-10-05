@@ -7,7 +7,7 @@ import json
 import re
 import time
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Optional, Protocol, cast
+from typing import TYPE_CHECKING, Any, Optional, Protocol
 
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool
@@ -156,6 +156,9 @@ class _ProxiedTool(BaseTool):
         self, args: tuple[Any, ...], kwargs: Mapping[str, Any]
     ) -> tuple[str, dict[str, Any], dict[str, Any]]:
         context = self._context
+        terminal = context._state.terminal
+        if terminal is not None:
+            raise terminal
         if context.tool_mode == "none":
             raise self._fail(
                 RunnerConfigurationError(
@@ -198,8 +201,7 @@ class _ProxiedTool(BaseTool):
         if status == "approval_required":
             return "value", APPROVAL_TEXT
         if status == "recorded_fixture_miss":
-            policy = response.get("on_fixture_miss") or self._context.view.tools.on_fixture_miss
-            if policy == "tool_error":
+            if self._context.view.tools.on_fixture_miss == "tool_error":
                 return "value", FIXTURE_MISS_TEXT
             raise self._fail(RecordedFixtureMiss(self.name, response.get("arguments_hash")))
         if status == "recorded_fixture_ambiguous":
@@ -290,10 +292,24 @@ class _ProxiedTool(BaseTool):
             return value
         return await self._arun_live(logical, arguments, value, proxy)
 
-    def _live_cached(self, logical: str) -> Optional[dict[str, Any]]:
+    def _reserve_live(self, logical: str) -> Optional[dict[str, Any]]:
         state = self._context._state
         with state.lock:
-            return cast(Optional[dict[str, Any]], state.live_reports.get(logical))
+            terminal = state.terminal
+            cached: Optional[dict[str, Any]] = state.live_reports.get(logical)
+            if terminal is None and cached is None:
+                state.live_reports[logical] = {}
+                return None
+        if terminal is not None:
+            raise terminal
+        if cached is None or "body" not in cached:
+            raise self._fail(
+                RunnerConfigurationError(
+                    "live_call_concurrent",
+                    "another call with this id is still running its live tool",
+                )
+            )
+        return cached
 
     def _remember_live(
         self,
@@ -322,7 +338,7 @@ class _ProxiedTool(BaseTool):
     def _run_live(
         self, logical: str, arguments: dict[str, Any], decision: Mapping[str, Any], proxy: ToolProxy
     ) -> Any:
-        cached = self._live_cached(logical)
+        cached = self._reserve_live(logical)
         if cached is None:
             started = time.monotonic()
             error: Optional[BaseException] = None
@@ -345,7 +361,7 @@ class _ProxiedTool(BaseTool):
     async def _arun_live(
         self, logical: str, arguments: dict[str, Any], decision: Mapping[str, Any], proxy: ToolProxy
     ) -> Any:
-        cached = self._live_cached(logical)
+        cached = self._reserve_live(logical)
         if cached is None:
             started = time.monotonic()
             error: Optional[BaseException] = None

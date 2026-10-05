@@ -7,9 +7,11 @@ import json
 import logging
 import pickle
 import sys
+import time
 import types
 import warnings
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 from urllib.parse import quote, quote_plus
 
@@ -1793,3 +1795,137 @@ def test_live_gate_needs_live_mode_and_local_opt_in(world: World, live_allowed: 
     assert executed == []
     assert proxy.reports == []
     assert state.terminal is sync_refused.value
+
+
+def wait_for_terminal(ctx: TrialContext) -> None:
+    deadline = time.monotonic() + 2.0
+    while ctx._state.terminal is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+
+@pytest.mark.parametrize("path", ["tool_node", "threads"])
+def test_concurrent_calls_with_one_id_run_the_live_tool_once(
+    server: FakeRunnerServer, path: str
+) -> None:
+    executed: list[str] = []
+    call_d = tool_call(name="refund", args={"order_id": "5"}, id="call_d")
+
+    def factory(ctx: TrialContext) -> Any:
+        @tool(description="Issue a refund.")
+        def refund(order_id: str) -> str:
+            executed.append(order_id)
+            wait_for_terminal(ctx)
+            return f"refunded {order_id}"
+
+        tools = ctx.wrap_tools([refund])
+        builder = StateGraph(GraphState)
+        if path == "tool_node":
+            replies = iter([[call_d, call_d]])
+
+            def agent(state: dict[str, Any]) -> dict[str, Any]:
+                return {"messages": [AIMessage(content="", tool_calls=next(replies, []))]}
+
+            builder.add_node("agent", agent)
+            builder.add_node("tools", ToolNode(tools, handle_tool_errors=True))
+            builder.add_edge(START, "agent")
+            builder.add_conditional_edges("agent", tools_condition)
+            builder.add_edge("tools", "agent")
+        else:
+
+            def node(state: dict[str, Any]) -> dict[str, Any]:
+                with ThreadPoolExecutor(2) as pool:
+                    futures = [pool.submit(tools[0].invoke, call_d) for _ in range(2)]
+                return {"log": [type(future.exception()).__name__ for future in futures]}
+
+            builder.add_node("plan", node)
+            builder.add_edge(START, "plan")
+        return builder.compile(checkpointer=ctx.checkpointer, store=ctx.store)
+
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "live"})
+    runner = make_runner(server, factory, live_tools=True)
+    assert serve(runner) == 1
+    assert executed == ["5"]
+    reports = [json.loads(r.content) for r in server.requests if r.url.path.endswith("/report")]
+    assert [(item["value"], item["is_error"]) for item in reports] == [("refunded 5", False)]
+    assert server.trials[trial].result is None
+    failure = server.trials[trial].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "runner_configuration",
+        "live_call_concurrent",
+    )
+
+
+@pytest.mark.parametrize("trigger", ["unreportable", "fixture_miss"])
+def test_no_tool_runs_after_the_trial_is_terminal(
+    server: FakeRunnerServer, monkeypatch: pytest.MonkeyPatch, trigger: str
+) -> None:
+    executed: list[str] = []
+
+    @tool(description="Book a slot.")
+    def book_slot(day: str) -> Any:
+        executed.append("book " + day)
+        return datetime.date(2026, 10, 5)
+
+    @tool(description="Issue a refund.")
+    def refund(order_id: str) -> str:
+        executed.append("refund " + order_id)
+        return f"refunded {order_id}"
+
+    if trigger == "fixture_miss":
+        original = server._answer
+
+        def answer(trial: Any, mode: str, name: str, arguments: Any) -> dict[str, Any]:
+            return original(trial, "recorded" if name == "book_slot" else mode, name, arguments)
+
+        monkeypatch.setattr(server, "_answer", answer)
+    first = tool_call(name="book_slot", args={"day": "mon"}, id="call_b")
+    second = tool_call(name="refund", args={"order_id": "5"}, id="call_r")
+
+    def factory(ctx: TrialContext) -> Any:
+        replies = iter([[first], [second]])
+
+        def agent(state: dict[str, Any]) -> dict[str, Any]:
+            return {"messages": [AIMessage(content="", tool_calls=next(replies, []))]}
+
+        builder = StateGraph(GraphState)
+        builder.add_node("agent", agent)
+        builder.add_node(
+            "tools", ToolNode(ctx.wrap_tools([book_slot, refund]), handle_tool_errors=True)
+        )
+        builder.add_edge(START, "agent")
+        builder.add_conditional_edges("agent", tools_condition)
+        builder.add_edge("tools", "agent")
+        return builder.compile(checkpointer=ctx.checkpointer, store=ctx.store)
+
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "live"})
+    runner = make_runner(server, factory, live_tools=True)
+    assert serve(runner) == 1
+    calls = [
+        json.loads(r.content)["tool"] for r in server.requests if r.url.path.endswith("/tool-calls")
+    ]
+    assert calls == ["book_slot"]
+    if trigger == "unreportable":
+        assert executed == ["book mon"]
+        assert server.trials[trial].failures[0]["error_code"] == "output_not_serializable"
+    else:
+        assert executed == []
+        assert server.trials[trial].result["outcome"] == "recorded_fixture_miss"
+
+
+def test_fixture_miss_policy_comes_from_the_view(
+    server: FakeRunnerServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = server._answer
+
+    def answer(trial: Any, mode: str, name: str, arguments: Any) -> dict[str, Any]:
+        response = original(trial, mode, name, arguments)
+        if response.get("status") == "recorded_fixture_miss":
+            response["on_fixture_miss"] = "tool_error"
+        return response
+
+    monkeypatch.setattr(server, "_answer", answer)
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "recorded"})
+    assert serve(make_runner(server, tool_graph([[call("9999")]], handle_errors=True))) == 1
+    result = server.trials[trial].result
+    assert result["outcome"] == "recorded_fixture_miss"
+    assert result["error"]["tool"] == "lookup_order"
