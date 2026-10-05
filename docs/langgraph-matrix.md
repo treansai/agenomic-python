@@ -40,17 +40,17 @@ packages of the table above match the point exactly.
 
 | Point   | Python  | Result                |
 | ------- | ------- | --------------------- |
-| primary | 3.10.18 | 954 passed, 2 skipped |
-| primary | 3.11.11 | 956 passed            |
-| primary | 3.12.11 | 956 passed            |
-| primary | 3.13.5  | 956 passed            |
-| floor   | 3.10.18 | 954 passed, 2 skipped |
-| floor   | 3.13.5  | 956 passed            |
+| primary | 3.10.18 | 956 passed, 2 skipped |
+| primary | 3.11.11 | 958 passed            |
+| primary | 3.12.11 | 958 passed            |
+| primary | 3.13.5  | 958 passed            |
+| floor   | 3.10.18 | 956 passed, 2 skipped |
+| floor   | 3.13.5  | 958 passed            |
 
 On the primary point with Python 3.10, the full check also passed in an
 environment without the SQLite saver: `ruff check`, `ruff format --check`,
-`mypy src` and `pytest --cov=agenomic --cov-fail-under=85` (952 passed,
-4 skipped, coverage 91.01 %).
+`mypy src` and `pytest --cov=agenomic --cov-fail-under=85` (954 passed,
+4 skipped, coverage 91.02 %).
 
 The skipped tests:
 

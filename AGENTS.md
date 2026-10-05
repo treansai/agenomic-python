@@ -470,6 +470,16 @@ rule of the engineering rules above.
   any was built (drawing, schemas, or an execution-scope state read, whose
   binding is only known from a checkpoint). `binding_missing` stays the case
   with no pin at all.
+- An execution-scope `AgentFactory` proxy cannot resume, run a `None` input
+  or update the state of a thread before it has built a graph in this
+  process: the binding id sits in a checkpoint, only a built graph knows the
+  checkpointer, and the factory builds only from a pinned set. It raises
+  `prompt_set_unavailable` and never resolves the channel instead. Any new
+  execution builds a graph, after which the resume recovers the original
+  pin; a thread-scope factory has no such gap, because its key is the
+  thread id. `AgentFactory` takes no checkpointer argument, so the gap is
+  documented rather than worked around;
+  `test_factory_execution_scope_resume_needs_a_built_graph` pins it.
 - `LocalBindingStore(directory)` stores one JSON file per workspace, agent
   and sha256 of the thread key, with a `record_digest` over its own
   `agenomic.local_execution_binding/v1` document. A write goes to a `.tmp-`

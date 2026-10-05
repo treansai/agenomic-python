@@ -177,3 +177,49 @@ def test_experiment_arms_isolated_state_and_store() -> None:
         )
     production = world.bind(two_node_graph())
     assert production.invoke({"log": []}, thread("prod"))["log"][-1] == "sup:SUP v1"
+
+
+def test_preissued_arm_leaves_production_thread_store_and_channel_unchanged() -> None:
+    world = World.create()
+    saver = InMemorySaver()
+    store = InMemoryStore()
+
+    def node(state: LogState, config: RunnableConfig, store: BaseStore) -> LogState:
+        text = prompts_for(config).render_text("planner.instructions")
+        store.put(("seen",), str(config["configurable"]["thread_id"]), {"text": text})
+        return {"log": [text]}
+
+    builder = StateGraph(LogState)
+    builder.add_node("plan", node)
+    builder.add_edge(START, "plan")
+    graph = builder.compile(checkpointer=saver, store=store)
+    production = world.bind(graph)
+    assert production.invoke({"log": []}, thread("prod"))["log"] == ["PLAN v1"]
+    prod = thread("prod")
+
+    def snapshot() -> tuple[Any, ...]:
+        return (
+            [item.config["configurable"]["checkpoint_id"] for item in saver.list(prod)],
+            graph.get_state(prod).values,
+            store.get(("seen",), "prod").value,
+            world.engine.get_channel(AGENT, "production")["generation"],
+            [world.engine.get_release(world.releases[name])["status"] for name in ("v1", "v2")],
+        )
+
+    before = snapshot()
+    binding, bundle = preissued(world, "v2", "extr_cf")
+    arm = bind_langgraph(graph, agent_id=AGENT, binding=binding, resolution=bundle)
+    assert arm.invoke({"log": []}, thread(binding.thread_key))["log"] == ["PLAN v2"]
+    for attempt in (
+        lambda: arm.invoke({"log": []}, prod),
+        lambda: arm.update_state(prod, {"log": ["forked"]}, as_node="plan"),
+    ):
+        with pytest.raises(PromptBindingError) as refused:
+            attempt()
+        assert refused.value.code == "binding_target_mismatch"
+    assert snapshot() == before
+    assert store.get(("seen",), binding.thread_key).value == {"text": "PLAN v2"}
+    assert {item.config["configurable"]["thread_id"] for item in saver.list(None)} == {
+        "prod",
+        binding.thread_key,
+    }

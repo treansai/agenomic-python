@@ -7,12 +7,14 @@ import pytest
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import START, StateGraph
 from langgraph.prebuilt import create_react_agent
+from langgraph.types import Command, interrupt
 from langgraph_world import LogState, World, plan_node, thread, two_node_graph
 
-from agenomic.integrations.langgraph_binding import AgentFactory, managed_prompt
+from agenomic.integrations.langgraph_binding import AgentFactory, managed_prompt, prompts_for
 from agenomic.prompts import PromptBindingError, PromptRenderError
 
 pytestmark = pytest.mark.filterwarnings("ignore::langgraph.warnings.LangGraphDeprecatedSinceV10")
@@ -176,6 +178,44 @@ def test_factory_topology_mismatch() -> None:
     assert checkpointer.value.code == "factory_topology_mismatch"
     with pytest.raises(ValueError):
         AgentFactory(build, max_entries=0)
+
+
+def ask(state: LogState, config: RunnableConfig) -> LogState:
+    before = prompts_for(config).render_text("planner.instructions")
+    answer = interrupt("approve?")
+    return {"log": [f"ask:{answer}:{before}"]}
+
+
+def test_factory_execution_scope_resume_needs_a_built_graph() -> None:
+    world = World.create()
+    saver = InMemorySaver()
+
+    def build(prompts: Any) -> Any:
+        builder = StateGraph(LogState)
+        builder.add_node("plan", plan_node)
+        builder.add_node("ask", ask)
+        builder.add_edge(START, "plan")
+        builder.add_edge("plan", "ask")
+        return builder.compile(checkpointer=saver)
+
+    first = world.bind(AgentFactory(build), pin_scope="execution")
+    paused = first.invoke({"log": []}, thread("E", agenomic_execution_key="req-1"))
+    assert [item.value for item in paused["__interrupt__"]] == ["approve?"]
+    world.promote("v2")
+    restarted = world.bind(AgentFactory(build), pin_scope="execution", client=world.client())
+    posts = len(world.binding_posts())
+    for attempt in (
+        lambda: restarted.invoke(Command(resume="ok"), thread("E")),
+        lambda: restarted.update_state(thread("E"), {"log": ["x"]}, as_node="ask"),
+    ):
+        with pytest.raises(PromptBindingError) as raised:
+            attempt()
+        assert raised.value.code == "prompt_set_unavailable"
+    assert len(world.binding_posts()) == posts
+    fresh = restarted.invoke({"log": []}, thread("F", agenomic_execution_key="req-2"))
+    assert fresh["log"] == ["plan:PLAN v2"]
+    resumed = restarted.invoke(Command(resume="ok"), thread("E"))
+    assert resumed["log"] == ["plan:PLAN v1", "ask:ok:PLAN v1"]
 
 
 def test_factory_async_state_reads_build_from_the_thread_binding() -> None:

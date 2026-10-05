@@ -503,6 +503,13 @@ The adapter raises `PromptBindingError` unless noted. A wrong argument to
   config propagation into nested graphs do not work. The adapter reads only
   the config passed to the node; use Python 3.11 or later for async
   interrupts.
+- An `AgentFactory` bound with `pin_scope="execution"` cannot resume, run a
+  `None` input or update the state of a thread in a process where it has
+  not built a graph yet: the binding id is in a checkpoint, and only a built
+  graph knows the checkpointer. The call raises `prompt_set_unavailable`
+  and never resolves the channel instead. Once any new execution has built
+  a graph, the resume gets its original pin. Use the default thread scope
+  for a factory whose threads must resume after a restart.
 - The SDK cannot promote or roll back. Moving a channel is an approved
   action in Agenomic Cloud; the local engine's `move_channel`, used by the
   examples, simulates it.
