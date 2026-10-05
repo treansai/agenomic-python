@@ -54,6 +54,19 @@ def write(root: Path, rel: str, text: str) -> Path:
     return path
 
 
+def schema_errors(document: dict[str, Any]) -> list[str]:
+    from jsonschema import Draft202012Validator
+    from referencing import Registry, Resource
+
+    documents = [json.loads(path.read_text()) for path in sorted(SCHEMAS.glob("*.json"))]
+    registry = Registry().with_resources(
+        (item["$id"], Resource.from_contents(item)) for item in documents
+    )
+    schema = next(d for d in documents if d["$id"].endswith("prompt-discovery-report.schema.json"))
+    validator = Draft202012Validator(schema, registry=registry)
+    return [f"{e.json_path}: {e.message}" for e in validator.iter_errors(document)]
+
+
 def test_scan_never_imports_or_executes_the_scanned_code(report: dict[str, Any]) -> None:
     before = set(sys.modules)
     again = scan_fixtures()
@@ -68,17 +81,7 @@ def test_scan_never_imports_or_executes_the_scanned_code(report: dict[str, Any])
 
 
 def test_report_matches_the_discovery_schema(report: dict[str, Any]) -> None:
-    from jsonschema import Draft202012Validator
-    from referencing import Registry, Resource
-
-    documents = [json.loads(path.read_text()) for path in sorted(SCHEMAS.glob("*.json"))]
-    registry = Registry().with_resources(
-        (document["$id"], Resource.from_contents(document)) for document in documents
-    )
-    schema = next(d for d in documents if d["$id"].endswith("prompt-discovery-report.schema.json"))
-    validator = Draft202012Validator(schema, registry=registry)
-    errors = [f"{e.json_path}: {e.message}" for e in validator.iter_errors(report)]
-    assert errors == []
+    assert schema_errors(report) == []
     assert report["root"] == {"label": "support-agent", "vcs": None}
     assert report["generated_at"] == "2026-10-05T12:00:00Z"
     assert report["scanner"]["secret_patterns"] == "agenomic-secrets/1"
@@ -344,6 +347,74 @@ def test_skipped_files_carry_a_reason(tmp_path: Path) -> None:
     }
     assert [c["source"]["symbol"] for c in result["candidates"]] == ["A_PROMPT"]
     assert result["root"]["label"] == tmp_path.name
+
+
+def test_a_file_too_deep_to_analyze_is_skipped_not_the_scan(tmp_path: Path) -> None:
+    chain = " + ".join(['"a"'] * 1000)
+    write(tmp_path, "deep_constant.py", f"DEEP_PROMPT = {chain}\n")
+    write(tmp_path, "deep_body.py", f"def build():\n    return {chain}\n")
+    write(
+        tmp_path,
+        "deep_template.py",
+        "from langchain_core.prompts import PromptTemplate\n"
+        f"DEEP = PromptTemplate.from_template({chain})\n",
+    )
+    write(tmp_path, "ok.py", 'OK_PROMPT = "Say {x}."\n')
+    result = scan_paths([tmp_path], root=tmp_path, now=NOW)
+    reasons = {entry["path"]: entry["skip_reason"] for entry in result["files"]}
+    assert reasons == {
+        "deep_body.py": "syntax_error",
+        "deep_constant.py": "syntax_error",
+        "deep_template.py": "syntax_error",
+        "ok.py": None,
+    }
+    assert [c["source"]["path"] for c in result["candidates"]] == ["ok.py"]
+    assert schema_errors(result) == []
+
+
+def test_names_outside_the_report_bounds_are_never_reported(tmp_path: Path) -> None:
+    long_function = "build_" + "x" * 300
+    write(
+        tmp_path,
+        "graph.py",
+        "from langgraph.graph import StateGraph\n"
+        'EMPTY_PROMPT = "Empty {a}."\n'
+        'LONG_PROMPT = "Long {b}."\n'
+        'NUL_PROMPT = "Nul {c}."\n'
+        'NAMED_PROMPT = "Named {d}."\n'
+        "def empty(state):\n    return EMPTY_PROMPT\n"
+        "def long(state):\n    return LONG_PROMPT\n"
+        "def nul(state):\n    return NUL_PROMPT\n"
+        f"def {long_function}(state):\n    return NAMED_PROMPT\n"
+        "g = StateGraph(dict)\n"
+        'g.add_node("", empty)\n'
+        f'g.add_node("{"n" * 257}", long)\n'
+        'g.add_node("a\\x00b", nul)\n'
+        f"g.add_node({long_function})\n",
+    )
+    long_symbol = "A" * 250 + "_PROMPT"
+    write(
+        tmp_path,
+        "names.py",
+        "from langchain_core.prompts import PromptTemplate\n"
+        f'{long_symbol} = "Hello {{x}}."\n'
+        f"def {long_function}():\n"
+        '    return PromptTemplate.from_template("Inside {e}.")\n',
+    )
+    write(tmp_path, "odd\\name.py", 'ODD_PROMPT = "Odd {x}."\n')
+    result = scan_paths([tmp_path], root=tmp_path, now=NOW)
+    assert schema_errors(result) == []
+    assert [entry["path"] for entry in result["files"]] == ["graph.py", "names.py"]
+    for symbol in ("EMPTY_PROMPT", "LONG_PROMPT", "NUL_PROMPT", "NAMED_PROMPT"):
+        item = candidate(result, "graph.py", symbol=symbol)
+        assert item["proposal"]["node_path"] is None
+        assert "node_unresolved" in codes(item)
+    constant = candidate(result, "names.py", construct="python.string_constant")
+    assert constant["source"]["symbol"] is None
+    assert constant["status"] == "supported"
+    inner = candidate(result, "names.py", construct="langchain.prompt_template")
+    assert inner["source"]["enclosing_function"] is None
+    assert inner["status"] == "supported"
 
 
 def test_columns_count_code_points_and_follow_escapes(tmp_path: Path) -> None:

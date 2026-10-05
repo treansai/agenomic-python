@@ -109,6 +109,7 @@ _USAGE_WORDS = frozenset(
 _SLOT_SEGMENT = re.compile(r"[a-z][a-z0-9_]*", re.ASCII)
 _SLOT_PATH = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+", re.ASCII)
 _HEX40 = re.compile(r"[0-9a-f]{40}", re.ASCII)
+_MAX_NAME = 256
 _SIMPLE_ESCAPES = {
     "\\": "\\",
     "'": "'",
@@ -208,6 +209,12 @@ class _Agent:
     rel: str
     drafts: list[_Draft] = field(default_factory=list)
     names: set[Key] = field(default_factory=set)
+
+
+def _bounded(name: Optional[str]) -> Optional[str]:
+    if name is None or not 0 < len(name) <= _MAX_NAME or "\0" in name:
+        return None
+    return name
 
 
 def _kw(call: ast.Call, name: str) -> Optional[ast.expr]:
@@ -486,6 +493,14 @@ class _Scanner:
         self.by_dotted.setdefault(module.dotted, module)
         if module.dotted.startswith("src."):
             self.by_dotted.setdefault(module.dotted[len("src.") :], module)
+
+    def drop(self, module: _Module) -> None:
+        del self.modules[module.rel]
+        self.by_dotted = {
+            key: found for key, found in self.by_dotted.items() if found is not module
+        }
+        self.drafts = [draft for draft in self.drafts if draft.rel != module.rel]
+        self.add_nodes = [entry for entry in self.add_nodes if entry[0] is not module]
 
     def resolve(
         self, module: _Module, name: str, depth: int = 0
@@ -1301,15 +1316,19 @@ class _Scanner:
             node_arg = _arg(call, 0, "node")
             action = _arg(call, 1, "action")
             literal = (
-                node_arg.value
+                _bounded(node_arg.value)
                 if isinstance(node_arg, ast.Constant) and isinstance(node_arg.value, str)
                 else None
             )
             if action is None and isinstance(node_arg, ast.Name):
                 target = module.functions.get(node_arg.id)
                 if target is not None:
+                    name = _bounded(node_arg.id)
                     for draft in self._body(module, target):
-                        draft.node_paths.add(node_arg.id)
+                        if name is None:
+                            draft.node_unresolved = True
+                        else:
+                            draft.node_paths.add(name)
                 continue
             if isinstance(action, ast.Name):
                 local = module.functions.get(action.id)
@@ -1455,8 +1474,8 @@ class _Report:
             "column": draft.start[1],
             "end_line": draft.end[0],
             "end_column": draft.end[1],
-            "symbol": draft.symbol,
-            "enclosing_function": draft.function,
+            "symbol": _bounded(draft.symbol),
+            "enclosing_function": _bounded(draft.function),
         }
         identity = {
             "path": draft.rel,
@@ -1594,7 +1613,7 @@ def _collect(
             raise ValueError("every scanned path must be inside root")
         if start.is_file():
             rel = _relative(start, root)
-            if rel is not None and start.suffix == ".py":
+            if rel is not None and "\\" not in rel and start.suffix == ".py":
                 found[rel] = start
             continue
         for directory, dirnames, filenames in os.walk(start, followlinks=False):
@@ -1610,7 +1629,7 @@ def _collect(
                     if _relative(resolved, root) is None or not resolved.is_file():
                         continue
                 rel = _relative(Path(directory).resolve() / filename, root)
-                if rel is not None:
+                if rel is not None and "\\" not in rel:
                     found[rel] = candidate
     return sorted(found.items())
 
@@ -1670,6 +1689,7 @@ def scan_paths(
     base = Path(root).resolve()
     scanner = _Scanner()
     files: list[dict[str, Any]] = []
+    records: dict[str, dict[str, Any]] = {}
     for index, (rel, path) in enumerate(_collect(paths, base, exclude)):
         if _excluded(rel, exclude):
             files.append(_file_record(rel, _hash_file(path), "excluded"))
@@ -1687,15 +1707,23 @@ def scan_paths(
             files.append(_file_record(rel, digest, "not_utf8"))
             continue
         tree = _parse(text, rel)
-        if tree is None:
+        try:
+            module = _Module(rel, text, tree) if tree is not None else None
+        except RecursionError:
+            module = None
+        if module is None:
             files.append(_file_record(rel, digest, "syntax_error"))
             continue
-        scanner.register(_Module(rel, text, tree))
-        files.append(_file_record(rel, digest, None))
-    for module in scanner.modules.values():
-        scanner.walk(module)
-    for module in scanner.modules.values():
-        scanner.constants(module)
+        scanner.register(module)
+        records[rel] = _file_record(rel, digest, None)
+        files.append(records[rel])
+    for step in (scanner.walk, scanner.constants):
+        for module in list(scanner.modules.values()):
+            try:
+                step(module)
+            except RecursionError:
+                scanner.drop(module)
+                records[module.rel].update(status="skipped", skip_reason="syntax_error")
     scanner.drafts = [
         draft for draft in scanner.drafts if draft.key is None or draft.key not in scanner.consumed
     ]

@@ -319,9 +319,18 @@ rule of the engineering rules above.
   argument-less `strip`, `lstrip` and `rstrip` are applied to literals because
   they are pure. Sources are decoded with PEP 263 and universal newlines, so a
   literal equals its runtime value; a file that does not decode is skipped as
-  `not_utf8`, one that does not parse as `syntax_error`. Excluded directory
+  `not_utf8`, one that does not parse as `syntax_error`. A file whose syntax
+  tree is too deep to analyze within the recursion limit (hundreds of literals
+  joined with `+`) is also `syntax_error`, the reason `ast.parse` gives for the
+  same failure, so one file never aborts a scan. Excluded directory
   names are pruned without being listed; a file that matches an exclude
   pattern is listed as `excluded`. Symlinks that leave the root are ignored.
+- Everything the scanner reports fits the SPEC report schema, because the
+  registry refuses a whole report when one member does not: a file whose
+  relative path holds a backslash is left out, a node name that is empty,
+  longer than 256 code points or holds a NUL is treated like a dynamic node
+  name (`node_unresolved`), and a longer symbol or enclosing function is
+  reported as `null`.
 - Names are resolved only through explicit imports: a LangChain or LangGraph
   class or function counts when it was imported from a `langchain*` or
   `langgraph` module, and a constant of another scanned file counts when it
