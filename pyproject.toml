@@ -79,6 +79,9 @@ ignore = ["E501", "UP045", "UP007", "UP035", "B008"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PT011", "B017"]
+# Vault errors name the outcome (VaultApprovalRequired, VaultOutcomeUnknown), as ToolCallDenied does.
+"src/agenomic/vault/errors.py" = ["N818"]
+"src/agenomic/vault/sensitive.py" = ["N818"]
 
 [tool.mypy]
 python_version = "3.10"
