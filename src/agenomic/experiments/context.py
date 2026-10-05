@@ -42,6 +42,7 @@ class TrialContext:
         "checkpointer",
         "experiment_id",
         "level",
+        "live_allowed",
         "resource_suffix",
         "secrets",
         "seed",
@@ -62,6 +63,7 @@ class TrialContext:
         store: Any,
         secrets: SecretValues,
         state: TrialState,
+        live_allowed: bool = False,
     ) -> None:
         self.view = view
         self.agent_id = agent_id
@@ -76,6 +78,7 @@ class TrialContext:
         self.resource_suffix = view.isolation.resource_suffix
         self.store_namespace: tuple[str, ...] = tuple(view.isolation.store_namespace)
         self.tool_mode = view.tools.mode
+        self.live_allowed = live_allowed
         self.checkpointer = checkpointer
         self.store = store
         self.secrets = secrets

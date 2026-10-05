@@ -54,8 +54,9 @@ from agenomic.experiments import (
     classify,
 )
 from agenomic.experiments.context import TrialState
-from agenomic.experiments.errors import error_code
+from agenomic.experiments.errors import RunnerConfigurationError, error_code
 from agenomic.experiments.isolation import NamespacedStore, jsonable
+from agenomic.experiments.models import TrialAssignment
 from agenomic.experiments.runner import (
     CallableEntryPoint,
     ExperimentRunner,
@@ -1624,3 +1625,171 @@ def test_live_tool_unreportable_value_reported_once_and_fails_trial(
         "runner_configuration",
         "output_not_serializable",
     )
+
+
+def gated_refund_factory(executed: list[str], path: str) -> Any:
+    @tool(description="Issue a refund.")
+    def refund(order_id: str) -> str:
+        executed.append(order_id)
+        return f"refunded {order_id}"
+
+    call_g = tool_call(name="refund", args={"order_id": "5"}, id="call_g")
+
+    def factory(ctx: TrialContext) -> Any:
+        tools = ctx.wrap_tools([refund])
+        builder = StateGraph(GraphState)
+        if path == "tool_node":
+            replies = iter([[call_g]])
+
+            def agent(state: dict[str, Any]) -> dict[str, Any]:
+                return {"messages": [AIMessage(content="", tool_calls=next(replies, []))]}
+
+            builder.add_node("agent", agent)
+            builder.add_node("tools", ToolNode(tools, handle_tool_errors=True))
+            builder.add_edge(START, "agent")
+            builder.add_conditional_edges("agent", tools_condition)
+            builder.add_edge("tools", "agent")
+        elif path == "sync_invoke":
+
+            def node(state: dict[str, Any]) -> dict[str, Any]:
+                try:
+                    return {"log": [str(tools[0].invoke(call_g).content)]}
+                except Exception as error:
+                    return {"log": [type(error).__name__]}
+
+            builder.add_node("plan", node)
+            builder.add_edge(START, "plan")
+        else:
+
+            async def anode(state: dict[str, Any]) -> dict[str, Any]:
+                try:
+                    return {"log": [str((await tools[0].ainvoke(call_g)).content)]}
+                except Exception as error:
+                    return {"log": [type(error).__name__]}
+
+            builder.add_node("plan", anode)
+            builder.add_edge(START, "plan")
+        return builder.compile(checkpointer=ctx.checkpointer, store=ctx.store)
+
+    return factory
+
+
+@pytest.mark.parametrize("path", ["tool_node", "sync_invoke", "async_invoke"])
+@pytest.mark.parametrize("mode", ["mock", "recorded"])
+def test_authorized_answer_for_simulated_trial_never_runs_the_tool(
+    server: FakeRunnerServer, mode: str, path: str
+) -> None:
+    executed: list[str] = []
+    trial = server.add_trial("v1", agent_case(), tools={"mode": mode})
+    server.answer_as = "live"
+    runner = make_runner(server, gated_refund_factory(executed, path), live_tools=True)
+    assert serve(runner) == 1
+    assert executed == []
+    assert any(path.endswith("/tool-calls") for path in server.paths())
+    assert not any(path.endswith("/report") for path in server.paths())
+    assert server.trials[trial].result is None
+    failure = server.trials[trial].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "runner_configuration",
+        "live_tools_disabled",
+    )
+
+
+def test_live_assignment_refused_without_live_tools(server: FakeRunnerServer) -> None:
+    built: list[str] = []
+    executed: list[str] = []
+    inner = gated_refund_factory(executed, "async_invoke")
+
+    def factory(ctx: TrialContext) -> Any:
+        built.append(ctx.trial_id)
+        return inner(ctx)
+
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "live"})
+    runner = make_runner(server, factory)
+    assert serve(runner) == 1
+    assert built == []
+    assert executed == []
+    assert not any(path.endswith("/tool-calls") for path in server.paths())
+    assert server.trials[trial].result is None
+    failure = server.trials[trial].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "runner_configuration",
+        "tool_mode_unavailable",
+    )
+    assert runner._workspace_id is None
+
+
+@pytest.mark.parametrize("path", ["tool_node", "sync_invoke", "async_invoke"])
+def test_live_trial_with_live_tools_runs_the_tool(server: FakeRunnerServer, path: str) -> None:
+    executed: list[str] = []
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "live"})
+    runner = make_runner(server, gated_refund_factory(executed, path), live_tools=True)
+    assert serve(runner) == 1
+    assert executed == ["5"]
+    reports = [json.loads(r.content) for r in server.requests if r.url.path.endswith("/report")]
+    assert [(item["value"], item["is_error"]) for item in reports] == [("refunded 5", False)]
+    assert server.trials[trial].result["outcome"] == "evaluated"
+
+
+class AuthorizingProxy:
+    def __init__(self) -> None:
+        self.reports: list[dict[str, Any]] = []
+
+    def call(self, body: Any) -> dict[str, Any]:
+        return {"status": "authorized", "record_id": "rec_1", "permit": {}, "decision": {}}
+
+    async def acall(self, body: Any) -> dict[str, Any]:
+        return self.call(body)
+
+    def report(self, logical_call_id: str, body: Any) -> dict[str, Any]:
+        self.reports.append(dict(body))
+        return {"recorded": True}
+
+    async def areport(self, logical_call_id: str, body: Any) -> dict[str, Any]:
+        return self.report(logical_call_id, body)
+
+
+@pytest.mark.parametrize("live_allowed", [False, True])
+def test_live_gate_needs_live_mode_and_local_opt_in(world: World, live_allowed: bool) -> None:
+    raw = local_assignment(
+        world.engine,
+        agent_id=AGENT,
+        release_id=world.releases["v1"],
+        case=agent_case(),
+        tools={"mode": "live"},
+    )
+    assignment = TrialAssignment.model_validate(raw)
+    proxy = AuthorizingProxy()
+    state = TrialState(proxy=proxy, lease_token=assignment.lease_token, literals=[])
+    context = TrialContext(
+        view=assignment.view,
+        agent_id=AGENT,
+        checkpointer=InMemorySaver(),
+        store=InMemoryStore(),
+        secrets=SecretValues(),
+        state=state,
+        **({"live_allowed": True} if live_allowed else {}),
+    )
+    executed: list[str] = []
+
+    @tool(description="Issue a refund.")
+    def refund(order_id: str) -> str:
+        executed.append(order_id)
+        return f"refunded {order_id}"
+
+    proxied = context.wrap_tools([refund])[0]
+    if live_allowed:
+        assert proxied.invoke({"order_id": "1"}) == "refunded 1"
+        assert asyncio.run(proxied.ainvoke({"order_id": "2"})) == "refunded 2"
+        assert executed == ["1", "2"]
+        assert len(proxy.reports) == 2
+        assert state.terminal is None
+        return
+    with pytest.raises(RunnerConfigurationError) as sync_refused:
+        proxied.invoke({"order_id": "1"})
+    with pytest.raises(RunnerConfigurationError) as async_refused:
+        asyncio.run(proxied.ainvoke({"order_id": "2"}))
+    assert sync_refused.value.code == async_refused.value.code == "live_tools_disabled"
+    assert executed == []
+    assert proxy.reports == []
+    assert state.terminal is sync_refused.value

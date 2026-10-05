@@ -577,6 +577,12 @@ class ExperimentRunner:
             raise RunnerConfigurationError(
                 "runtime_digest_mismatch", "the arm needs another runtime than this runner serves"
             )
+        if view.tools.mode not in target.tool_modes():
+            raise RunnerConfigurationError(
+                "tool_mode_unavailable",
+                "this runner does not serve the trial's tool mode",
+                tool_mode=view.tools.mode,
+            )
         expected_key = f"exp:{view.experiment_id}:{view.trial_id}:a{view.attempt}"
         experiment = binding.experiment or {}
         if (
@@ -641,6 +647,7 @@ class ExperimentRunner:
             store=store,
             secrets=secrets,
             state=state,
+            live_allowed="live" in target.tool_modes(),
         )
         if isinstance(view.case.input, Mapping):
             seed_store(store, context.store_namespace, view.case.input.get("store_seed"))

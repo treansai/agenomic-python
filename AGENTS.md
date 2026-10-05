@@ -772,6 +772,19 @@ rule of the engineering rules above.
   as JSON is reported as an error placeholder and ends the trial with
   `output_not_serializable`, otherwise a retried node would run the effect
   again while the server counts the call as indeterminate.
+- Live tools are gated on the runner, never by the server's answer alone. An
+  assignment whose `view.tools.mode` is not in `GraphTarget.tool_modes()`
+  (live without `live_tools=True`) is
+  `failure(runner_configuration, tool_mode_unavailable)` before the
+  workspace is pinned, secrets resolve or the factory runs. `TrialContext`
+  carries `live_allowed` (default `False`, set from the same
+  `tool_modes()`), and the proxied tool runs the inner tool on `authorized`
+  only when the trial mode is `live` and `live_allowed` is true. Otherwise
+  the trial ends with `live_tools_disabled`, marked terminal so a swallowed
+  exception cannot hide it, and nothing is reported for that call: it never
+  ran, so the server keeps it as indeterminate. A misconfigured or
+  compromised server, or a replayed permit, thus cannot cause a side effect
+  on a runner that did not opt in, nor in a mock or recorded trial.
 - A result is built once, redacted (the key rules of
   `DEFAULT_RUNNER_REDACTION_RULES`, then every resolved secret value), and
   frozen in an outbox keyed by `uuid5(trial, attempt, lease token)`; retries

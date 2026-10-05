@@ -158,6 +158,7 @@ class FakeRunnerServer:
         self.on_claim: Optional[Callable[[FakeTrial], None]] = None
         self.drop_tool_call_responses = 0
         self.drop_report_responses = 0
+        self.answer_as: Optional[str] = None
         self.fail_hellos = 0
         self.demand_hello = 0
         self.require_hello = True
@@ -299,7 +300,7 @@ class FakeRunnerServer:
                     },
                 )
             return httpx.Response(200, json={**record.response, "replayed": True})
-        response = self._answer(trial, mode, str(body["tool"]), body["arguments"])
+        response = self._answer(trial, self.answer_as or mode, str(body["tool"]), body["arguments"])
         self.tool_records[key] = ToolRecord(str(body["tool"]), body["arguments"], response)
         if self.drop_tool_call_responses > 0:
             self.drop_tool_call_responses -= 1

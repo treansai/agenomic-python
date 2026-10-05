@@ -205,6 +205,13 @@ class _ProxiedTool(BaseTool):
         if status == "recorded_fixture_ambiguous":
             raise self._fail(RecordedFixtureAmbiguous(self.name))
         if status == "authorized":
+            if self._context.tool_mode != "live" or self._context.live_allowed is not True:
+                raise self._fail(
+                    RunnerConfigurationError(
+                        "live_tools_disabled",
+                        "the server authorized a live call, but this trial may not run live tools",
+                    )
+                )
             return "authorized", response
         raise self._fail(
             InfrastructureError("invalid_response", f"unknown tool call status {status!r}")
