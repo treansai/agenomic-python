@@ -4,7 +4,7 @@ import asyncio
 import json
 import operator
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, Optional
@@ -15,6 +15,7 @@ from langchain_core.outputs import ChatGenerationChunk
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import START, StateGraph
+from langgraph.types import interrupt
 from prompt_fakes import AGENT, CHILD, WORKSPACE, FakePromptServer, chat_content, text_content
 from typing_extensions import TypedDict
 
@@ -167,6 +168,32 @@ def two_node_graph(checkpointer: Any = None) -> Any:
     return builder.compile(
         checkpointer=checkpointer if checkpointer is not None else InMemorySaver()
     )
+
+
+def captured_build(saver: Any, built: list[str]) -> Callable[[Any], Any]:
+    def build(prompts: Any) -> Any:
+        built.append(prompts.prompt_manifest_digest)
+        text = prompts.version("planner.instructions").render_text({})
+
+        def plan(state: LogState) -> LogState:
+            return {"log": [f"plan:{text}"]}
+
+        def ask(state: LogState) -> LogState:
+            return {"log": [f"ask:{interrupt('approve?')}:{text}"]}
+
+        def finish(state: LogState) -> LogState:
+            return {"log": [f"finish:{text}"]}
+
+        builder = StateGraph(LogState)
+        builder.add_node("plan", plan)
+        builder.add_node("ask", ask)
+        builder.add_node("finish", finish)
+        builder.add_edge(START, "plan")
+        builder.add_edge("plan", "ask")
+        builder.add_edge("ask", "finish")
+        return builder.compile(checkpointer=saver)
+
+    return build
 
 
 def thread(thread_id: str, **configurable: Any) -> RunnableConfig:

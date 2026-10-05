@@ -263,9 +263,10 @@ managed = bind_langgraph(
   cached goes on with it and a new thread fails with `registry_unavailable`
   ([Registry outages](prompts.md#registry-outages)).
 - The thread id is hashed with the workspace before it leaves the process.
-- Binding with a key that has every scope, `write` or `admin` raises
+- A key that has every scope, `write` or `admin` raises
   `privileged_credential` unless you pass `allow_privileged_credential=True`.
-  Run agents with a `read` key.
+  Run agents with a `read` key. When this is checked is described under
+  [Credential check and registry outages](#credential-check-and-registry-outages).
 - Checkpoint and callback metadata carry the pin as plain values
   (`agenomic_binding_id`, `agenomic_prompt_manifest_digest`,
   `agenomic_agent_id`, `agenomic_release_id`, `agenomic_genome_version`),
@@ -308,6 +309,36 @@ passes to a node with a `config: RunnableConfig` parameter. It does no I/O.
   checkpoint (`execution_binding_unrecoverable` when there is none).
   `managed.with_retry(...)` sets one key per input, so every attempt shares
   one binding.
+
+### Credential check and registry outages
+
+Online, the proxy reads the credential's scopes from `GET /v1/whoami`,
+which each client asks once and then remembers.
+
+- At bind time, when the registry answers, a privileged key raises
+  `privileged_credential` at once.
+- When the registry is unavailable at bind time, `bind_langgraph` returns
+  the proxy only if the client has a `workspace_id`, since cache entries are
+  keyed by workspace; otherwise it raises `registry_unavailable`. The
+  credential check is then pending.
+- While the check is pending, every admission asks `GET /v1/whoami` first,
+  with the usual retries: before a binding request, before a binding read,
+  and before a cached binding is used with `revalidate="never"`. When the
+  registry answers, a privileged key raises `privileged_credential` before
+  any binding request is sent. A 401, 403 or 404 is raised, and when the
+  call names a thread key (a thread binding, a new execution, or
+  `revalidate="never"`) it also evicts that thread's cached binding.
+- While the registry is unavailable, the proxy sends no binding request. A
+  thread whose binding is cached with the same scope and target resumes on
+  it after its cached closure is verified again; one WARNING is logged on
+  `agenomic.prompts` and `registry_outage_cached_binding_total` increments.
+  Any other thread raises `registry_unavailable` before a node runs. No
+  channel is resolved and nothing falls back to the latest release.
+- A restarted process finds a thread's binding only in a disk cache: set
+  `AGENOMIC_PROMPT_CACHE_DIR` (or pass `prompt_cache=PromptCache(directory)`
+  to the `Client`) together with `workspace_id`.
+- An execution-scope resume reads its binding by id, which the cache does
+  not index, so it raises `registry_unavailable` during an outage.
 
 ### Subagents
 
@@ -399,6 +430,11 @@ factory.invoke(
   checkpointer object as the first, so threads can move between them
   (`factory_topology_mismatch` otherwise). `build` receives the pinned set,
   which has the same `version(slot)` reader.
+- With `pin_scope="execution"`, pass the saver your graphs are compiled
+  with: `AgentFactory(build, checkpointer=saver)`. A resume, a `None` input
+  or a state update reads the binding from the thread's checkpoint, and a
+  restarted process has built no graph yet to read it with. Every graph
+  the factory builds must then use that object.
 - `create_react_agent` is deprecated in LangGraph 1.x and warns with
   `LangGraphDeprecatedSinceV10`, but works. `langchain.agents.create_agent`
   and its middleware are not supported.
@@ -484,8 +520,9 @@ The adapter raises `PromptBindingError` unless noted. A wrong argument to
   set, or one that disagrees with the pin values of the config.
 - `prompt_set_unavailable`: the config carries the pin values but not the
   pinned set (a config rebuilt from checkpoint metadata or a stream chunk,
-  or one that crossed a process boundary), or a graph built by an
-  `AgentFactory` is asked for its graph before one was built.
+  or one that crossed a process boundary), or an `AgentFactory` proxy is
+  asked for its graph before it built one, or, without `checkpointer`, to
+  resume or read an execution-scope thread.
 - `child_agent_not_pinned` and `slot_not_in_manifest`: the agent or the slot
   is not in the pinned release.
 - `nested_bind_unsupported`, `factory_topology_mismatch`,
@@ -503,13 +540,14 @@ The adapter raises `PromptBindingError` unless noted. A wrong argument to
   config propagation into nested graphs do not work. The adapter reads only
   the config passed to the node; use Python 3.11 or later for async
   interrupts.
-- An `AgentFactory` bound with `pin_scope="execution"` cannot resume, run a
-  `None` input or update the state of a thread in a process where it has
-  not built a graph yet: the binding id is in a checkpoint, and only a built
-  graph knows the checkpointer. The call raises `prompt_set_unavailable`
-  and never resolves the channel instead. Once any new execution has built
-  a graph, the resume gets its original pin. Use the default thread scope
-  for a factory whose threads must resume after a restart.
+- An `AgentFactory` bound with `pin_scope="execution"` and no
+  `checkpointer` cannot resume, run a `None` input, update or read the
+  state of a thread in a process where it has not built a graph yet. The
+  call raises `prompt_set_unavailable` and never resolves the channel
+  instead. Pass `AgentFactory(build, checkpointer=saver)`.
+- During a registry outage, only threads whose binding is in the cache go
+  on, and an execution-scope resume does not (see
+  [Credential check and registry outages](#credential-check-and-registry-outages)).
 - The SDK cannot promote or roll back. Moving a channel is an approved
   action in Agenomic Cloud; the local engine's `move_channel`, used by the
   examples, simulates it.

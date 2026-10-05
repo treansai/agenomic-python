@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -12,7 +13,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import START, StateGraph
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import Command, interrupt
-from langgraph_world import LogState, World, plan_node, thread, two_node_graph
+from langgraph_world import LogState, World, captured_build, plan_node, thread, two_node_graph
 
 from agenomic.integrations.langgraph_binding import AgentFactory, managed_prompt, prompts_for
 from agenomic.prompts import PromptBindingError, PromptRenderError
@@ -211,11 +212,88 @@ def test_factory_execution_scope_resume_needs_a_built_graph() -> None:
         with pytest.raises(PromptBindingError) as raised:
             attempt()
         assert raised.value.code == "prompt_set_unavailable"
+        assert "AgentFactory(build, checkpointer=" in raised.value.message
+    with pytest.raises(PromptBindingError) as state_read:
+        asyncio.run(restarted.aget_state(thread("E")))
+    assert "AgentFactory(build, checkpointer=" in state_read.value.message
     assert len(world.binding_posts()) == posts
     fresh = restarted.invoke({"log": []}, thread("F", agenomic_execution_key="req-2"))
     assert fresh["log"] == ["plan:PLAN v2"]
     resumed = restarted.invoke(Command(resume="ok"), thread("E"))
     assert resumed["log"] == ["plan:PLAN v1", "ask:ok:PLAN v1"]
+
+
+def test_factory_execution_scope_resume_after_simulated_restart() -> None:
+    world = World.create()
+    saver = InMemorySaver()
+    first = world.bind(
+        AgentFactory(captured_build(saver, []), checkpointer=saver), pin_scope="execution"
+    )
+    for thread_id, key in (("E", "req-1"), ("U", "req-2"), ("S", "req-3"), ("A", "req-4")):
+        paused = first.invoke({"log": []}, thread(thread_id, agenomic_execution_key=key))
+        assert [item.value for item in paused["__interrupt__"]] == ["approve?"]
+    first.update_state(thread("S"), {"log": ["approved"]}, as_node="ask")
+    world.promote("v2")
+    v1 = world.engine.get_release(world.releases["v1"])["prompt_manifest_digest"]
+    v2 = world.engine.get_release(world.releases["v2"])["prompt_manifest_digest"]
+    posts = len(world.binding_posts())
+    built: list[str] = []
+
+    def restarted() -> Any:
+        return world.bind(
+            AgentFactory(captured_build(saver, built), checkpointer=saver),
+            pin_scope="execution",
+            client=world.client(),
+        )
+
+    assert restarted().invoke(Command(resume="ok"), thread("E"))["log"] == [
+        "plan:PLAN v1",
+        "ask:ok:PLAN v1",
+        "finish:PLAN v1",
+    ]
+    updater = restarted()
+    stamped = updater.update_state(thread("U"), {"log": ["edit"]}, as_node="ask")
+    assert updater.get_state(stamped).metadata["agenomic_prompt_manifest_digest"] == v1
+    assert updater.invoke(None, thread("U"))["log"][-1] == "finish:PLAN v1"
+    assert restarted().invoke(None, thread("S"))["log"] == [
+        "plan:PLAN v1",
+        "approved",
+        "finish:PLAN v1",
+    ]
+    assert restarted().get_state(thread("E")).values["log"][-1] == "finish:PLAN v1"
+
+    async def reads() -> tuple[Any, Any]:
+        snapshot = await restarted().aget_state(thread("A"))
+        updated = await restarted().aupdate_state(thread("A"), {"log": ["late"]}, as_node="ask")
+        return snapshot, updated
+
+    snapshot, updated = asyncio.run(reads())
+    assert snapshot.next == ("ask",)
+    assert saver.get_tuple(updated).metadata["agenomic_prompt_manifest_digest"] == v1
+    assert set(built) == {v1}
+    assert len(world.binding_posts()) == posts
+    assert not any(path.endswith("/resolve") for path in world.server.paths())
+    fresh = restarted()
+    fresh.invoke({"log": []}, thread("N", agenomic_execution_key="req-9"))
+    assert fresh.get_state(thread("N")).values["log"] == ["plan:PLAN v2"]
+    assert built[-1] == v2
+    with pytest.raises(PromptBindingError) as unrecoverable:
+        restarted().invoke(None, thread("never-ran"))
+    assert unrecoverable.value.code == "execution_binding_unrecoverable"
+
+
+def test_factory_declared_checkpointer_is_the_only_one() -> None:
+    world = World.create()
+    saver = InMemorySaver()
+    other = world.bind(
+        AgentFactory(captured_build(saver, []), checkpointer=InMemorySaver()),
+        pin_scope="execution",
+    )
+    with pytest.raises(PromptBindingError) as mismatch:
+        other.invoke({"log": []}, thread("M", agenomic_execution_key="req-1"))
+    assert mismatch.value.code == "factory_topology_mismatch"
+    with pytest.raises(TypeError):
+        AgentFactory(captured_build(saver, []), checkpointer=cast(Any, True))
 
 
 def test_factory_async_state_reads_build_from_the_thread_binding() -> None:

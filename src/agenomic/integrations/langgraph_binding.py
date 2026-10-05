@@ -34,6 +34,7 @@ from agenomic.prompts.authority import (
     CloudBindingAuthority,
     LocalBindingAuthority,
     bundle_from_closure,
+    refuse_privileged_credential,
 )
 from agenomic.prompts.bundle import BundleTrust, PromptBundle
 from agenomic.prompts.cache import PromptCache
@@ -41,6 +42,7 @@ from agenomic.prompts.digest import prompt_digest
 from agenomic.prompts.errors import (
     PromptIntegrityError,
     PromptRefError,
+    RegistryUnavailableError,
     api_error,
     binding_error,
     integrity_error,
@@ -98,6 +100,10 @@ LOCAL_BINDING_SCHEMA = "agenomic.local_execution_binding/v1"
 _NODE_PREFIX = re.compile(r"[A-Za-z0-9_-]+(?:\|[A-Za-z0-9_-]+)*", re.ASCII)
 _CHECKPOINT_MODES = frozenset({"checkpoints", "debug"})
 _MAX_PINNED_SETS = 1024
+_FACTORY_SAVER_HINT = (
+    "the agent factory has built no graph yet, so it cannot read the checkpoint that names "
+    "this execution's binding; pass AgentFactory(build, checkpointer=saver)"
+)
 
 Scope = Literal["thread", "execution"]
 BindingResult = tuple[ExecutionBinding, PromptBundle, bool]
@@ -797,21 +803,39 @@ def _factory_key(prompts: FactoryInput) -> tuple[str, str, str, str]:
     )
 
 
+def _topology_mismatch() -> ApiError:
+    return binding_error(
+        "factory_topology_mismatch",
+        "the agent factory built a graph with other nodes or another checkpointer, so "
+        "threads could not move between its graphs",
+    )
+
+
 class AgentFactory:
     def __init__(
         self,
         build: Callable[[FactoryInput], PregelProtocol[Any, Any, Any, Any]],
         *,
+        checkpointer: Optional[BaseCheckpointSaver[Any]] = None,
         max_entries: int = 32,
     ) -> None:
         if max_entries < 1:
             raise ValueError("max_entries must be positive")
+        if checkpointer is not None and not isinstance(checkpointer, BaseCheckpointSaver):
+            raise TypeError(
+                "checkpointer must be the checkpointer of every graph the factory builds"
+            )
         self._build = build
+        self._checkpointer = checkpointer
         self._max_entries = max_entries
         self._lock = threading.Lock()
         self._graphs: OrderedDict[tuple[str, str, str, str], Any] = OrderedDict()
         self._building: dict[tuple[str, str, str, str], threading.Lock] = {}
         self._reference: Optional[Any] = None
+
+    @property
+    def checkpointer(self) -> Optional[BaseCheckpointSaver[Any]]:
+        return self._checkpointer
 
     @property
     def reference(self) -> Optional[PregelProtocol[Any, Any, Any, Any]]:
@@ -826,6 +850,8 @@ class AgentFactory:
             return graph
 
     def _check_topology(self, graph: Any) -> None:
+        if self._checkpointer is not None and _saver(graph) is not self._checkpointer:
+            raise _topology_mismatch()
         reference = self._reference
         if reference is None:
             return
@@ -835,11 +861,7 @@ class AgentFactory:
             set(nodes) == set(expected) if nodes is not None and expected is not None else True
         )
         if not same_nodes or _saver(graph) is not _saver(reference):
-            raise binding_error(
-                "factory_topology_mismatch",
-                "the agent factory built a graph with other nodes or another checkpointer, so "
-                "threads could not move between its graphs",
-            )
+            raise _topology_mismatch()
 
     def get(self, prompts: FactoryInput) -> PregelProtocol[Any, Any, Any, Any]:
         key = _factory_key(prompts)
@@ -1079,6 +1101,14 @@ class _Binder:
             return None
         return binding, bundle_from_closure(binding, closure)
 
+    def confirm(self, thread_key_value: str) -> None:
+        if isinstance(self.authority, CloudBindingAuthority):
+            self.authority.confirm_credential(self.agent_id, thread_key_value)
+
+    async def aconfirm(self, thread_key_value: str) -> None:
+        if isinstance(self.authority, CloudBindingAuthority):
+            await self.authority.aconfirm_credential(self.agent_id, thread_key_value)
+
     def store(self, binding: ExecutionBinding, bundle: PromptBundle) -> None:
         self.cache.put_binding(self.workspace_id, binding)
         self.cache.put_closure(self.workspace_id, bundle.closure())
@@ -1211,6 +1241,15 @@ class ManagedGraph(PregelProtocol[Any, Any, Any, Any]):
             )
         return self._apply(reference)
 
+    def _checkpoint_saver(self) -> Optional[BaseCheckpointSaver[Any]]:
+        if self._factory is None:
+            return _saver(self._inner)
+        if self._factory.checkpointer is not None:
+            return self._factory.checkpointer
+        if self._factory.reference is None:
+            raise _prompt_set_unavailable(_FACTORY_SAVER_HINT)
+        return _saver(self._any_graph())
+
     def _admission(
         self, input: Any, config: Optional[RunnableConfig], *, state_update: bool
     ) -> Generator[_Effect, Any, _Admitted]:
@@ -1257,7 +1296,7 @@ class ManagedGraph(PregelProtocol[Any, Any, Any, Any]):
                 )
             key = binder.key("thread", thread_id)
         elif thread_id is not None and (state_update or _is_resume(input)):
-            saver = _saver(self._any_graph())
+            saver = self._checkpoint_saver()
             location: dict[str, Any] = {"thread_id": thread_id, "checkpoint_ns": ""}
             if located.get("checkpoint_id") is not None:
                 location["checkpoint_id"] = located["checkpoint_id"]
@@ -1340,7 +1379,10 @@ class ManagedGraph(PregelProtocol[Any, Any, Any, Any]):
             found = effect[1].get_tuple({"configurable": effect[2]})
             return None if found is None else found.metadata
         if kind == "cached":
-            return binder.cached(effect[1])
+            found = binder.cached(effect[1])
+            if found is not None:
+                binder.confirm(effect[1])
+            return found
         binder.store(effect[1], effect[2])
         return None
 
@@ -1363,7 +1405,10 @@ class ManagedGraph(PregelProtocol[Any, Any, Any, Any]):
             found = await effect[1].aget_tuple({"configurable": effect[2]})
             return None if found is None else found.metadata
         if kind == "cached":
-            return await binder.acached(effect[1])
+            found = await binder.acached(effect[1])
+            if found is not None:
+                await binder.aconfirm(effect[1])
+            return found
         await binder.astore(effect[1], effect[2])
         return None
 
@@ -1530,21 +1575,15 @@ class ManagedGraph(PregelProtocol[Any, Any, Any, Any]):
     def _state_graph(self, config: RunnableConfig) -> Any:
         if self._factory is None or self._factory.reference is not None:
             return self._any_graph()
-        if self._binder.pin_scope != "thread":
-            raise _prompt_set_unavailable(
-                "the agent factory has built no graph yet and an execution-scope thread names no "
-                "binding before its checkpoint is read"
-            )
+        if self._binder.pin_scope != "thread" and self._factory.checkpointer is None:
+            raise _prompt_set_unavailable(_FACTORY_SAVER_HINT)
         return self._admit(None, config, state_update=True).graph
 
     async def _astate_graph(self, config: RunnableConfig) -> Any:
         if self._factory is None or self._factory.reference is not None:
             return self._any_graph()
-        if self._binder.pin_scope != "thread":
-            raise _prompt_set_unavailable(
-                "the agent factory has built no graph yet and an execution-scope thread names no "
-                "binding before its checkpoint is read"
-            )
+        if self._binder.pin_scope != "thread" and self._factory.checkpointer is None:
+            raise _prompt_set_unavailable(_FACTORY_SAVER_HINT)
         return (await self._aadmit(None, config, state_update=True)).graph
 
     @override
@@ -1782,18 +1821,19 @@ def _check_child_selectors(
 
 
 def _check_privileged(client: Client, allow: bool) -> None:
-    identity = client.whoami()
-    scopes = identity.get("api_key_scopes")
-    privileged = (
-        not isinstance(scopes, list) or not scopes or bool({"write", "admin"} & set(scopes))
-    )
-    if privileged and not allow:
-        raise binding_error(
-            "privileged_credential",
-            "this credential can publish or administer; execute with a read key, or pass "
-            "allow_privileged_credential=True",
-            api_key_scopes=scopes,
-        )
+    try:
+        identity = client.whoami()
+    except RegistryUnavailableError as outage:
+        if client.workspace_id is not None:
+            return
+        raise RegistryUnavailableError(
+            "registry_unavailable",
+            outage.status,
+            "the registry is unavailable and the client has no workspace_id; set workspace_id "
+            "(AGENOMIC_WORKSPACE_ID) to bind during an outage and resume cached threads",
+            outage.details,
+        ) from outage
+    refuse_privileged_credential(identity, allow)
 
 
 def _online_authority(
@@ -1808,7 +1848,10 @@ def _online_authority(
         _check_privileged(client, allow_privileged_credential)
         known = client.workspace_id
         authority: BindingAuthority = CloudBindingAuthority(
-            client, cache=cache, runtime_client=_runtime_client()
+            client,
+            cache=cache,
+            runtime_client=_runtime_client(),
+            allow_privileged_credential=allow_privileged_credential,
         )
     else:
         if child_selectors:

@@ -239,7 +239,9 @@ rule of the engineering rules above.
   a miss on read and is ignored on write (the cache logs it).
 - `Client.workspace_id` is the configured value or the `org_id` of one
   memoized `GET /v1/whoami`; once both are known and differ, every call raises
-  `workspace_mismatch`. `whoami()` also feeds the later privileged-key check.
+  `workspace_mismatch`. The memoized answer also feeds the adapter's
+  privileged-key check, whether it runs at bind time or, after an outage at
+  bind time, at the first admission the registry answers.
 - `client.bindings` passes the caller's thread key through unchanged (hashing
   is the caller's job), sends no `Idempotency-Key` (create-or-get on the thread
   key), always asks for `include: ["artifacts"]`, and loads them with
@@ -264,6 +266,16 @@ rule of the engineering rules above.
   the next `create_or_get` of that thread does. A
   cached binding is rebuilt into a bundle from the binding record plus the
   cached closure and goes through the same online verification again.
+- `CloudBindingAuthority(allow_privileged_credential=...)` is how the adapter
+  passes its privileged-key rule; `None`, the default for direct use, checks
+  nothing. With a bool, `create_or_get`, `get` and the binding read of
+  `resolution` run the check inside the same flow, just before their
+  request, so no binding request leaves with an unchecked credential, and an
+  outage there takes the same cached-binding path as an outage of the
+  request itself. `confirm_credential` is the check for a binding read from
+  the cache without a request (`revalidate="never"`): an outage leaves it
+  pending, while a privileged key or a 401, 403 or 404 raises, and the error
+  statuses evict that thread's binding first.
 - `export_bundle` loads the signed export with `PromptBundle.load`, trusting the
   key of `GET /v1/signing-keys/:key_id` (the same TLS and API key trust as every
   online answer) unless the caller passes `trust`. It allows an unapproved
@@ -384,7 +396,10 @@ rule of the engineering rules above.
 - `agenomic-py prompts` exits 0 on success, 1 when the registry or a prompt
   check refuses, and 2 for usage, configuration or file errors. `scan` prints
   the report on stdout (or `--out`) and a summary on stderr; `import` uploads
-  and prints the plan, and applies it only with `--apply`.
+  and prints the plan, and applies it only with `--apply`. `import`, and
+  `render` of a registry reference, exit 2 before any request unless both
+  `AGENOMIC_ENDPOINT` and `AGENOMIC_API_KEY` are set, as their error says;
+  the client would otherwise send the request without a key.
 - `tests/schemas/v0.4/` (three schemas) and `tests/fixtures/prompt_imports/`
   (a report, two plans and a YAML prompts file) are copies from agenomic-spec
   commit `fcfe12a`, the commit of `SPEC_VECTORS.lock`; refresh them with the
@@ -438,6 +453,19 @@ rule of the engineering rules above.
   are adopted). The thread id may come from graph-level config bound with
   `with_config`; it is then passed explicitly in the call config, because
   langgraph 1.0.10 does not merge it into the checkpoint config.
+- The privileged-key check (04 section 4.2 says "at bind time") runs at bind
+  time when the registry answers. When `GET /v1/whoami` is unavailable then,
+  binding goes on only for a client with a configured `workspace_id`, since
+  every cache key needs it, and the check stays pending: it runs again
+  before every binding request or read and before a cached binding is used
+  with `revalidate="never"`, each time with the transport retries. Until it
+  passes, the proxy serves only bindings already in the cache, with the same
+  scope and selector and a re-verified closure, and sends no binding
+  request, so a key is never used to create a binding before it was
+  checked. Without this, a process restarted during an outage could not
+  resume a thread whose binding is in its disk cache (3.13 and AC14). An
+  execution-scope resume during an outage still fails, because it reads its
+  binding by id and `PromptCache` indexes bindings by thread key only.
 - Thread keys are hashed with the workspace (`thread:sha256:`,
   `exec:sha256:`); a non-string `thread_id` is hashed as `str(thread_id)`,
   the form SQLite savers store. A pre-issued binding (runner mode) is
@@ -467,19 +495,22 @@ rule of the engineering rules above.
   that carries the pin scalars but no pinned set (a config rebuilt from
   checkpoint metadata or a stripped stream chunk, or one that crossed a
   process boundary), and a factory-backed graph is asked for a graph before
-  any was built (drawing, schemas, or an execution-scope state read, whose
-  binding is only known from a checkpoint). `binding_missing` stays the case
-  with no pin at all.
-- An execution-scope `AgentFactory` proxy cannot resume, run a `None` input
-  or update the state of a thread before it has built a graph in this
-  process: the binding id sits in a checkpoint, only a built graph knows the
-  checkpointer, and the factory builds only from a pinned set. It raises
-  `prompt_set_unavailable` and never resolves the channel instead. Any new
-  execution builds a graph, after which the resume recovers the original
-  pin; a thread-scope factory has no such gap, because its key is the
-  thread id. `AgentFactory` takes no checkpointer argument, so the gap is
-  documented rather than worked around;
-  `test_factory_execution_scope_resume_needs_a_built_graph` pins it.
+  any was built (drawing, schemas, or, without a declared checkpointer, an
+  execution-scope resume or state read, whose binding is only known from a
+  checkpoint). `binding_missing` stays the case with no pin at all.
+- An execution-scope resume, `None` input or state update reads the binding
+  id from a checkpoint, and a restarted factory proxy has built no graph to
+  read it with, since the factory builds only from a pinned set.
+  `AgentFactory(build, checkpointer=saver)` names that saver up front, so
+  admission reads the checkpoint through it (4.3 step 4(a) unchanged: the
+  authority confirms the id) and only then builds the graph of that
+  binding. Every built graph must use that saver object, the first one
+  included (`factory_topology_mismatch`). Without it the proxy still fails
+  closed with `prompt_set_unavailable`, whose message names the argument,
+  and never resolves the channel. An explicit execution key on resume was
+  not chosen: it would go through `create_or_get`, which creates a binding
+  on the channel's current release when the key is wrong. A thread-scope
+  factory never needed this, because its key is the thread id.
 - `LocalBindingStore(directory)` stores one JSON file per workspace, agent
   and sha256 of the thread key, with a `record_digest` over its own
   `agenomic.local_execution_binding/v1` document. A write goes to a `.tmp-`

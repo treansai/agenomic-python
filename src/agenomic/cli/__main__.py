@@ -1,4 +1,4 @@
-"""agenomic-py — small Python CLI utility for ATEP and trace inspection.
+"""agenomic-py: small Python CLI utility for ATEP and trace inspection.
 
 For full CLI features (bundle, sign, replay), use ``agenomic-cli`` (Rust).
 
@@ -168,7 +168,7 @@ def _cloud_client() -> Optional[Client]:
     from agenomic._client import Client
 
     client = Client.from_env()
-    return client if client.is_cloud else None
+    return client if client.is_cloud and client.api_key else None
 
 
 def _print_json(document: Any, out: Optional[str] = None) -> None:

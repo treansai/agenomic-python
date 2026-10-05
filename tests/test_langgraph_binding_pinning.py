@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ import pytest
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import START, StateGraph
+from langgraph.types import Command, interrupt
 from langgraph_world import LogState, World, plan_node, supervise_node, thread, two_node_graph
 from prompt_fakes import AGENT, WORKSPACE
 
@@ -24,11 +26,13 @@ from agenomic.prompts import (
     BundleTrust,
     PromptBindingError,
     PromptBundle,
+    PromptCache,
     PromptIntegrityError,
     RegistryUnavailableError,
     execution_key,
     thread_key,
 )
+from agenomic.prompts.authority import OUTAGE_CACHED_BINDING, counters
 
 
 @pytest.fixture(autouse=True)
@@ -206,6 +210,133 @@ def test_new_thread_outage_fails_closed_and_existing_thread_continues() -> None:
     world.server.outage = "http_503"
     with pytest.raises(RegistryUnavailableError):
         managed.invoke({"log": []}, thread("existing"))
+
+
+def ask(state: LogState, config: RunnableConfig) -> LogState:
+    before = prompts_for(config).render_text("planner.instructions")
+    return {"log": [f"ask:{interrupt('approve?')}:{before}"]}
+
+
+def asking_graph(saver: Any) -> Any:
+    builder = StateGraph(LogState)
+    builder.add_node("plan", plan_node)
+    builder.add_node("ask", ask)
+    builder.add_edge(START, "plan")
+    builder.add_edge("plan", "ask")
+    return builder.compile(checkpointer=saver)
+
+
+def posts_since(world: World, mark: int) -> list[str]:
+    return [
+        path
+        for path in world.server.paths()[mark:]
+        if path.startswith("POST") and path.endswith("/bindings")
+    ]
+
+
+def test_restart_during_outage_resumes_only_the_disk_cached_binding(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    world = World.create()
+    saver = InMemorySaver()
+    cache_dir = tmp_path / "cache"
+
+    def client(**kwargs: Any) -> Any:
+        options: dict[str, Any] = {"workspace_id": WORKSPACE}
+        options.update(kwargs)
+        return world.client(prompt_cache=PromptCache(cache_dir), **options)
+
+    first = world.bind(asking_graph(saver), client=client())
+    assert [item.value for item in first.invoke({"log": []}, thread("T"))["__interrupt__"]] == [
+        "approve?"
+    ]
+    world.bind(two_node_graph(saver), client=client()).invoke({"log": []}, thread("A"))
+    world.promote("v2")
+    world.server.outage = "transport_error"
+    mark = len(world.server.requests)
+    before = counters()[OUTAGE_CACHED_BINDING]
+    restarted = world.bind(asking_graph(saver), client=client())
+    with caplog.at_level(logging.WARNING, logger="agenomic.prompts"):
+        resumed = restarted.invoke(Command(resume="yes"), thread("T"))
+    assert resumed["log"] == ["plan:PLAN v1", "ask:yes:PLAN v1"]
+    assert counters()[OUTAGE_CACHED_BINDING] == before + 1
+    assert [record.name for record in caplog.records if record.levelno == logging.WARNING] == [
+        "agenomic.prompts"
+    ]
+    with pytest.raises(RegistryUnavailableError):
+        restarted.invoke({"log": []}, thread("N"))
+    assert restarted.get_state(thread("N")).values == {}
+    later = world.bind(two_node_graph(saver), client=client())
+    assert asyncio.run(later.ainvoke({"log": []}, thread("A")))["log"][-2:] == [
+        "plan:PLAN v1",
+        "sup:SUP v1",
+    ]
+    assert posts_since(world, mark) == []
+    assert not any(path.endswith("/resolve") for path in world.server.paths())
+    with pytest.raises(RegistryUnavailableError) as unknown:
+        world.bind(asking_graph(saver), client=world.client(prompt_cache=PromptCache(cache_dir)))
+    assert "workspace_id" in unknown.value.message
+    memory_only = world.bind(asking_graph(saver), client=world.client(workspace_id=WORKSPACE))
+    with pytest.raises(RegistryUnavailableError):
+        memory_only.invoke(Command(resume="again"), thread("T"))
+
+
+def test_pending_credential_is_checked_before_any_binding_request(tmp_path: Path) -> None:
+    world = World.create()
+    saver = InMemorySaver()
+    cache_dir = tmp_path / "cache"
+
+    def client() -> Any:
+        return world.client(workspace_id=WORKSPACE, prompt_cache=PromptCache(cache_dir))
+
+    world.bind(two_node_graph(saver), client=client()).invoke({"log": []}, thread("T"))
+    world.bind(two_node_graph(saver), client=client(), revalidate="never").invoke(
+        {"log": []}, thread("R")
+    )
+    world.bind(asking_graph(saver), client=client(), pin_scope="execution").invoke(
+        {"log": []}, thread("E", agenomic_execution_key="req-1")
+    )
+    world.server.outage = "transport_error"
+    pending = client()
+    by_thread = world.bind(two_node_graph(saver), client=pending)
+    never = world.bind(two_node_graph(saver), client=pending, revalidate="never")
+    by_execution = world.bind(asking_graph(saver), client=pending, pin_scope="execution")
+    assert never.invoke({"log": []}, thread("R"))["log"][-1] == "sup:SUP v1"
+    world.server.outage = None
+    world.server.api_key_scopes = ["write"]
+    mark = len(world.server.requests)
+    for attempt in (
+        lambda: by_thread.invoke({"log": []}, thread("T")),
+        lambda: by_thread.invoke({"log": []}, thread("brand-new")),
+        lambda: by_execution.invoke(Command(resume="ok"), thread("E")),
+        lambda: never.invoke({"log": []}, thread("R")),
+        lambda: asyncio.run(by_thread.ainvoke({"log": []}, thread("T"))),
+        lambda: asyncio.run(never.ainvoke({"log": []}, thread("R"))),
+    ):
+        with pytest.raises(PromptBindingError) as refused:
+            attempt()
+        assert refused.value.code == "privileged_credential"
+    assert world.server.paths()[mark:] == ["GET /v1/whoami"]
+    allowed = client()
+    world.server.outage = "transport_error"
+    opted_in = world.bind(two_node_graph(saver), client=allowed, allow_privileged_credential=True)
+    world.server.outage = None
+    assert opted_in.invoke({"log": []}, thread("T"))["log"][-1] == "sup:SUP v1"
+    world.server.api_key_scopes = ["read"]
+    revoked = client()
+    world.server.outage = "transport_error"
+    managed = world.bind(two_node_graph(saver), client=revoked)
+    never_revoked = world.bind(two_node_graph(saver), client=revoked, revalidate="never")
+    world.server.outage = "http_403"
+    for revoked_thread, proxy in (("T", managed), ("R", never_revoked)):
+        with pytest.raises(ApiError) as forbidden:
+            proxy.invoke({"log": []}, thread(revoked_thread))
+        assert forbidden.value.status == 403
+        key = thread_key(WORKSPACE, revoked_thread)
+        assert PromptCache(cache_dir).get_binding(WORKSPACE, AGENT, key) is None
+    world.server.outage = "transport_error"
+    with pytest.raises(RegistryUnavailableError):
+        managed.invoke({"log": []}, thread("T"))
 
 
 def test_revalidate_never_uses_cached_binding() -> None:

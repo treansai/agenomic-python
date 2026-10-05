@@ -415,6 +415,37 @@ def test_cli_scan_import_and_apply(
     capsys.readouterr()
 
 
+def test_cli_refuses_a_missing_api_key_before_any_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sent: list[httpx.Request] = []
+
+    def refuse(self: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        raise AssertionError(f"no request may be sent: {request.method} {request.url}")
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", refuse)
+    for variable in ("AGENOMIC_API_KEY", "AGENOMIC_WORKSPACE_ID", "AGENOMIC_PROMPT_CACHE_DIR"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("AGENOMIC_ENDPOINT", "https://registry.invalid")
+    report_path = tmp_path / "report.json"
+    assert cli.main(["prompts", "scan", str(SOURCES), "--out", str(report_path)]) == 0
+    capsys.readouterr()
+    assert cli.main(["prompts", "import", str(report_path), "--agent-id", AGENT]) == 2
+    assert "set AGENOMIC_ENDPOINT and AGENOMIC_API_KEY" in capsys.readouterr().err
+    assert cli.main(["prompts", "render", "prm_writer:1"]) == 2
+    assert "set AGENOMIC_ENDPOINT and AGENOMIC_API_KEY" in capsys.readouterr().err
+    assert sent == []
+    monkeypatch.setenv("AGENOMIC_API_KEY", "agm_test")
+    configured = cli._cloud_client()
+    assert configured is not None
+    assert configured.api_key == "agm_test"
+    configured.close()
+    monkeypatch.delenv("AGENOMIC_ENDPOINT")
+    assert cli._cloud_client() is None
+    assert sent == []
+
+
 def test_cli_scan_prints_to_stdout(capsys: pytest.CaptureFixture[str]) -> None:
     target = SOURCES / "graph_node_single_arg.py"
     assert (

@@ -40,17 +40,17 @@ packages of the table above match the point exactly.
 
 | Point   | Python  | Result                |
 | ------- | ------- | --------------------- |
-| primary | 3.10.18 | 956 passed, 2 skipped |
-| primary | 3.11.11 | 958 passed            |
-| primary | 3.12.11 | 958 passed            |
-| primary | 3.13.5  | 958 passed            |
-| floor   | 3.10.18 | 956 passed, 2 skipped |
-| floor   | 3.13.5  | 958 passed            |
+| primary | 3.10.18 | 963 passed, 2 skipped |
+| primary | 3.11.11 | 965 passed            |
+| primary | 3.12.11 | 965 passed            |
+| primary | 3.13.5  | 965 passed            |
+| floor   | 3.10.18 | 963 passed, 2 skipped |
+| floor   | 3.13.5  | 965 passed            |
 
 On the primary point with Python 3.10, the full check also passed in an
 environment without the SQLite saver: `ruff check`, `ruff format --check`,
-`mypy src` and `pytest --cov=agenomic --cov-fail-under=85` (954 passed,
-4 skipped, coverage 91.02 %).
+`mypy src` and `pytest --cov=agenomic --cov-fail-under=85` (959 passed,
+6 skipped, coverage 91.10 %).
 
 The skipped tests:
 
@@ -62,8 +62,10 @@ The skipped tests:
   asyncio tasks there, so a nested bind cannot be detected on Python 3.10
   async.
 - `test_langgraph_binding_resume.py::test_interrupt_resume_after_real_process_restart_sqlite`
-  (online and offline) skips when `langgraph-checkpoint-sqlite` is not
-  installed.
+  (online and offline),
+  `::test_factory_execution_scope_resume_after_real_process_restart_sqlite`
+  and `::test_outage_after_real_process_restart_resumes_disk_cached_binding`
+  skip when `langgraph-checkpoint-sqlite` is not installed.
 
 ## Differences between the points
 

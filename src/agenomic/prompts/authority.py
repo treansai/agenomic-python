@@ -22,6 +22,7 @@ from agenomic.prompts.resources import (
     create_binding_flow,
     get_binding_flow,
     run_flow,
+    whoami_flow,
     workspace_flow,
 )
 
@@ -35,6 +36,7 @@ __all__ = [
     "LocalBindingAuthority",
     "bundle_from_closure",
     "counters",
+    "refuse_privileged_credential",
 ]
 
 logger = logging.getLogger("agenomic.prompts")
@@ -131,6 +133,20 @@ def bundle_from_closure(binding: ExecutionBinding, closure: ResolvedClosure) -> 
     return binding_bundle(binding, document)
 
 
+def refuse_privileged_credential(identity: Mapping[str, Any], allow: bool) -> None:
+    scopes = identity.get("api_key_scopes")
+    privileged = (
+        not isinstance(scopes, list) or not scopes or bool({"write", "admin"} & set(scopes))
+    )
+    if privileged and not allow:
+        raise binding_error(
+            "privileged_credential",
+            "this credential can publish or administer; execute with a read key, or pass "
+            "allow_privileged_credential=True",
+            api_key_scopes=scopes,
+        )
+
+
 def _remember(
     cache: PromptCache, workspace_id: str, binding: ExecutionBinding, bundle: PromptBundle
 ) -> None:
@@ -155,12 +171,37 @@ class CloudBindingAuthority:
         *,
         cache: Optional[PromptCache] = None,
         runtime_client: Optional[Mapping[str, Optional[str]]] = None,
+        allow_privileged_credential: Optional[bool] = None,
     ) -> None:
         if not client.is_cloud:
             raise ValueError("CloudBindingAuthority needs a client with base_url")
         self._client = client
         self._cache = cache if cache is not None else client.prompt_cache
         self._runtime_client = dict(runtime_client or {})
+        self._allow_privileged = allow_privileged_credential
+
+    def _credential(self) -> Flow[None]:
+        if self._allow_privileged is None:
+            return
+        identity = yield from whoami_flow(self._client)
+        refuse_privileged_credential(identity, self._allow_privileged)
+
+    def _confirm(self, agent_id: str, thread_key: str) -> Flow[None]:
+        workspace_id = yield from workspace_flow(self._client)
+        try:
+            yield from self._credential()
+        except RegistryUnavailableError:
+            return
+        except ApiError as error:
+            if error.status in _EVICTING_STATUSES:
+                yield partial(self._cache.evict_binding, workspace_id, agent_id, thread_key)
+            raise
+
+    def confirm_credential(self, agent_id: str, thread_key: str) -> None:
+        run_flow(self._client, self._confirm(agent_id, thread_key))
+
+    async def aconfirm_credential(self, agent_id: str, thread_key: str) -> None:
+        await arun_flow(self._client, self._confirm(agent_id, thread_key))
 
     def _create_or_get(
         self,
@@ -173,6 +214,7 @@ class CloudBindingAuthority:
         channel, release_id = _target(selector)
         workspace_id = yield from workspace_flow(self._client)
         try:
+            yield from self._credential()
             binding, bundle, created = yield from create_binding_flow(
                 self._client,
                 agent_id,
@@ -251,6 +293,7 @@ class CloudBindingAuthority:
 
     def _get(self, agent_id: str, binding_id: str) -> Flow[ExecutionBinding]:
         workspace_id = yield from workspace_flow(self._client)
+        yield from self._credential()
         binding, bundle = yield from get_binding_flow(self._client, agent_id, binding_id)
         yield partial(self._cache.put_closure, workspace_id, bundle.closure())
         return binding
@@ -274,6 +317,7 @@ class CloudBindingAuthority:
         if isinstance(closure, ResolvedClosure):
             return bundle_from_closure(binding, closure)
         try:
+            yield from self._credential()
             fetched, bundle = yield from get_binding_flow(
                 self._client, binding.agent_id, binding.binding_id
             )

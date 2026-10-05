@@ -510,6 +510,14 @@ two releases. A cache never overrides an authorization answer: on a 401, 403
 or 404, `CloudBindingAuthority` evicts the cached binding of that thread
 before raising.
 
+A process restarted during an outage starts with an empty memory cache, so
+it finds a thread's binding only in the disk cache
+(`AGENOMIC_PROMPT_CACHE_DIR`), and only when the client knows its
+`workspace_id` without asking the registry. The LangGraph adapter then
+binds with its credential check pending, serves only cached bindings, and
+runs the check before any binding request once the registry answers
+([Integrations](integrations.md#credential-check-and-registry-outages)).
+
 ```python
 from agenomic.prompts.authority import CloudBindingAuthority, counters
 

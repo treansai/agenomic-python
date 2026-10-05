@@ -215,3 +215,34 @@ def test_interrupt_resume_after_real_process_restart_sqlite(tmp_path: Path, mode
         assert resumed["E"] == ["plan:PLAN v1", "ask:ok:PLAN v1:PLAN v1"]
         assert resumed["update_digest"] == resumed["v1_digest"]
         assert not any(path.endswith("/resolve") for path in resumed["paths"])
+
+
+def test_factory_execution_scope_resume_after_real_process_restart_sqlite(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("langgraph.checkpoint.sqlite")
+    paused = run_child(tmp_path, "factory", "1")
+    assert paused == {"E": ["approve?"], "U": ["approve?"], "S": ["approve?"]}
+    resumed = run_child(tmp_path, "factory", "2")
+    v1, v2 = resumed["v1_digest"], resumed["v2_digest"]
+    assert resumed["E"] == ["plan:PLAN v1", "ask:ok:PLAN v1", "finish:PLAN v1"]
+    assert resumed["update_digest"] == v1
+    assert resumed["U"] == ["plan:PLAN v1", "edit", "finish:PLAN v1"]
+    assert resumed["S"] == ["plan:PLAN v1", "approved", "finish:PLAN v1"]
+    assert resumed["posts_before_new"] == 0
+    assert resumed["built_before_new"] == [v1, v1, v1]
+    assert resumed["N"] == ["plan:PLAN v2"]
+    assert resumed["built"] == [v1, v1, v1, v2]
+    assert not any(path.endswith("/resolve") for path in resumed["paths"])
+
+
+def test_outage_after_real_process_restart_resumes_disk_cached_binding(tmp_path: Path) -> None:
+    pytest.importorskip("langgraph.checkpoint.sqlite")
+    assert run_child(tmp_path, "outage", "1") == {"T": ["approve?"]}
+    resumed = run_child(tmp_path, "outage", "2")
+    assert resumed["T"] == ["plan:PLAN v1", "ask:yes:PLAN v1:PLAN v1"]
+    assert resumed["N"] == "registry_unavailable"
+    assert resumed["N_state"] == {}
+    assert resumed["unknown_workspace"] == "registry_unavailable"
+    assert resumed["posts"] == 0
+    assert not any(path.endswith("/resolve") for path in resumed["paths"])
