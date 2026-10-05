@@ -1130,6 +1130,12 @@ class ExperimentRunner:
         self, assignment: TrialAssignment, state: TrialState, started: float
     ) -> TrialRun:
         fork = "state_values_only" if assignment.view.case.is_snapshot else "none"
+        target = self.targets.get(str(assignment.view.binding.get("agent_id")))
+        saver_kind = (
+            "per_trial_factory"
+            if target is not None and target.checkpointer_factory is not None
+            else "per_trial_in_memory"
+        )
         return self._result(
             assignment,
             state,
@@ -1137,7 +1143,7 @@ class ExperimentRunner:
             started=started,
             turns=[],
             isolation=isolation_record(
-                checkpointer="per_trial_in_memory", store="per_trial_namespace", fork_fidelity=fork
+                checkpointer=saver_kind, store="per_trial_namespace", fork_fidelity=fork
             ),
             error={"code": "deadline_exceeded"},
         )
@@ -1148,6 +1154,17 @@ class ExperimentRunner:
         )
         self._last_hello = time.monotonic()
         return dict(response.body)
+
+    async def _refresh_hello(self, http: _RunnerHttp) -> bool:
+        try:
+            await self._hello(http)
+        except ApiError as error:
+            if error.code != "registry_unavailable" and error.status < 500:
+                raise
+            log.warning("hello failed: %s", error.code)
+            await _asleep(1.0)
+            return False
+        return True
 
     async def _heartbeat(
         self,
@@ -1346,8 +1363,10 @@ class ExperimentRunner:
         while not self._stopping.is_set():
             if not serve.reserve():
                 return
-            if time.monotonic() - self._last_hello >= HELLO_REFRESH_SECONDS:
-                await self._hello(http)
+            stale = time.monotonic() - self._last_hello >= HELLO_REFRESH_SECONDS
+            if stale and not await self._refresh_hello(http):
+                serve.claimed -= 1
+                continue
             try:
                 response = await aapi_request(
                     http,
@@ -1358,7 +1377,7 @@ class ExperimentRunner:
             except ApiError as error:
                 serve.claimed -= 1
                 if error.code == "experiment_runner_hello_required":
-                    await self._hello(http)
+                    await self._refresh_hello(http)
                     continue
                 if error.status in (401, 403):
                     raise

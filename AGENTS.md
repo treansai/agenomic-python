@@ -735,7 +735,16 @@ rule of the engineering rules above.
   `ctx.store_namespace`, so graphs prefix their namespaces with it. Secrets,
   the lease token and the runner token never enter `configurable` or
   metadata, because LangGraph copies configurable scalars into checkpoint
-  metadata; factories read `ctx.secrets` by closure.
+  metadata; factories read `ctx.secrets` by closure. Nothing deletes what a
+  trial wrote into a wrapped user store (its trial-namespace keys and seeds
+  stay; `on_trial_end` may remove them), so `GraphTarget.store` must never
+  be a production store.
+- `serve` stops only on a refusal of its own credentials or configuration.
+  A hello refresh (every 60 s, or after `experiment_runner_hello_required`)
+  that ends in `registry_unavailable` or a 5xx is logged and retried after
+  1 s, like a failed claim, so a gateway restart never cancels the other
+  workers' trials; 401, 403 and other refusals still raise. Only the
+  startup hello fails fast.
 - Graphs run through `bind_langgraph(binding=, resolution=)` with
   `ainvoke`, so a heartbeat can cancel them. On Python 3.10, `interrupt()`
   fails under `ainvoke` (LangGraph's contextvars), so interrupt cases need
@@ -790,6 +799,7 @@ rule of the engineering rules above.
 - `LocalPromptEngine.create_binding` refuses `exp:` keys like the registry,
   so `local_assignment` builds the trial binding itself from
   `LocalPromptEngine.resolve`; example 17 and the tests therefore run real
-  views offline. Its view digest serves the simulation only. `tests/experiment_fakes.py` is a strict in-process
-  runner tier (unknown members refused, lease fencing, the duplicate,
-  conflict and stale table, a minimal tool proxy) built on those views.
+  views offline. Its view digest serves the simulation only.
+  `tests/experiment_fakes.py` is a strict in-process runner tier (unknown
+  members refused, lease fencing, the duplicate, conflict and stale table, a
+  minimal tool proxy) built on those views.

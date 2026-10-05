@@ -158,6 +158,8 @@ class FakeRunnerServer:
         self.on_claim: Optional[Callable[[FakeTrial], None]] = None
         self.drop_tool_call_responses = 0
         self.drop_report_responses = 0
+        self.fail_hellos = 0
+        self.demand_hello = 0
         self.require_hello = True
         self._lock = threading.RLock()
 
@@ -224,6 +226,9 @@ class FakeRunnerServer:
     def _hello(self, request: httpx.Request, body: Any) -> httpx.Response:
         if body.get("schema") != "agenomic.experiment_runner_hello/v1":
             raise ApiError("validation_error", 400, "not a hello document")
+        if self.hellos and self.fail_hellos > 0:
+            self.fail_hellos -= 1
+            raise ApiError("service_unavailable", 503, "the gateway is restarting")
         self.hellos.append(body)
         return httpx.Response(
             200,
@@ -239,6 +244,9 @@ class FakeRunnerServer:
         strict(body, {"wait_seconds"})
         if self.require_hello and not self.hellos:
             raise ApiError("experiment_runner_hello_required", 409, "send a hello first")
+        if self.demand_hello > 0:
+            self.demand_hello -= 1
+            raise ApiError("experiment_runner_hello_required", 409, "the hello is too old")
         if not self.queue:
             return httpx.Response(204)
         trial = self.trials[self.queue.pop(0)]

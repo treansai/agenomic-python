@@ -34,6 +34,7 @@ from langgraph_world import World
 from prompt_fakes import AGENT
 
 import agenomic._transport as transport_module
+import agenomic.experiments.runner as runner_module
 import agenomic.experiments.tools as tools_module
 from agenomic import Client
 from agenomic.cli.__main__ import main
@@ -153,7 +154,8 @@ def test_hello_declares_agents_entry_points_and_secret_names(
     assert TOKEN.encode() not in b"".join(server.raw_bodies())
 
 
-def test_concurrent_arms_isolated_in_runner(server: FakeRunnerServer) -> None:
+@pytest.mark.parametrize("shared_store", [False, True])
+def test_concurrent_arms_isolated_in_runner(server: FakeRunnerServer, shared_store: bool) -> None:
     active: list[int] = [0]
     peak: list[int] = [0]
     savers: list[Any] = []
@@ -176,15 +178,25 @@ def test_concurrent_arms_isolated_in_runner(server: FakeRunnerServer) -> None:
         name: server.add_trial(name, agent_case(), arm_key=f"arm_{name}", experiment_id="exp_iso")
         for name in ("v1", "v2")
     }
+    shared = InMemoryStore()
     runner = make_runner(
         server,
         single_node(node),
         output_adapter=lambda values: values["log"],
         runner_options={"max_concurrency": 2},
+        **({"store": shared} if shared_store else {}),
     )
     assert serve(runner) == 2
     assert peak[0] == 2
     assert len({id(saver) for saver in savers}) == 2
+    stored = shared.search(("agenomic_exp", "exp_iso"))
+    if shared_store:
+        assert sorted(item.namespace for item in stored) == sorted(
+            ("agenomic_exp", "exp_iso", trial_id, "a1", "memories") for trial_id in trials.values()
+        )
+        assert sorted(item.value["text"] for item in stored) == ["PLAN v1", "PLAN v2"]
+    else:
+        assert stored == []
     for name, trial_id in trials.items():
         result = server.trials[trial_id].result
         assert result is not None
@@ -239,6 +251,8 @@ def test_secrets_never_in_reports(world: World, server: FakeRunnerServer) -> Non
         value = ctx.secrets["env:SERVICE_KEY"]
         if ctx.case.case_id == "raise":
             raise RuntimeError(f"provider rejected key {value}")
+        if ctx.case.case_id == "infra":
+            raise httpx.ConnectError(f"provider unreachable with key {value}")
         tools = {item.name: item for item in ctx.wrap_tools([lookup_order])}
         answer = await tools["lookup_order"].ainvoke({"order_id": value})
         return {"log": [f"key={value}", str(answer)]}
@@ -247,13 +261,20 @@ def test_secrets_never_in_reports(world: World, server: FakeRunnerServer) -> Non
         "v1", agent_case("ok"), secret_refs=["env:SERVICE_KEY"], tools={"mode": "mock"}
     )
     failed = server.add_trial("v1", agent_case("raise"), secret_refs=["env:SERVICE_KEY"])
+    infra = server.add_trial("v1", agent_case("infra"), secret_refs=["env:SERVICE_KEY"])
     runner = make_runner(
         server,
         single_node(leaky),
         output_adapter=lambda values: values["log"],
         runner_options={"secrets": resolver},
     )
-    assert serve(runner) == 2
+    assert serve(runner) == 3
+    infra_failure = server.trials[infra].failures[0]
+    assert (infra_failure["error_class"], infra_failure["error_code"]) == (
+        "infrastructure",
+        "connection_error",
+    )
+    assert infra_failure["message"] == "provider unreachable with key [REDACTED]"
     for body in server.raw_bodies():
         assert SECRET.encode() not in body
         assert TOKEN.encode() not in body
@@ -1141,6 +1162,75 @@ def test_deadline_reported_as_agent_timeout(server: FakeRunnerServer) -> None:
     result = server.trials[trial].result
     assert result["outcome"] == "agent_timeout"
     assert result["error"] == {"code": "deadline_exceeded"}
+    assert result["isolation"]["checkpointer"] == "per_trial_in_memory"
+    factory_trial = server.add_trial("v1", agent_case("factory"))
+    factory_runner = make_runner(
+        server, single_node(slow), checkpointer_factory=lambda thread_key: InMemorySaver()
+    )
+    assert serve(factory_runner) == 1
+    factory_result = server.trials[factory_trial].result
+    assert factory_result["outcome"] == "agent_timeout"
+    assert factory_result["isolation"]["checkpointer"] == "per_trial_factory"
+
+
+def test_hello_outage_never_stops_the_runner(
+    server: FakeRunnerServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def capped(delay: float) -> None:
+        await asyncio.sleep(min(delay, 0.01))
+
+    monkeypatch.setattr(runner_module, "_asleep", capped)
+
+    async def node(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        if ctx.case.case_id == "slow":
+            await asyncio.sleep(0.3)
+        return {"log": [ctx.case.case_id]}
+
+    def outage(trial: Any) -> None:
+        if trial.view["case"]["case_id"] == "slow":
+            server.fail_hellos = 8
+
+    slow = server.add_trial("v1", agent_case("slow"))
+    fast = server.add_trial("v1", agent_case("fast"))
+    server.on_claim = outage
+    with monkeypatch.context() as patched:
+        patched.setattr(runner_module, "HELLO_REFRESH_SECONDS", 0.0)
+        runner = make_runner(server, single_node(node), runner_options={"max_concurrency": 2})
+        assert serve(runner) == 2
+    assert server.fail_hellos == 0
+    assert (server.trials[slow].accepts, server.trials[fast].accepts) == (1, 1)
+    server.on_claim = None
+    required = server.add_trial("v1", agent_case("required"))
+    needy = make_runner(server, single_node(node))
+    startup = needy._hello
+
+    async def then_outage(http: Any) -> dict[str, Any]:
+        needy._hello = startup
+        body = await startup(http)
+        server.demand_hello, server.fail_hellos = 1, 4
+        return body
+
+    needy._hello = then_outage
+    assert serve(needy) == 1
+    assert (server.demand_hello, server.fail_hellos) == (0, 0)
+    assert server.trials[required].accepts == 1
+    refused = make_runner(server, single_node(node))
+    original = refused._hello
+
+    async def revoked(http: Any) -> dict[str, Any]:
+        if refused._last_hello:
+            raise ApiError("runner_token_invalid", 401, "the token was revoked")
+        return await original(http)
+
+    refused._hello = revoked
+    server.add_trial("v1", agent_case("revoked"))
+    with monkeypatch.context() as patched:
+        patched.setattr(runner_module, "HELLO_REFRESH_SECONDS", 0.0)
+        with pytest.raises(ApiError) as stopped:
+            serve(refused)
+    assert stopped.value.code == "runner_token_invalid"
 
 
 def test_unexpected_errors_never_stop_the_runner(server: FakeRunnerServer) -> None:
