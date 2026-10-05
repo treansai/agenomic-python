@@ -363,7 +363,7 @@ def test_status_is_readable_when_locked_and_reports_the_server_evaluation(
                 "id": "agents_vault",
                 "enabled": False,
                 "reason": "not_entitled",
-                "required_plan": "cloud",
+                "required_plan": "plan-x",
             },
             "permissions": ["metadata.read"],
             "usage": {"providers": 1, "secrets": 2, "bindings": 3, "runtime_identities": 4},
@@ -377,7 +377,7 @@ def test_status_is_readable_when_locked_and_reports_the_server_evaluation(
         True,
         True,
     )
-    assert status.capability.required_plan == "cloud"
+    assert status.capability.required_plan == "plan-x"
     assert status.usage.runtime_identities == 4
 
 

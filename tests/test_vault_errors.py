@@ -100,7 +100,7 @@ def test_the_error_envelope_fields_are_kept() -> None:
             request_id="req-9",
             capability="agents_vault",
             reason="not_entitled",
-            required_plan="enterprise",
+            required_plan="plan-x",
         ),
         {},
     )
@@ -109,7 +109,7 @@ def test_the_error_envelope_fields_are_kept() -> None:
         "req-9",
         "agents_vault",
         "not_entitled",
-        "enterprise",
+        "plan-x",
     )
     assert error.code == "capability_not_entitled"
 

@@ -88,9 +88,9 @@ class VaultNotEntitled(VaultError):
 
     Example:
         >>> error = VaultNotEntitled("capability_not_entitled", "locked", 403,
-        ...     capability="agents_vault", reason="not_entitled", required_plan="cloud")
+        ...     capability="agents_vault", reason="not_entitled", required_plan="plan-x")
         >>> (error.locked, error.upgrade_hint, error.required_plan)
-        (True, True, 'cloud')
+        (True, True, 'plan-x')
     """
 
     locked = True

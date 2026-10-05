@@ -309,7 +309,7 @@ def test_a_locked_add_on_is_distinguishable_and_never_retried(
             "agents_vault is not included in the current plan",
             capability="agents_vault",
             reason=reason,
-            required_plan="enterprise",
+            required_plan="plan-x",
             request_id="req-1",
         ),
     )
@@ -320,7 +320,7 @@ def test_a_locked_add_on_is_distinguishable_and_never_retried(
     assert (error.capability, error.reason, error.required_plan) == (
         "agents_vault",
         reason,
-        "enterprise",
+        "plan-x",
     )
     assert error.upgrade_hint is hint
     assert (error.code, error.status, error.request_id) == (code, 403, "req-1")

@@ -49,7 +49,7 @@ class VaultStatus(_Response):
 
     Example:
         >>> status = VaultStatus(installed=True, entitled=False,
-        ...     capability=CapabilityState(enabled=False, reason="not_entitled", required_plan="cloud"))
+        ...     capability=CapabilityState(enabled=False, reason="not_entitled", required_plan="plan-x"))
         >>> (status.locked, status.upgrade_hint)
         (True, True)
     """
