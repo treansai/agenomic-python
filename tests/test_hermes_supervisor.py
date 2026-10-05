@@ -1,0 +1,373 @@
+from __future__ import annotations
+
+import hashlib
+import os
+import socket
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from agenomic.integrations.hermes import supervisor as sup
+from agenomic.integrations.hermes.client import HermesApiError
+from agenomic.integrations.hermes.supervisor import (
+    Supervisor,
+    SupervisorSettings,
+    build_child_env,
+    egress_restricted,
+    isolation_report,
+    provider_secrets_absent,
+    sync_skills,
+    writable_by,
+)
+
+PARENT_ENV = {
+    "PATH": "/usr/bin:/bin",
+    "HOME": "/home/agent",
+    "HERMES_HOME": "/srv/hermes",
+    "OPENAI_API_KEY": "sk-openai",
+    "ANTHROPIC_API_KEY": "sk-ant",
+    "OPENROUTER_API_KEY": "or",
+    "GITHUB_TOKEN": "ghp",
+    "AWS_SECRET_ACCESS_KEY": "aws",
+    "AGENOMIC_HERMES_SUPERVISOR_TOKEN": "agmhs_secret",
+    "AGENOMIC_HERMES_RUNTIME_TOKEN": "agmhr_runtime",
+    "DB_PASSWORD": "pw",
+    "RANDOM_VAR": "x",
+}
+
+
+class FakeApi:
+    def __init__(self) -> None:
+        self.heartbeats: list[dict[str, Any]] = []
+        self.acks: list[tuple[str, str, dict[str, Any]]] = []
+        self.commands: list[dict[str, Any]] = []
+        self.skills: list[dict[str, Any]] = []
+        self.fail = False
+
+    def heartbeat(self, body: dict[str, Any]) -> dict[str, Any]:
+        if self.fail:
+            raise HermesApiError("unavailable", "down", 503)
+        self.heartbeats.append(body)
+        commands, self.commands = self.commands, []
+        return {"effective_state": "enforce", "commands": commands}
+
+    def ack_command(self, command_id: str, status: str, detail: dict[str, Any]) -> dict[str, Any]:
+        self.acks.append((command_id, status, detail))
+        return {}
+
+    def approved_skills(self) -> dict[str, Any]:
+        return {"skills": self.skills}
+
+
+def refuse(addr: tuple[str, int], timeout: float) -> socket.socket:
+    raise OSError("network unreachable")
+
+
+def test_child_env_is_allowlisted_and_scrubbed() -> None:
+    env = build_child_env(PARENT_ENV, allow=["RANDOM_VAR", "GITHUB_TOKEN", "OPENAI_API_KEY"])
+    assert env == {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/home/agent",
+        "HERMES_HOME": "/srv/hermes",
+        "AGENOMIC_HERMES_RUNTIME_TOKEN": "agmhr_runtime",
+        "RANDOM_VAR": "x",
+    }
+    assert provider_secrets_absent(env)
+    assert not provider_secrets_absent(PARENT_ENV)
+    assert not provider_secrets_absent({"AGENOMIC_HERMES_SUPERVISOR_TOKEN": "x"})
+    custom = build_child_env(PARENT_ENV, runtime_token_env="DB_PASSWORD")
+    assert "DB_PASSWORD" in custom
+    assert "AGENOMIC_HERMES_RUNTIME_TOKEN" not in custom
+
+
+def test_egress_check() -> None:
+    assert egress_restricted(["api.openai.com:443", "[::1]:443"], connect=refuse)
+    opened: list[tuple[str, int]] = []
+
+    class Sock:
+        def close(self) -> None:
+            pass
+
+    def accept(addr: tuple[str, int], timeout: float) -> Sock:
+        opened.append(addr)
+        return Sock()
+
+    assert not egress_restricted(["api.openai.com:443"], connect=accept)
+    assert opened == [("api.openai.com", 443)]
+    assert not egress_restricted([])
+    assert not egress_restricted(["host:notaport"], connect=refuse)
+
+
+def test_writability_by_mode_bits(tmp_path: Path) -> None:
+    ro_dir = tmp_path / "ro"
+    ro_dir.mkdir()
+    cfg = ro_dir / "config.yaml"
+    cfg.write_text("x")
+    os.chmod(cfg, 0o444)
+    os.chmod(ro_dir, 0o555)
+    other_uid = 65534 if os.getuid() != 65534 else 65533
+    try:
+        assert not writable_by(cfg, other_uid, [other_uid])
+        assert writable_by(cfg, 0, [0])  # root on a writable mount
+        assert not writable_by(cfg, os.getuid(), [os.getgid()]) or os.getuid() == 0
+        os.chmod(cfg, 0o446)
+        assert writable_by(cfg, other_uid, [other_uid])  # world writable file
+        os.chmod(cfg, 0o444)
+        os.chmod(ro_dir, 0o757)
+        assert writable_by(cfg, other_uid, [other_uid])  # file replaceable through its directory
+        os.chmod(ro_dir, 0o1777)
+        if os.getuid() != other_uid and cfg.stat().st_uid != other_uid:
+            assert not writable_by(
+                cfg, other_uid, [other_uid]
+            )  # sticky: not the owner of the entry
+    finally:
+        os.chmod(ro_dir, 0o755)
+
+
+def test_isolation_report(tmp_path: Path) -> None:
+    sock_path = tmp_path / "docker.sock"
+    report = isolation_report(
+        {"PATH": "/bin"},
+        child_uid=0,
+        child_gids=[0],
+        config_paths=[tmp_path / "config.yaml"],
+        skills_paths=[],
+        forbidden_hosts=["api.openai.com:443"],
+        connect=refuse,
+        docker_sockets=[str(sock_path)],
+    )
+    assert report["provider_secrets_absent"] is True
+    assert report["egress_restricted"] is True
+    assert report["skills_readonly"] is False  # nothing configured cannot be attested
+    assert report["docker_socket_absent"] is True
+    assert report["runs_as_non_root"] is False
+    assert report["config_readonly"] is False  # root on a writable tmp dir
+    sock_path.write_text("")
+    again = isolation_report(
+        {},
+        child_uid=1000,
+        child_gids=[1000],
+        config_paths=[],
+        skills_paths=[],
+        forbidden_hosts=[],
+        docker_sockets=[str(sock_path)],
+    )
+    assert again["docker_socket_absent"] is False
+    assert set(report) == {
+        "provider_secrets_absent",
+        "egress_restricted",
+        "config_readonly",
+        "skills_readonly",
+        "docker_socket_absent",
+        "runs_as_non_root",
+        "checked_at",
+    }
+
+
+def test_sync_skills(tmp_path: Path) -> None:
+    body = "---\nname: demo\n---\n"
+    sha = "sha256:" + hashlib.sha256(body.encode()).hexdigest()
+    skills = [
+        {"target": "skills/demo/SKILL.md", "version": 1, "digest": sha, "content": body},
+        {"target": "skills/../../escape.md", "version": 1, "digest": sha, "content": body},
+        {"target": "/etc/passwd", "version": 1, "digest": sha, "content": body},
+        {"target": "skills/bad/SKILL.md", "version": 1, "digest": "sha256:00", "content": body},
+    ]
+    out = tmp_path / "skills"
+    assert sync_skills(skills, out) == {"written": 1, "unchanged": 0, "removed": 0, "rejected": 3}
+    assert (out / "demo" / "SKILL.md").read_text() == body
+    assert not (tmp_path / "escape.md").exists()
+    assert sync_skills(skills[:1], out)["unchanged"] == 1
+    assert sync_skills([], out)["removed"] == 1
+    assert not (out / "demo" / "SKILL.md").exists()
+
+
+def make_supervisor(tmp_path: Path, api: FakeApi, argv: list[str]) -> Supervisor:
+    settings = SupervisorSettings(
+        argv=argv,
+        hermes_home=tmp_path / "home",
+        skills_dir=tmp_path / "skills",
+        grace_s=2.0,
+        interval_s=0.05,
+        forbidden_hosts=["api.openai.com:443"],
+        restart=False,
+    )
+    return Supervisor(settings, api, environ=PARENT_ENV, connect=refuse)
+
+
+SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]
+
+
+def test_quarantine_stops_and_refuses_restart_then_resume(tmp_path: Path) -> None:
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, SLEEPER)
+    assert "AGENOMIC_HERMES_SUPERVISOR_TOKEN" not in s.child_env
+    assert "OPENAI_API_KEY" not in s.child_env
+    assert s.start_child()
+    s.heartbeat()
+    first = api.heartbeats[-1]
+    assert first["process"]["state"] == "running"
+    assert first["process"]["pid"]
+    assert first["isolation"]["egress_restricted"] is True
+    api.commands = [
+        {"id": "q1", "kind": "quarantine", "target_kind": "instance", "status": "requested"}
+    ]
+    s.heartbeat()
+    assert [(c, st) for c, st, _ in api.acks] == [("q1", "received"), ("q1", "applied")]
+    detail = api.acks[-1][2]
+    assert detail["process_state"] == "stopped"
+    assert detail["exit_code"] == -15
+    assert s.refuse_restart
+    assert not s.start_child()
+    api.commands = [{"id": "q1", "kind": "quarantine", "status": "received"}]
+    s.heartbeat()  # replayed command is not executed twice
+    assert len(api.acks) == 2
+    api.commands = [
+        {"id": "r1", "kind": "resume", "target_kind": "instance", "status": "requested"}
+    ]
+    s.heartbeat()
+    assert api.acks[-1][:2] == ("r1", "applied")
+    assert api.acks[-1][2]["restarted"] is True
+    assert s.state == "running"
+    api.commands = [{"id": "x1", "kind": "pause", "status": "requested"}]
+    s.heartbeat()
+    assert api.acks[-1][:2] == ("x1", "refused")
+    assert s.stop_child() == -15
+
+
+def test_sigkill_after_grace(tmp_path: Path) -> None:
+    api = FakeApi()
+    stubborn = [
+        sys.executable,
+        "-c",
+        "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); "
+        "time.sleep(60)",
+    ]
+    s = make_supervisor(tmp_path, api, stubborn)
+    s.settings.grace_s = 0.5
+    s.start_child()
+    import time
+
+    time.sleep(0.5)
+    assert s.stop_child() == -9
+
+
+def test_tick_poll_and_skill_sync(tmp_path: Path) -> None:
+    api = FakeApi()
+    body = "# s"
+    api.skills = [
+        {
+            "target": "skills/a/SKILL.md",
+            "digest": "sha256:" + hashlib.sha256(body.encode()).hexdigest(),
+            "content": body,
+        }
+    ]
+    s = make_supervisor(tmp_path, api, [sys.executable, "-c", "raise SystemExit(3)"])
+    s.start_child()
+    assert s.proc is not None
+    s.proc.wait()
+    s.tick()
+    assert s.state == "exited"
+    assert s.exit_code == 3
+    assert (tmp_path / "skills" / "a" / "SKILL.md").read_text() == body
+    assert api.heartbeats[-1]["process"] == {
+        "state": "exited",
+        "pid": None,
+        "exit_code": 3,
+        "restarts": 0,
+    }
+    api.fail = True
+    s.heartbeat()  # failure is logged, not raised
+
+
+def test_main_argument_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert sup.main(["--endpoint", "https://a.example"], environ={}) == 2
+    assert sup.main(["--", "hermes"], environ={}) == 2
+    assert sup.main(["--endpoint", "https://a.example", "--", "hermes"], environ={}) == 2
+
+
+def test_main_runs_child_until_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hermes_fakes import FakeAgenomic
+
+    server = FakeAgenomic()
+    try:
+        runs: list[int] = []
+        original_tick = Supervisor.tick
+
+        def tick_then_stop(self: Supervisor) -> None:
+            original_tick(self)
+            runs.append(1)
+            if self.state != "running":
+                self.request_stop()
+
+        monkeypatch.setattr(Supervisor, "tick", tick_then_stop)
+        code = sup.main(
+            [
+                "--endpoint",
+                server.url,
+                "--hermes-home",
+                str(tmp_path),
+                "--interval-s",
+                "0.05",
+                "--no-restart",
+                "--forbidden-host",
+                "127.0.0.1:9",
+                "--",
+                sys.executable,
+                "-c",
+                "pass",
+            ],
+            environ={
+                "AGENOMIC_HERMES_SUPERVISOR_TOKEN": "agmhs_t",
+                "PATH": os.environ.get("PATH", ""),
+            },
+        )
+        assert code == 0
+        beats = [r for r in server.requests if r.path == "/v1/hermes/supervisor/heartbeat"]
+        assert beats
+        assert beats[-1].headers["Authorization"] == "Bearer agmhs_t"
+        assert beats[-1].body["isolation"]["egress_restricted"] is True
+    finally:
+        server.close()
+
+
+def test_no_restart_supervisor_exits_with_its_child(tmp_path: Path) -> None:
+    from hermes_fakes import FakeAgenomic
+
+    server = FakeAgenomic()
+    try:
+        started = time.monotonic()
+        code = sup.main(
+            [
+                "--endpoint",
+                server.url,
+                "--hermes-home",
+                str(tmp_path),
+                "--interval-s",
+                "0.05",
+                "--no-restart",
+                "--forbidden-host",
+                "127.0.0.1:9",
+                "--",
+                sys.executable,
+                "-c",
+                "raise SystemExit(3)",
+            ],
+            environ={
+                "AGENOMIC_HERMES_SUPERVISOR_TOKEN": "agmhs_t",
+                "PATH": os.environ.get("PATH", ""),
+            },
+        )
+        assert code == 3
+        assert time.monotonic() - started < 30
+        states = [
+            r.body["process"]["state"]
+            for r in server.requests
+            if r.path == "/v1/hermes/supervisor/heartbeat"
+        ]
+        assert states[-1] in ("exited", "stopped")
+    finally:
+        server.close()

@@ -1,0 +1,28 @@
+# $HERMES_HOME/config.yaml for a Hermes Agent v2026.9.24 (0.21.5) runtime controlled
+# by Agenomic. Generated shape: agenomic.integrations.hermes.config.render_hermes_config.
+# Keep this file read only for the agent (mount it read only).
+model:
+  default: demo-model
+  provider: custom
+  # The only model route: the Agenomic Model Gateway. The runtime holds no provider key.
+  base_url: https://agenomic.example/v1/hermes/runtime/model/v1
+  api_key: ${AGENOMIC_HERMES_RUNTIME_TOKEN}
+  api_mode: chat_completions
+plugins:
+  enabled: [agenomic]
+  # Shell hooks also run under this budget: keep it >= the guard timeout below.
+  hook_callback_timeout: 30
+  entries:
+    agenomic:
+      settings:
+        endpoint: https://agenomic.example
+        timeouts: {connect_s: 3, decision_s: 5, report_s: 10}
+        capture: {content: metadata}
+skills:
+  write_approval: true
+hooks:
+  pre_tool_call:
+    - command: agenomic-hermes-guard
+      fail_closed: true
+      timeout: 10
+hooks_auto_accept: true

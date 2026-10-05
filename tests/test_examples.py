@@ -23,6 +23,7 @@ OFFLINE_EXAMPLES = [
     "15_langgraph_interrupt_restart.py",
     "16_langgraph_promotion_pinning.py",
     "17_prompt_experiment_counterfactual.py",
+    "12_hermes_agent/render_config.py",
 ]
 
 

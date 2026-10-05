@@ -587,6 +587,17 @@ result = mcp_client.call("search", {"q": "x"})
 trace_mcp_call("server-1", "search", {"q": "x"}, result)
 ```
 
+## Hermes Agent
+
+```bash
+pip install "agenomic[hermes]"   # plus an editable clone of Hermes v2026.9.24
+```
+
+A Hermes plugin (`plugins.enabled: [agenomic]`), a fail closed shell hook
+(`agenomic-hermes-guard`) and a supervisor (`agenomic-hermes-supervisor`)
+connect a Hermes runtime to the Agenomic control plane. The plugin is
+cooperative and not a security boundary. See [hermes.md](hermes.md).
+
 ## Writing your own
 
 The pattern is small:
