@@ -191,6 +191,7 @@ def test_messages_tokens_not_buffered() -> None:
 
 
 def test_astream_events_v2_not_buffered_and_carries_pin() -> None:
+    base = counters()[INFLIGHT]
     world = World.create()
     managed = world.bind(chat_graph(async_talk(streaming_model())))
     langgraph_world.PRODUCED.clear()
@@ -208,7 +209,7 @@ def test_astream_events_v2_not_buffered_and_carries_pin() -> None:
     assert interleaving()
     assert seen[0]["agenomic_prompt_refs"] == "prm_chat:1"
     assert seen[0]["agenomic_binding_id"].startswith("bnd_")
-    assert counters()[INFLIGHT] == 0
+    assert counters()[INFLIGHT] == base
 
 
 def test_astream_events_v3_passthrough() -> None:
@@ -244,7 +245,15 @@ def test_sync_stream_events_passthrough() -> None:
     assert len(world.binding_posts()) == 1
 
 
+async def until_produced(limit: float = 2.0) -> None:
+    waited = 0.0
+    while not langgraph_world.PRODUCED and waited < limit:
+        await asyncio.sleep(0.01)
+        waited += 0.01
+
+
 def test_cancel_astream_cleans_up() -> None:
+    base = counters()[INFLIGHT]
     world = World.create()
     model = streaming_model(" ".join(f"w{index}" for index in range(40)))
     managed = world.bind(chat_graph(async_talk(model)))
@@ -256,8 +265,9 @@ def test_cancel_astream_cleans_up() -> None:
                 pass
 
         task = asyncio.create_task(consume())
-        await asyncio.sleep(0.05)
-        assert counters()[INFLIGHT] == 1
+        await until_produced()
+        assert langgraph_world.PRODUCED
+        assert counters()[INFLIGHT] == base + 1
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -266,11 +276,12 @@ def test_cancel_astream_cleans_up() -> None:
         return len(langgraph_world.PRODUCED) - produced
 
     assert asyncio.run(run()) == 0
-    assert counters()[INFLIGHT] == 0
+    assert counters()[INFLIGHT] == base
     assert managed.get_state(thread("cancel")).next == ("talk",)
 
 
 def test_aclosing_early_close_cleans_up() -> None:
+    base = counters()[INFLIGHT]
     world = World.create()
     managed = world.bind(chat_graph(async_talk(streaming_model())))
 
@@ -282,18 +293,19 @@ def test_aclosing_early_close_cleans_up() -> None:
                 break
         return counters()[INFLIGHT]
 
-    assert asyncio.run(run()) == 0
+    assert asyncio.run(run()) == base
     sync_managed = world.bind(chat_graph(sync_talk(streaming_model())))
     with contextlib.closing(
         sync_managed.stream(hello(), thread("early-sync"), stream_mode="messages")
     ) as stream:
         for _ in stream:
-            assert counters()[INFLIGHT] == 1
+            assert counters()[INFLIGHT] == base + 1
             break
-    assert counters()[INFLIGHT] == 0
+    assert counters()[INFLIGHT] == base
 
 
 def test_wait_for_timeout_propagates() -> None:
+    base = counters()[INFLIGHT]
     world = World.create()
     finished: list[str] = []
 
@@ -310,7 +322,7 @@ def test_wait_for_timeout_propagates() -> None:
 
     with pytest.raises(asyncio.TimeoutError):
         asyncio.run(run())
-    assert counters()[INFLIGHT] == 0
+    assert counters()[INFLIGHT] == base
     assert finished == []
 
 
