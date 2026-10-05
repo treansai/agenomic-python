@@ -73,6 +73,7 @@ DEFAULT_ENV_ALLOWLIST = (
     "HERMES_HOME",
     "HERMES_ACCEPT_HOOKS",
     "AGENOMIC_HERMES_CONFIG",
+    "SYSTEMROOT",
     "AGENOMIC_HERMES_GUARD_MAX_AGE_S",
 )
 DEFAULT_FORBIDDEN_HOSTS = ("api.openai.com:443", "api.anthropic.com:443", "openrouter.ai:443")

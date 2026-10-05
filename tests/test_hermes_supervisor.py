@@ -41,6 +41,13 @@ PARENT_ENV = {
     "RANDOM_VAR": "x",
 }
 
+# A Windows child cannot start Python without SYSTEMROOT; it is no secret.
+PROCESS_ENV = (
+    {**PARENT_ENV, "SYSTEMROOT": os.environ.get("SYSTEMROOT", "")}
+    if sys.platform == "win32"
+    else PARENT_ENV
+)
+
 
 class FakeApi:
     def __init__(self) -> None:
@@ -199,7 +206,7 @@ def make_supervisor(tmp_path: Path, api: FakeApi, argv: list[str]) -> Supervisor
         forbidden_hosts=["api.openai.com:443"],
         restart=False,
     )
-    return Supervisor(settings, api, environ=PARENT_ENV, connect=refuse)
+    return Supervisor(settings, api, environ=PROCESS_ENV, connect=refuse)
 
 
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(60)"]

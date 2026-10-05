@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -125,7 +126,12 @@ def test_console_script_process(tmp_path: Path) -> None:
         input=PAYLOAD,
         capture_output=True,
         text=True,
-        env={"HERMES_HOME": str(tmp_path), "PATH": "/usr/bin"},
+        env={
+            "HERMES_HOME": str(tmp_path),
+            "PATH": "/usr/bin",
+            # A Windows Python cannot start without SYSTEMROOT.
+            **({"SYSTEMROOT": os.environ.get("SYSTEMROOT", "")} if sys.platform == "win32" else {}),
+        },
         timeout=60,
     )
     assert proc.returncode == 2

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -153,7 +154,8 @@ def test_spool_is_bounded_redacted_and_replayed(tmp_path: Path) -> None:
     text = spool.read_text()
     assert 0 < spool.stat().st_size <= 4096
     assert not any(s in text for s in SECRETS)
-    assert oct(spool.stat().st_mode & 0o777) == "0o600"
+    if os.name == "posix":  # Windows has no POSIX mode bits
+        assert oct(spool.stat().st_mode & 0o777) == "0o600"
     stats = exporter.stats()
     spooled = len(text.splitlines())
     assert stats["dropped"] == 40 - spooled  # what did not fit is counted, never silent
