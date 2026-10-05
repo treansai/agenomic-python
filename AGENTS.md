@@ -518,3 +518,32 @@ rule of the engineering rules above.
   step, so the second node of the in-flight run proves the admission pin.
   Examples 15 and 16 move channels on the local engine, a simulation of the
   governed path, and say so in their output.
+- `instrument_langgraph` and `instrument_langgraph_canonical`
+  (`integrations/langgraph.py`) are no-ops on real LangGraph graphs. They
+  wrap a node only when the node, or its `runnable`, is callable: a
+  `StateGraph` holds `StateNodeSpec` entries whose `runnable` is a
+  `RunnableCallable`, and a compiled graph holds `PregelNode` objects with
+  no `runnable`, and neither is callable. Probed on 2026-10-05 with
+  langgraph 1.2.11 and 1.0.10, on a builder graph and on a compiled graph:
+  the graph runs unchanged and nothing is recorded (0 tool calls, 0
+  canonical events). Their tests and `examples/05_langgraph_traced.py` use
+  duck-typed graphs only. They are deliberately left as they are: their
+  wrappers are sync and call nodes with the state only, dropping `config`,
+  so making them work is a redesign, and `bind_langgraph` does not build on
+  them. `docs/integrations.md` says so and points to
+  `TrackingCallbackHandler`; `README.md` and `AGENT.md` still present them
+  as LangGraph tracing.
+- `docs/langgraph-matrix.md` lists only cells whose whole test suite ran,
+  with the counts and the reason of each skip. It changes together with the
+  constraint files, the CI jobs and `TESTED_LANGGRAPH` /
+  `TESTED_LANGCHAIN_CORE`, and a cell enters it only after its run passed.
+  The CI cells (Linux, Windows) stay under "Not verified" until a CI run is
+  recorded.
+- The Python blocks of the "LangGraph managed prompts" section of
+  `docs/integrations.md` run in order on a fake chat model, like those of
+  `docs/prompts.md`. The cloud block runs with `transport=` set to a
+  `FakePromptServer` over the local engine of the earlier blocks; the
+  offline block needs `bundles/production-v1.json`,
+  `bundles/production-v2.json` (two releases of the `support.system` slot
+  exported from that workspace) and `keys/orgkey_01.pem`, with
+  `V1_BUNDLE_DIGEST` set to the first bundle's `prompt_bundle_digest`.

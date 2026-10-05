@@ -595,10 +595,16 @@ messages = to_langchain_messages(version.render_messages(variables))
 - `to_langchain_messages` maps `system`, `user` and `assistant` to LangChain
   messages and passes LangChain messages through.
 
+## LangGraph
+
+`bind_langgraph` pins every thread of a LangGraph graph to one release and
+gives nodes their pinned prompts. See
+[LangGraph managed prompts](integrations.md#langgraph-managed-prompts) and
+the [LangGraph version matrix](langgraph-matrix.md).
+
 ## Not in this release
 
 These parts of managed prompts are not in this SDK release yet: importing
 prompts from existing code (scan, import plans, declaration files, runtime
-registration), `from_langchain`, usage reporting, the LangGraph adapter that
-binds every thread automatically, experiments and the `agenomic-py prompts`
-commands.
+registration), `from_langchain`, usage reporting, experiments and the
+`agenomic-py prompts` commands.
