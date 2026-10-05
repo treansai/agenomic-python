@@ -190,3 +190,19 @@ def test_oversized_and_invalid_events() -> None:
     assert batches[0][0]["extra"] == {"truncated": True}
     assert exporter.stats()["dropped"] == 1
     exporter.close(1.0)
+
+
+def test_preview_masks_credential_keys_whatever_their_case() -> None:
+    text = redacted_preview(
+        {
+            "API_KEY": "plainsecret",
+            "Authorization": "Basic plainsecret",
+            "nested": [{"X-Api-Key": "v", "DB_Password": "p", "Auth_Token": "t"}],
+            "max_tokens": 5,
+        },
+        500,
+    )
+    assert "plainsecret" not in text
+    for value in ('"v"', '"p"', '"t"'):
+        assert value not in text
+    assert '"max_tokens":5' in text

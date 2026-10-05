@@ -884,3 +884,66 @@ def test_staged_skill_write_becomes_a_proposal_never_an_approval(
     )
     assert len(server.calls("/proposals")) == 1, "an unstaged write is not proposed"
     assert not [r for r in server.requests if "decide" in r.path or "publish" in r.path]
+
+
+class _GatelessCtx(FakeCtx):
+    def register_hook(self, name: str, cb: Any) -> None:
+        if name == "pre_tool_call":
+            raise RuntimeError("no gate")
+        super().register_hook(name, cb)
+
+    def register_middleware(self, kind: str, cb: Any) -> None:
+        raise RuntimeError("no middleware")
+
+
+def test_guard_keeps_blocking_when_no_gate_registers(server: FakeAgenomic, tmp_path: Path) -> None:
+    config = AdapterConfig.model_validate({"endpoint": server.url})
+    ctx = _GatelessCtx()
+    adapter = HermesAdapter(
+        config,
+        SecretStr("agmhr_t"),
+        ctx=ctx,
+        hermes_home=tmp_path / "h",
+        start_threads=False,
+        identity=dict(PINNED),
+    )
+    adapter.install(ctx)
+    status = json.loads(adapter.status_file.read_text())
+    assert status["loaded"] is False
+
+
+def test_delegation_reservation_is_queued_only_after_the_action_is_allowed(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.decide = lambda body: "deny"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    runner.agent_loop("delegate_task", {"tasks": [{"goal": "a"}]}, sid="p", tcid="d1")
+    assert len(server.calls("/delegations")) == 1
+    assert not adapter._delegations.get("p"), "a denied action leaves no reservation for a child"
+    assert not adapter._provisional_delegations
+
+    server.decide = lambda body: "require_approval"
+    runner.agent_loop("delegate_task", {"tasks": [{"goal": "b"}]}, sid="p", tcid="d2")
+    runner.agent_loop("delegate_task", {"tasks": [{"goal": "b"}]}, sid="p", tcid="d2")
+    assert len(server.calls("/delegations")) == 2, "a retry after approval reuses its reservation"
+    assert not adapter._delegations.get("p")
+
+    server.decide = lambda body: "allow"
+    for approval in server.approvals.values():
+        approval["status"] = "approved"
+    runner.agent_loop("delegate_task", {"tasks": [{"goal": "b"}]}, sid="p", tcid="d2")
+    assert len(server.calls("/delegations")) == 2
+    assert len(adapter._delegations["p"]) == 1, "the allowed action queues its reservation"
+
+
+def test_cached_authorization_never_serves_another_session(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    kw = Runner(adapter)._kw("read_file", "sess-a", "call_shared")
+    assert adapter.pre_tool_call(args={"path": "/tmp/a"}, **kw) is None
+    other = Runner(adapter)._kw("read_file", "sess-b", "call_shared")
+    assert adapter.pre_tool_call(args={"path": "/tmp/a"}, **other) is None
+    sessions = [r.path.split("/sessions/")[1].split("/")[0] for r in server.authorize_calls()]
+    assert sessions == ["sess-a", "sess-b"], "each session asks the gateway for its own call"

@@ -39,9 +39,10 @@ import sys
 import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Protocol
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from agenomic.integrations.hermes.client import HermesApiError, SupervisorClient
 from agenomic.integrations.hermes.config import DEFAULT_TOKEN_ENV
@@ -208,8 +209,10 @@ def writable_by(path: Path, uid: int, gids: Iterable[int]) -> bool:
     Mode bits and ownership are checked for the file, then for its parent
     directory (a writable directory lets the file be renamed or removed), with
     POSIX sticky bit semantics: in a sticky directory only the owner of the
-    entry or of the directory may remove or rename it. A read only mount
-    wins. Root can write anything that is not on a read only mount.
+    entry or of the directory may remove or rename it. A missing path is
+    writable when its nearest existing ancestor is (the child can create the
+    missing directories). A read only mount wins. Root can write anything that
+    is not on a read only mount.
 
     Example:
         >>> import tempfile
@@ -226,7 +229,16 @@ def writable_by(path: Path, uid: int, gids: Iterable[int]) -> bool:
         and (uid == 0 or _mode_allows_write(path.stat(), uid, groups))
     ):
         return True
-    if parent == path or not parent.exists() or _readonly_fs(parent):
+    if not exists:
+        ancestor = parent
+        while not ancestor.exists():
+            if ancestor.parent == ancestor:
+                return False
+            ancestor = ancestor.parent
+        if _readonly_fs(ancestor):
+            return False
+        return uid == 0 or _mode_allows_write(ancestor.stat(), uid, groups)
+    if parent == path or _readonly_fs(parent):
         return False
     if uid == 0:
         return True
@@ -288,25 +300,32 @@ class _SupervisorApi(Protocol):
     def approved_skills(self) -> dict[str, Any]: ...
 
 
-@dataclass
-class SupervisorSettings:
-    """Supervisor configuration (from the command line)."""
+class SupervisorSettings(BaseModel):
+    """Supervisor configuration (from the command line), validated on construction and
+    on assignment.
 
-    argv: list[str]
+    Example:
+        >>> SupervisorSettings(argv=["hermes", "chat"], hermes_home=Path("/srv/hermes")).interval_s
+        15.0
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    argv: list[str] = Field(min_length=1)
     hermes_home: Path
     skills_dir: Optional[Path] = None
-    config_paths: list[Path] = field(default_factory=list)
-    readonly_paths: list[Path] = field(default_factory=list)
-    forbidden_hosts: list[str] = field(default_factory=lambda: list(DEFAULT_FORBIDDEN_HOSTS))
-    env_allow: list[str] = field(default_factory=list)
-    child_uid: Optional[int] = None
-    child_gid: Optional[int] = None
-    grace_s: float = 10.0
-    interval_s: float = 15.0
-    skills_every: int = 4
+    config_paths: list[Path] = Field(default_factory=list)
+    readonly_paths: list[Path] = Field(default_factory=list)
+    forbidden_hosts: list[str] = Field(default_factory=lambda: list(DEFAULT_FORBIDDEN_HOSTS))
+    env_allow: list[str] = Field(default_factory=list)
+    child_uid: Optional[int] = Field(default=None, ge=0)
+    child_gid: Optional[int] = Field(default=None, ge=0)
+    grace_s: float = Field(default=10.0, gt=0)
+    interval_s: float = Field(default=15.0, gt=0)
+    skills_every: int = Field(default=4, ge=1)
     restart: bool = True
-    max_restarts: int = 5
-    runtime_token_env: str = DEFAULT_TOKEN_ENV
+    max_restarts: int = Field(default=5, ge=0)
+    runtime_token_env: str = Field(default=DEFAULT_TOKEN_ENV, min_length=1)
 
 
 def _digest_matches(content: bytes, digest: str) -> bool:
@@ -643,6 +662,28 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
+def _settings_from_args(
+    args: argparse.Namespace, child: list[str], home: Path
+) -> SupervisorSettings:
+    return SupervisorSettings(
+        argv=child,
+        hermes_home=home,
+        skills_dir=Path(args.skills_dir).expanduser() if args.skills_dir else None,
+        config_paths=[Path(p).expanduser() for p in args.config_path],
+        readonly_paths=[Path(p).expanduser() for p in args.readonly_path],
+        forbidden_hosts=list(DEFAULT_FORBIDDEN_HOSTS)
+        if args.forbidden_host is None
+        else args.forbidden_host,
+        env_allow=args.allow_env,
+        child_uid=args.child_uid,
+        child_gid=args.child_gid,
+        grace_s=args.grace_s,
+        interval_s=args.interval_s,
+        restart=not args.no_restart,
+        runtime_token_env=args.runtime_token_env,
+    )
+
+
 def main(
     argv: Optional[Sequence[str]] = None, *, environ: Optional[Mapping[str, str]] = None
 ) -> int:
@@ -672,23 +713,11 @@ def main(
     home = Path(
         args.hermes_home or env.get("HERMES_HOME") or str(Path.home() / ".hermes")
     ).expanduser()
-    settings = SupervisorSettings(
-        argv=child,
-        hermes_home=home,
-        skills_dir=Path(args.skills_dir).expanduser() if args.skills_dir else None,
-        config_paths=[Path(p).expanduser() for p in args.config_path],
-        readonly_paths=[Path(p).expanduser() for p in args.readonly_path],
-        forbidden_hosts=list(DEFAULT_FORBIDDEN_HOSTS)
-        if args.forbidden_host is None
-        else args.forbidden_host,
-        env_allow=args.allow_env,
-        child_uid=args.child_uid,
-        child_gid=args.child_gid,
-        grace_s=args.grace_s,
-        interval_s=args.interval_s,
-        restart=not args.no_restart,
-        runtime_token_env=args.runtime_token_env,
-    )
+    try:
+        settings = _settings_from_args(args, child, home)
+    except ValidationError as exc:
+        logger.error("invalid supervisor settings: %s", exc.errors(include_url=False))
+        return 2
     client = SupervisorClient(endpoint, token)
     try:
         return Supervisor(settings, client, environ=env).run()

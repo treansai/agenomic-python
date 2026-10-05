@@ -3,8 +3,8 @@
 Events follow ``agenomic.hermes.event/v1``. They are redacted when they are
 built, before they reach the queue or the spool: by default an event carries
 metadata and ``blake3:`` hashes only; ``capture.content = "redacted_preview"``
-adds previews that went through :class:`~agenomic.redaction.RedactionEngine`,
-secret pattern masking and truncation.
+adds previews whose credential-named keys are masked (case and separators
+ignored), then secret pattern masking and truncation.
 
 :class:`EventExporter` mirrors the LangChain ``_Dispatcher``: a bounded
 buffer, one daemon thread, never blocking the agent loop. It batches up to 500
@@ -47,7 +47,6 @@ from typing import Any, Callable, Literal, Optional
 import ulid
 
 from agenomic.integrations.hermes.canonical import CanonicalError, arguments_hash
-from agenomic.redaction import RedactionEngine, RedactionMode, RedactionRule
 
 logger = logging.getLogger("agenomic.integrations.hermes.exporter")
 
@@ -56,7 +55,9 @@ MAX_BATCH = 500
 MAX_EVENT_BYTES = 64 * 1024
 _DEDUP_WINDOW = 50_000
 
-#: Keys masked anywhere in a preview.
+#: Key families masked anywhere in a preview, matched case insensitively after removing
+#: separators: a normalized key containing one of these (or ending in ``token``) is masked,
+#: so ``API_KEY``, ``X-Api-Key``, ``Authorization`` and ``db_password`` are all covered.
 SECRET_KEYS = (
     "password",
     "passwd",
@@ -80,9 +81,33 @@ _SECRET_PATTERNS = re.compile(
     r"|xox[abprs]-[A-Za-z0-9\-]+"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
 )
-_PREVIEW_ENGINE = RedactionEngine(
-    [RedactionRule(path=f"**.{key}", mode=RedactionMode.MASK) for key in SECRET_KEYS]
-)
+_SECRET_KEY_PARTS = tuple(
+    sorted({re.sub(r"[^a-z0-9]", "", key) for key in SECRET_KEYS} - {"token"})
+) + ("credential",)
+_MASK = "***"
+
+
+def is_secret_key(key: str) -> bool:
+    """Whether a mapping key names a credential, whatever its case or separators.
+
+    Example:
+        >>> [is_secret_key(k) for k in ("API_KEY", "X-Api-Key", "auth_token", "max_tokens", "path")]
+        [True, True, True, False, False]
+    """
+    normalized = re.sub(r"[^a-z0-9]", "", key.lower())
+    return normalized.endswith("token") or any(part in normalized for part in _SECRET_KEY_PARTS)
+
+
+def _mask_secret_keys(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            k: _MASK if isinstance(k, str) and is_secret_key(k) else _mask_secret_keys(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_mask_secret_keys(item) for item in value]
+    return value
+
 
 CaptureMode = Literal["metadata", "redacted_preview"]
 
@@ -129,7 +154,7 @@ def redacted_preview(value: object, limit: int) -> str:
     """
     if isinstance(value, (dict, list)):
         try:
-            redacted = _PREVIEW_ENGINE.apply(value)
+            redacted = _mask_secret_keys(value)
             text = json.dumps(redacted, sort_keys=True, separators=(",", ":"), default=str)
         except (TypeError, ValueError):
             text = repr(type(value).__name__)

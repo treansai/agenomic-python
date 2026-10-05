@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from agenomic.integrations.hermes import supervisor as sup
 from agenomic.integrations.hermes.client import HermesApiError
@@ -387,3 +388,18 @@ def test_no_restart_supervisor_exits_with_its_child(tmp_path: Path) -> None:
         assert states[-1] in ("exited", "stopped")
     finally:
         server.close()
+
+
+def test_missing_protected_path_is_writable_through_a_writable_ancestor(tmp_path: Path) -> None:
+    deep = tmp_path / "a" / "b" / "config.yaml"
+    assert writable_by(deep, os.getuid(), [os.getgid()]), "the child can create a/b/config.yaml"
+
+
+def test_supervisor_settings_are_validated() -> None:
+    with pytest.raises(ValidationError):
+        SupervisorSettings(argv=["hermes"], hermes_home=Path("/h"), interval_s=-1)
+    with pytest.raises(ValidationError):
+        SupervisorSettings(argv=[], hermes_home=Path("/h"))
+    settings = SupervisorSettings(argv=["hermes"], hermes_home=Path("/h"))
+    with pytest.raises(ValidationError):
+        settings.grace_s = 0

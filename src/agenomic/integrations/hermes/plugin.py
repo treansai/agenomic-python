@@ -324,7 +324,12 @@ class HermesAdapter:
         self._agenomic_sessions: dict[str, str] = {}
         self._children: dict[str, tuple[str, Optional[str]]] = {}
         self._delegations: dict[str, deque[list[Any]]] = {}
-        self._auth: OrderedDict[str, _Authorization] = OrderedDict()
+        # Reservations wait here, per (session, tool, arguments hash), until the action
+        # itself is allowed; a retry after an approval or a transport error reuses them.
+        self._provisional_delegations: dict[tuple[str, str, str], list[Any]] = {}
+        # Keyed by (session, tool, tool_call_id): providers reuse call ids across sessions,
+        # and an authorization must never serve another session's or tool's call.
+        self._auth: OrderedDict[tuple[str, str, str], _Authorization] = OrderedDict()
         self._pending: dict[tuple[str, str, str], _Pending] = {}
         self._post_status: OrderedDict[str, str] = OrderedDict()
         self._report_retries: deque[_ReportRetry] = deque(maxlen=1000)
@@ -507,11 +512,18 @@ class HermesAdapter:
             return "unknown"
         return state if state in _BLOCKING_STATUS else "active"
 
+    def _gates_registered(self) -> bool:
+        # Either gate can ask the gateway and refuse; without both the guard must keep
+        # blocking, because no callback would consult Agenomic before a tool runs.
+        return bool(self._contracts["pre_tool_call"] or self._contracts["tool_execution"])
+
     def _write_status(self) -> None:
+        if not self._gates_registered():
+            logger.error("no enforcement gate registered; the guard keeps blocking tools")
         try:
             write_status(
                 self.status_file,
-                loaded=True,
+                loaded=self._gates_registered(),
                 instance_status=self._instance_status(),
                 effective_state=self._effective_state,
             )
@@ -1235,27 +1247,33 @@ class HermesAdapter:
 
     def _reserve_delegation(
         self, sid: str, args: Mapping[str, Any], tool_call_id: str
-    ) -> Optional[str]:
+    ) -> tuple[Optional[str], Optional[list[Any]]]:
+        """``(block, reservation)``. The reservation is not queued for a child yet."""
         action = _str(args.get("action")).lower()
         if action in _DELEGATE_CONTROL_ACTIONS:
-            return None
+            return None, None
         tasks = args.get("tasks")
         count = len(tasks) if isinstance(tasks, list) and tasks else 1
         resp = self.client.reserve_delegation(sid, {"count": count, "tool_call_id": tool_call_id})
         decision = _str(resp.get("decision"))
         if decision == "observe":
-            return None
+            return None, None
         if decision == "allow" and isinstance(resp.get("delegation_id"), str):
-            with self._lock:
-                self._delegations.setdefault(sid, deque()).append([resp["delegation_id"], count])
-            return None
+            return None, [resp["delegation_id"], count]
         if decision == "deny":
             codes = resp.get("reason_codes")
             explanation = _str(resp.get("explanation")) or ", ".join(
                 str(c) for c in (codes if isinstance(codes, list) else [])
             )
-            return f"Agenomic denied delegate_task: {explanation or 'delegation limit'}"
+            return f"Agenomic denied delegate_task: {explanation or 'delegation limit'}", None
         raise HermesApiError("invalid_response", "delegation answer without a valid decision", 200)
+
+    def _settle_delegation(self, key: tuple[str, str, str], commit: bool) -> None:
+        """Queue the provisional reservation for the child once the action is allowed."""
+        with self._lock:
+            reservation = self._provisional_delegations.pop(key, None)
+            if commit and reservation is not None:
+                self._delegations.setdefault(key[0], deque()).append(reservation)
 
     def _approval_gate(self, pending: _Pending) -> tuple[Optional[str], bool]:
         """Before a controlled retry: ``(block, keep_identity)``.
@@ -1296,15 +1314,21 @@ class HermesAdapter:
         if not session.admitted:
             self._admit(session)
         mode = self.local_mode()
-        if tool == _DELEGATE_TOOL:
-            denied = self._reserve_delegation(sid, args, tool_call_id)
-            if denied and mode != "shadow":
-                self._emit_decision(sid, tool, tool_call_id, "deny", denied, local_hash)
-                return _Verdict(block=denied)
         key = (sid, tool, local_hash)
+        if tool == _DELEGATE_TOOL:
+            with self._lock:
+                reserved = key in self._provisional_delegations
+            if not reserved:
+                denied, reservation = self._reserve_delegation(sid, args, tool_call_id)
+                if denied and mode != "shadow":
+                    self._emit_decision(sid, tool, tool_call_id, "deny", denied, local_hash)
+                    return _Verdict(block=denied)
+                if reservation is not None:
+                    with self._lock:
+                        self._provisional_delegations[key] = reservation
         with self._lock:
             pending = self._pending.get(key)
-            previous = self._auth.get(tool_call_id) if tool_call_id else None
+            previous = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None
         if pending is not None:
             gate, keep = self._approval_gate(pending)
             if gate is not None:
@@ -1345,6 +1369,7 @@ class HermesAdapter:
             )
         if decision == "observe" or effective_mode == "observe":
             self._effective_state = "observe"
+            self._settle_delegation(key, commit=False)
             return _Verdict()
         if effective_mode == "shadow" and self._effective_state not in _ENFORCE_LIKE - {"enforce"}:
             self._effective_state = "shadow"
@@ -1374,6 +1399,7 @@ class HermesAdapter:
         if decision == "deny" and not shadow:
             with self._lock:
                 self._pending.pop(key, None)
+            self._settle_delegation(key, commit=False)
             return _Verdict(
                 block=f"Agenomic denied {tool}: {explanation or 'policy'} (decision {decision_id or 'unknown'})"
             )
@@ -1416,6 +1442,7 @@ class HermesAdapter:
                 self._emit_decision(
                     sid, tool, tool_call_id, "deny", local_block, local_hash, extra={"local": True}
                 )
+                self._settle_delegation(key, commit=False)
                 return _Verdict(block=local_block)
         else:
             local_block = self._local_checks(tool, args)
@@ -1429,9 +1456,11 @@ class HermesAdapter:
                     local_hash,
                     extra={"local": True, "shadow": True},
                 )
+        self._settle_delegation(key, commit=True)
         with self._lock:
-            self._auth[auth.tool_call_id] = auth
-            self._auth.move_to_end(auth.tool_call_id)
+            auth_key = (auth.session_id, auth.tool, auth.tool_call_id)
+            self._auth[auth_key] = auth
+            self._auth.move_to_end(auth_key)
             while len(self._auth) > _MAX_AUTH:
                 self._auth.popitem(last=False)
         return _Verdict(authorization=auth)
@@ -1532,7 +1561,7 @@ class HermesAdapter:
             if self.local_mode() == "observe":
                 return None
             with self._lock:
-                existing = self._auth.get(tool_call_id) if tool_call_id else None
+                existing = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None
             if existing is not None and existing.state in ("authorized", "executing"):
                 if existing.local_hash == local_hash:
                     return None
@@ -1598,7 +1627,7 @@ class HermesAdapter:
             return _ExecutionPlan(False, error=NO_AUTH_MESSAGE, meta=meta)
         meta["local_hash"] = local_hash
         with self._lock:
-            auth = self._auth.get(tool_call_id) if tool_call_id else None
+            auth = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None
             if auth is not None and auth.state == "done":
                 auth = None
         if auth is None:
@@ -1788,7 +1817,13 @@ class HermesAdapter:
                     self._post_status[tool_call_id] = status
                     while len(self._post_status) > _MAX_AUTH:
                         self._post_status.popitem(last=False)
-                    auth = self._auth.get(tool_call_id)
+                    auth = self._auth.get(
+                        (
+                            _str(kwargs.get("session_id")),
+                            _str(kwargs.get("tool_name")),
+                            tool_call_id,
+                        )
+                    )
             else:
                 auth = None
             raw_args = kwargs.get("args")
