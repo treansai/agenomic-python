@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
-from collections.abc import Iterable, Iterator, Mapping
+import threading
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from typing import Any, NoReturn, Optional, Protocol, runtime_checkable
 
 from agenomic.experiments.errors import SecretResolutionError
@@ -22,7 +25,10 @@ __all__ = [
 
 REDACTED = "[REDACTED]"
 MAX_MESSAGE_BYTES = 2048
+WITHHELD = "a log record was withheld because it could not be redacted"
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
+_RUNNER_TOKEN = re.compile(r"agr_[0-9a-f]{64}", re.ASCII)
+_FORMATTER = logging.Formatter()
 _SECRET_KEYS = (
     "password",
     "passwd",
@@ -147,3 +153,49 @@ def redact_message(text: str, literals: Iterable[str]) -> str:
     if len(encoded) <= MAX_MESSAGE_BYTES:
         return str(cleaned)
     return encoded[:MAX_MESSAGE_BYTES].decode("utf-8", errors="ignore")
+
+
+def _redact_log_text(text: str, literals: Iterable[str]) -> str:
+    return _RUNNER_TOKEN.sub(REDACTED, scrub(str(replace_secrets(text, literals))))
+
+
+class LogRedactor(logging.Filter):
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self._sources: dict[object, Callable[[], Iterable[str]]] = {}
+
+    @contextmanager
+    def tracking(self, literals: Callable[[], Iterable[str]]) -> Iterator[None]:
+        key = object()
+        with self._lock:
+            self._sources[key] = literals
+        try:
+            yield
+        finally:
+            with self._lock:
+                del self._sources[key]
+
+    def literals(self) -> list[str]:
+        with self._lock:
+            sources = list(self._sources.values())
+        return [literal for source in sources for literal in source()]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            literals = self.literals()
+            record.msg = _redact_log_text(record.getMessage(), literals)
+            if record.exc_info:
+                record.exc_text = _FORMATTER.formatException(record.exc_info)
+            if record.exc_text:
+                record.exc_text = _redact_log_text(record.exc_text, literals)
+            if record.stack_info:
+                record.stack_info = _redact_log_text(record.stack_info, literals)
+        except Exception:
+            record.msg, record.exc_text, record.stack_info = WITHHELD, None, None
+        record.args = ()
+        record.exc_info = None
+        return True
+
+
+LOG_REDACTOR = LogRedactor()

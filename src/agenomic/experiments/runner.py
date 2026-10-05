@@ -67,6 +67,7 @@ from agenomic.experiments.models import (
     ViewLimits,
 )
 from agenomic.experiments.secrets import (
+    LOG_REDACTOR,
     SecretResolver,
     SecretValues,
     redact_message,
@@ -92,6 +93,7 @@ __all__ = [
 ]
 
 log = logging.getLogger("agenomic.experiments")
+log.addFilter(LOG_REDACTOR)
 
 SDK = f"agenomic-python/{__version__}"
 HELLO_REFRESH_SECONDS = 60.0
@@ -540,7 +542,8 @@ class ExperimentRunner:
             else TrialAssignment.model_validate(assignment)
         )
         state = TrialState(proxy=proxy, lease_token=parsed.lease_token, literals=self._literals())
-        return await self._aexecute(parsed, state)
+        with LOG_REDACTOR.tracking(lambda: state.literals):
+            return await self._aexecute(parsed, state)
 
     def _pin_workspace(self, workspace_id: str) -> None:
         with self._workspace_lock:
@@ -1317,6 +1320,12 @@ class ExperimentRunner:
             lease_token=assignment.lease_token,
             literals=self._literals(),
         )
+        with LOG_REDACTOR.tracking(lambda: state.literals):
+            return await self._execute_and_deliver(http, assignment, state)
+
+    async def _execute_and_deliver(
+        self, http: _RunnerHttp, assignment: TrialAssignment, state: TrialState
+    ) -> TrialRun:
         started = time.monotonic()
         control = _Control()
         trial = asyncio.ensure_future(self._aexecute(assignment, state))

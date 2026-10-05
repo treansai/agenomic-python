@@ -778,6 +778,18 @@ rule of the engineering rules above.
   Failure messages are scrubbed with the `agenomic-secrets/1` patterns,
   then the literals, then cut to 2 KiB; envelopes are never scrubbed
   (`scrub_json` would mask `lease_token`).
+- Runner logs use only the `agenomic.experiments` logger, which carries
+  `LOG_REDACTOR`. A logger filter runs before every handler but only on
+  records of its own logger, so experiments modules never log through
+  `__name__` children. It rewrites each record: the formatted message, and
+  `exc_info` turned into a formatted `exc_text` with the exception object
+  dropped, both redacted with the resolved values of every trial in flight
+  (`_process` and `arun_trial` track the trial state until delivery ends),
+  then the `agenomic-secrets/1` patterns, then any `agr_` token. Literals
+  go first so a pattern cannot leave part of a value behind, and nothing is
+  cut, so the exception line at the end of a traceback stays. A record the
+  filter cannot rewrite becomes a fixed text, because a raising filter
+  would escape into the `except` blocks of `_process` and stop `serve`.
 - `snapshot_case` only reads: `get_state` and its parent. It refuses
   pending interrupts, subgraph tasks in flight, a last step with other than
   one writer, another agent's stamp and values that a scratch copy

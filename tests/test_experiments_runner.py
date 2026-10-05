@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import pickle
 import sys
 import types
@@ -60,8 +61,10 @@ from agenomic.experiments.runner import (
 from agenomic.experiments.secrets import redact_message, replace_secrets
 from agenomic.experiments.tools import FIXTURE_MISS_TEXT, logical_call_id
 from agenomic.integrations.langgraph_binding import bind_langgraph, prompts_for
+from agenomic.prompts.digest import prompt_digest
 
 SECRET = "s3cr3t-runner-value-0123456789"
+FOREIGN_TOKEN = "agr_" + "fedcba9876543210" * 4
 
 
 @pytest.fixture(autouse=True)
@@ -758,27 +761,29 @@ def test_multi_turn_case_reuses_its_thread(server: FakeRunnerServer) -> None:
     assert result["output"]["final"] == ["approved=True"]
 
 
-def test_runner_evaluators_custom_and_judge(server: FakeRunnerServer, world: World) -> None:
-    judge_prompt = {
+def make_judge_prompt() -> dict[str, Any]:
+    content = {
+        "schema": "agenomic.prompt_content/v1",
+        "template_format": "agenomic-fstring/v1",
+        "renderer_version": "1",
+        "kind": "text",
+        "body": "Rate {output}",
+        "variables": {"output": {"type": "json", "required": True}},
+        "partials": {},
+        "output_contract": None,
+        "fragments": {},
+    }
+    return {
         "prompt_id": "prm_judge",
         "version": 1,
         "prompt_kind": "text",
-        "content_digest": None,
-        "content": {
-            "schema": "agenomic.prompt_content/v1",
-            "template_format": "agenomic-fstring/v1",
-            "renderer_version": "1",
-            "kind": "text",
-            "body": "Rate {output}",
-            "variables": {"output": {"type": "json", "required": True}},
-            "partials": {},
-            "output_contract": None,
-            "fragments": {},
-        },
+        "content_digest": prompt_digest(content),
+        "content": content,
     }
-    from agenomic.prompts.digest import prompt_digest
 
-    judge_prompt["content_digest"] = prompt_digest(judge_prompt["content"])
+
+def test_runner_evaluators_custom_and_judge(server: FakeRunnerServer, world: World) -> None:
+    judge_prompt = make_judge_prompt()
     evaluator = RunnerEvaluator(lambda case, output: output["final"] == ["PLAN v1"], version=2)
     evaluators = [
         {
@@ -1270,3 +1275,147 @@ def test_unexpected_errors_never_stop_the_runner(server: FakeRunnerServer) -> No
         "runner_internal_error",
     )
     assert server.trials[survivor].accepts == 1
+
+
+def test_runner_logs_never_carry_secrets(
+    world: World,
+    server: FakeRunnerServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="agenomic.experiments")
+    leak = f"{SECRET} {FOREIGN_TOKEN} {TOKEN}"
+    hidden = "[REDACTED] [REDACTED] [REDACTED]"
+    resolver = EnvSecretResolver(allow=["SERVICE_KEY"], environ={"SERVICE_KEY": SECRET})
+
+    def broken(case: Any, output: Any) -> bool:
+        raise ValueError(f"evaluator failed with {leak}")
+
+    evaluator = RunnerEvaluator(broken, version=1)
+    custom = {
+        "evaluator_id": "custom",
+        "kind": "runner_custom",
+        "version": 1,
+        "config": {
+            "name": "broken",
+            "version": 1,
+            "code_digest": evaluator.digest(),
+            "value_kind": "binary",
+        },
+    }
+    judge = {
+        "evaluator_id": "judge_leak",
+        "kind": "model_judge",
+        "version": 1,
+        "config": {"model": {"provider": "fake", "model": "judge-1"}},
+        "prompt": make_judge_prompt(),
+    }
+
+    class LeakyJudge:
+        async def ainvoke(self, messages: Any) -> Any:
+            raise RuntimeError(f"judge refused {leak}")
+
+    def trial(case_id: str, **options: Any) -> str:
+        return server.add_trial(
+            "v1", agent_case(case_id), secret_refs=["env:SERVICE_KEY"], **options
+        )
+
+    evaluated = trial("evaluator", runner_evaluators=[custom])
+    judged = trial("judge", runner_evaluators=[judge])
+    executed = trial("execute")
+    delivered = trial("deliver")
+
+    class LeakySaver(InMemorySaver):
+        def delete_thread(self, thread_id: str) -> None:
+            if executed in thread_id:
+                raise RuntimeError(f"saver unreachable with {leak}")
+            super().delete_thread(thread_id)
+
+    def on_end(ctx: TrialContext) -> None:
+        raise RuntimeError(f"cleanup failed with {leak}")
+
+    handle = server.handle
+
+    def leaky_handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/trials/{delivered}/result"):
+            raise RuntimeError(f"upload failed with {leak}")
+        return handle(request)
+
+    monkeypatch.setattr(server, "handle", leaky_handle)
+    runner = make_runner(
+        server,
+        single_node(render_plan),
+        evaluators={"broken": evaluator},
+        checkpointer_factory=lambda thread_key: LeakySaver(),
+        on_trial_end=on_end,
+        runner_options={"secrets": resolver, "judge_model": lambda settings: LeakyJudge()},
+    )
+    assert serve(runner) == 4
+    assert server.trials[evaluated].result["runner_metrics"]["broken"]["value"] is None
+    assert server.trials[judged].result["judge_scores"][0]["parsed"] is False
+    failure = server.trials[executed].failures[0]
+    assert (failure["error_code"], failure["message"]) == (
+        "runner_internal_error",
+        "the runner failed while executing the trial",
+    )
+    assert server.trials[delivered].result is None
+    for body in server.raw_bodies():
+        assert SECRET.encode() not in body
+        assert TOKEN.encode() not in body
+    ours = [record for record in caplog.records if record.name == "agenomic.experiments"]
+    messages = [record.getMessage() for record in ours]
+    for expected in (
+        "runner evaluator broken failed",
+        "judge judge_leak failed",
+        f"on_trial_end failed for trial {executed}",
+        f"the runner failed while executing trial {executed}",
+        f"delivery for trial {delivered} failed",
+    ):
+        assert expected in messages
+    for traced in (
+        f"ValueError: evaluator failed with {hidden}",
+        f"RuntimeError: judge refused {hidden}",
+        f"RuntimeError: cleanup failed with {hidden}",
+        f"RuntimeError: saver unreachable with {hidden}",
+        f"RuntimeError: upload failed with {hidden}",
+    ):
+        assert traced in caplog.text
+    for record in ours:
+        assert record.exc_info is None
+        for leaked in (SECRET, TOKEN, FOREIGN_TOKEN):
+            assert leaked not in record.getMessage()
+            assert leaked not in (record.exc_text or "")
+    for leaked in (SECRET, TOKEN, FOREIGN_TOKEN):
+        assert leaked not in caplog.text
+
+    caplog.clear()
+    offline = ExperimentRunner(
+        targets={
+            AGENT: GraphTarget(
+                factory=single_node(render_plan),
+                runtime_digest=runtime_digest(world),
+                evaluators={"broken": evaluator},
+            )
+        },
+        secrets=resolver,
+    )
+    run = offline.run_trial(
+        local_assignment(
+            world.engine,
+            agent_id=AGENT,
+            release_id=world.releases["v1"],
+            case=agent_case(),
+            secret_refs=["env:SERVICE_KEY"],
+            runner_evaluators=[custom],
+        )
+    )
+    assert run.kind == "result"
+    assert f"ValueError: evaluator failed with {hidden}" in caplog.text
+    assert SECRET not in caplog.text
+    assert FOREIGN_TOKEN not in caplog.text
+
+    caplog.clear()
+    logging.getLogger("agenomic.experiments").warning("malformed %d", leak)
+    assert [record.getMessage() for record in caplog.records] == [
+        "a log record was withheld because it could not be redacted"
+    ]
