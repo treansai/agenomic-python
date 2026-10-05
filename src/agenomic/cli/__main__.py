@@ -350,6 +350,116 @@ def _cmd_prompts_bundle_verify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_attribute(reference: str) -> Any:
+    import importlib
+
+    module_name, _, attribute = reference.partition(":")
+    if not module_name or not attribute:
+        raise ValueError("expected module:attribute")
+    value: Any = importlib.import_module(module_name)
+    for part in attribute.split("."):
+        value = getattr(value, part)
+    return value
+
+
+def _cmd_experiment_serve(args: argparse.Namespace) -> int:
+    from agenomic.experiments.runner import ExperimentRunner
+
+    try:
+        target = _load_attribute(args.target)
+    except (ValueError, ImportError, AttributeError) as error:
+        print(f"error: cannot load --target {args.target}: {error}", file=sys.stderr)
+        return 2
+    runner = target if isinstance(target, ExperimentRunner) else None
+    if runner is None and callable(target):
+        runner = target()
+    if not isinstance(runner, ExperimentRunner):
+        print("error: --target must name an ExperimentRunner or a factory of one", file=sys.stderr)
+        return 2
+    if args.max_concurrency is not None:
+        if not 1 <= args.max_concurrency <= 64:
+            print("error: --max-concurrency must be between 1 and 64", file=sys.stderr)
+            return 2
+        runner.max_concurrency = args.max_concurrency
+    try:
+        completed = runner.serve(max_trials=args.max_trials, idle_timeout=args.idle_timeout)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    except ApiError as error:
+        return _api_failure(error)
+    print(f"runner stopped after {completed} trial(s)", file=sys.stderr)
+    return 0
+
+
+def _cmd_experiment_snapshot(args: argparse.Namespace) -> int:
+    from agenomic.experiments.runner import SnapshotRefusedError, snapshot_case
+    from agenomic.prompts.refs import is_uuid
+
+    if not is_uuid(args.agent):
+        print("error: --agent must be the lowercase agent uuid", file=sys.stderr)
+        return 2
+    try:
+        graph = _load_attribute(args.graph)
+    except (ValueError, ImportError, AttributeError) as error:
+        print(f"error: cannot load --graph {args.graph}: {error}", file=sys.stderr)
+        return 2
+    if not hasattr(graph, "get_state") and callable(graph):
+        graph = graph()
+    try:
+        case = snapshot_case(
+            graph,
+            args.thread,
+            agent_id=args.agent,
+            case_id=args.case_id,
+            checkpoint_id=args.checkpoint_id,
+        )
+    except SnapshotRefusedError as refused:
+        print(f"error: snapshot refused ({refused.reason}): {refused.message}", file=sys.stderr)
+        return 1
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    _print_json(case, args.out)
+    provenance = case["input"]["provenance"]
+    print(
+        f"wrote node_state case {case['case_id']} from checkpoint {provenance['checkpoint_id']}",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _add_experiment_parser(sub: Any) -> None:
+    experiment = sub.add_parser("experiment", help="prompt experiment runner utilities")
+    experiment_sub = experiment.add_subparsers(dest="experiment_command", required=True)
+
+    serve = experiment_sub.add_parser(
+        "serve", help="serve experiment trials; the runner token comes from AGENOMIC_RUNNER_TOKEN"
+    )
+    serve.add_argument("--target", required=True, help="module:attribute of an ExperimentRunner")
+    serve.add_argument("--max-concurrency", type=int, default=None)
+    serve.add_argument("--max-trials", type=int, default=None)
+    serve.add_argument(
+        "--idle-timeout", type=float, default=None, help="stop after this many idle seconds"
+    )
+    serve.set_defaults(func=_cmd_experiment_serve)
+
+    snapshot = experiment_sub.add_parser(
+        "snapshot", help="write a node_state case from a thread of your own checkpointer"
+    )
+    snapshot.add_argument(
+        "--graph",
+        required=True,
+        help="module:attribute of the compiled graph with its checkpointer, or a factory of it",
+    )
+    snapshot.add_argument("--agent", required=True, help="agent uuid")
+    snapshot.add_argument("--thread", required=True, help="thread_id of the source thread")
+    snapshot.add_argument("--out", default=None, help="write the case to this file")
+    snapshot.add_argument("--case-id", default=None)
+    snapshot.add_argument("--checkpoint-id", default=None)
+    snapshot.set_defaults(func=_cmd_experiment_snapshot)
+
+
 def _add_prompts_parser(sub: Any) -> None:
     prompts = sub.add_parser("prompts", help="managed prompt utilities")
     prompts_sub = prompts.add_subparsers(dest="prompts_command", required=True)
@@ -452,6 +562,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.set_defaults(func=_cmd_benchmark_serve)
 
     _add_prompts_parser(sub)
+    _add_experiment_parser(sub)
 
     return parser
 

@@ -690,3 +690,106 @@ rule of the engineering rules above.
   `bundles/production-v2.json` (two releases of the `support.system` slot
   exported from that workspace) and `keys/orgkey_01.pem`, with
   `V1_BUNDLE_DIGEST` set to the first bundle's `prompt_bundle_digest`.
+- `agenomic.experiments` (S4) imports no framework: `errors`, `models`,
+  `resources` and `secrets` use only the core dependencies, so `Client` can
+  wire `client.experiments`. The runner names (`ExperimentRunner`,
+  `GraphTarget`, `GraphNodeEntryPoint`, `CallableEntryPoint`,
+  `RunnerEvaluator`, `TrialContext`, `NamespacedStore`, `local_assignment`,
+  `snapshot_case`) load through a module `__getattr__`, kept out of
+  `__all__`; a subprocess test checks that importing the package leaves
+  LangGraph and LangChain unloaded. `errors.py` keeps the design's exception
+  names (`IsolationViolation`, `RecordedFixtureMiss`, `TrialBudgetExceeded`),
+  so `pyproject.toml` ignores N818 for that file only.
+- `client.experiments` writes each operation once as a flow, like
+  `client.prompts`. `update` and `preflight` send `If-Match`; `launch` cites
+  the preflight `spec_digest` and carries the body `idempotency_key` (it
+  retries like a read), never the header. Every experiment read recomputes
+  `spec_digest` (sha256 of `canonical_json_v1` of the spec without
+  `identity`) and raises `experiment_spec_digest_mismatch` on a difference;
+  `tests/fixtures/experiments/` holds the SPEC 7540bbd fixtures whose digest
+  two implementations recorded. Only the 04 section 3.10 methods exist, so
+  datasets and runners are managed in the web app or over HTTP. Local mode
+  raises `cloud_required`.
+- The runner token comes from the constructor or `AGENOMIC_RUNNER_TOKEN`
+  (never a CLI flag) and is checked against `agr_` plus 64 hex characters.
+  It is sent only as the bearer header and joins the literal secret set, so
+  no body can carry it. A runner token cannot call `whoami`, so the
+  workspace is pinned by the first assignment's binding (or by
+  `workspace_id=`) and any other workspace is `workspace_mismatch`.
+- Before anything runs, an assignment must agree with itself: view and
+  envelope name the same trial and attempt; the binding is thread scope with
+  the key `exp:<experiment>:<trial>:a<attempt>`, the arm's release and arm
+  key; arm, binding and prompts name one manifest digest; the arm runtime
+  digest is the target's. The prompts load with `from_online_response`
+  pinned to that digest. Any mismatch is
+  `failure(runner_configuration, ...)` and the factory is never called. The
+  runner echoes `runner_view_digest` and never recomputes it (cases may
+  hold floats).
+- Each trial gets a new `InMemorySaver` (or `checkpointer_factory(thread)`,
+  whose thread is deleted afterwards unless `keep_checkpoints`) and a new
+  `InMemoryStore` (or the user store wrapped in `NamespacedStore`). The
+  factory must compile with exactly those objects (`is` checks). The
+  wrapper checks every op in `batch` and `abatch`, so the convenience
+  methods cannot bypass it, and `list_namespaces` must name a prefix inside
+  the trial namespace. `case.input.store_seed` items are written under
+  `ctx.store_namespace`, so graphs prefix their namespaces with it. Secrets,
+  the lease token and the runner token never enter `configurable` or
+  metadata, because LangGraph copies configurable scalars into checkpoint
+  metadata; factories read `ctx.secrets` by closure.
+- Graphs run through `bind_langgraph(binding=, resolution=)` with
+  `ainvoke`, so a heartbeat can cancel them. On Python 3.10, `interrupt()`
+  fails under `ainvoke` (LangGraph's contextvars), so interrupt cases need
+  3.11; the test skips below it.
+- Terminal events (fixture miss, ambiguous fixture, budget, lease loss,
+  isolation refusals from tools) are also recorded on the trial state and
+  win over whatever the graph returns, because `ToolNode` with
+  `handle_tool_errors` or user code can swallow the exception. The budget
+  callback sets `raise_error` and `run_inline`, counts model calls before
+  they start and provider-reported tokens after; a call without usage is
+  `usage_source: "not_reported"` with null counts. A model call carries the
+  first slot of its `config_for` metadata (the result has one slot per
+  call); the runner refuses to report a call whose ref or digest is outside
+  the bundle (`prompt_outside_manifest`) before the server sees it.
+- Tools reach the proxy only through `ctx.wrap_tools`, a `BaseTool` that
+  reads the model's `tool_call_id` in `invoke`/`ainvoke` and otherwise
+  hashes namespace, task id, tool and arguments (`call_` plus 16 hex) with
+  the float-tolerant `canonical_json`. Mode `none` refuses locally. Arguments
+  are sent exact (fixtures match them) except resolved secret values, which
+  become `[REDACTED]`. `experiment_tool_call_in_progress` waits 0.5, 1 and
+  2 s, then fails as infrastructure. A live call runs the user's tool once
+  per logical id: the report body is cached and resent identically, so a
+  resent permit or a lost report never repeats the side effect.
+- A result is built once, redacted (the key rules of
+  `DEFAULT_RUNNER_REDACTION_RULES`, then every resolved secret value), and
+  frozen in an outbox keyed by `uuid5(trial, attempt, lease token)`; retries
+  resend those exact bytes, so N-14 accepts it once. No `Idempotency-Key`
+  header is sent, as the route is idempotent on lease and result digest.
+  `experiment_result_secret_detected` and `experiment_result_invalid` turn
+  into `failure(runner_configuration, ...)`; a stale lease drops the trial.
+  Failure messages are scrubbed with the `agenomic-secrets/1` patterns,
+  then the literals, then cut to 2 KiB; envelopes are never scrubbed
+  (`scrub_json` would mask `lease_token`).
+- `snapshot_case` only reads: `get_state` and its parent. It refuses
+  pending interrupts, subgraph tasks in flight, a last step with other than
+  one writer, another agent's stamp and values that a scratch copy
+  (`graph.copy` with a fresh `InMemorySaver` and no store) does not
+  reproduce. Values are stored in `dumpd` form and revived with
+  `load(..., allowed_objects="messages")`. At trial time a
+  `production_snapshot` case must reseed to the same serialized values
+  (`fork_unsupported`) and every node case must leave exactly the entry
+  point next (`entry_point_not_next`); `interrupt_after` stops after it and
+  the checkpoint history proves no other node ran. The CLI needs
+  `--graph module:attribute` to reach the user's graph and checkpointer.
+- A `callable` entry point runs inside a one-node `StateGraph(dict)` without
+  checkpointer, bound with the same pre-issued binding, so `prompts_for`
+  works in it; an interrupt there is `interrupt_unsupported_in_callable`.
+- `runner_custom` evaluators are declared with a `code_digest` (default:
+  sha256 of the function source) that must equal the spec's. Model judges
+  need `judge_model=` (a factory from the evaluator's model settings); a
+  judge failure leaves the score null and never changes the outcome.
+- `LocalPromptEngine.create_binding` refuses `exp:` keys like the registry,
+  so `local_assignment` builds the trial binding itself from
+  `LocalPromptEngine.resolve`; example 17 and the tests therefore run real
+  views offline. Its view digest serves the simulation only. `tests/experiment_fakes.py` is a strict in-process
+  runner tier (unknown members refused, lease fencing, the duplicate,
+  conflict and stale table, a minimal tool proxy) built on those views.

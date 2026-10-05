@@ -22,6 +22,7 @@ OFFLINE_EXAMPLES = [
     "14_langgraph_async_streaming.py",
     "15_langgraph_interrupt_restart.py",
     "16_langgraph_promotion_pinning.py",
+    "17_prompt_experiment_counterfactual.py",
 ]
 
 
