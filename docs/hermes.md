@@ -168,6 +168,20 @@ skip the frame and execute: fail open); it returns
   `GET /approvals/:id`: still pending blocks again, rejected or expired blocks
   and forgets the identity, approved retries `authorize` with the original
   identity so the gateway resumes and consumes the approval.
+- A retry always arrives with a new `tool_call_id` (the model emits a new tool
+  call; Hermes v2026.9.24 never reissues the blocked one), so a retry cannot be
+  told apart from another identical call: every call with the same session,
+  tool and arguments hash is treated as a retry of the pending action. One
+  approval authorizes exactly one execution: the first retry claims the
+  pending approval while it asks the gateway, and once it is allowed the
+  identity is forgotten. Another identical call that arrives while the claim
+  is held is blocked (`Agenomic approval <id> authorizes a single execution and
+  another call is using it; ...`, recorded as a local `tool.call.decision`);
+  an identical call after the approval was used asks the gateway as a new
+  action and needs its own approval. While the approval is still pending,
+  identical calls only see `still pending` and never execute. If the answer to
+  the claimed retry is lost (timeout, transport error) the claim is released,
+  so the next retry resumes the same identity and the gateway answers it.
 - The arguments hash is `blake3` over the gateway's canonical JSON
   (`agenomic.canon/v1`, test vectors generated from agenomic-cloud in
   `tests/fixtures/hermes_canonical_vectors.json`). Arguments that change
@@ -201,7 +215,14 @@ Events follow `agenomic.hermes.event/v1` (`event_id` ULID, per process `seq`,
 it reaches the queue or the spool. With `capture.content: redacted_preview`,
 previews go through `redacted_preview` in `exporter.py` (credential keys masked at any depth,
 including a content mapping's own top-level keys), credential pattern
-masking (`agmhr_`, `sk-`, bearer tokens, ...) and truncation. In every capture
+masking and truncation. Pattern masking covers token shapes (`agmhr_`, `sk-`,
+`ghp_`, `AKIA...`, private key headers), `Authorization`/`Proxy-Authorization`
+values for every scheme (`Bearer`, `Basic`, `Digest`, `Token`, `ApiKey`,
+`AWS4-HMAC-SHA256`, ...), cookie headers, `key=value` and `key: value` pairs
+whose key names a credential (`api_key`, `x-api-key`, `password`, `token`,
+`client_secret`, `Credential`, `Signature`, ...) and the password of URL user
+info (`scheme://user:***@host`). The scheme, header and key names stay
+readable; prose such as "token budget" or `max_tokens=512` is not masked. In every capture
 mode the event fields and the whole `extra` mapping, its top-level keys
 included, get the same key and pattern masking.
 
@@ -251,6 +272,13 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD` is removed even when
   allowlisted, except the runtime token variable. The supervisor token is
   never passed.
+- `--runtime-token-env` must not name the supervisor token, a provider key
+  (`*_API_KEY`, `AWS_SECRET_ACCESS_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`) or
+  another credential shaped variable (`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, ...)
+  unless it is an `AGENOMIC_` name; such a name is a settings error (exit 2).
+  When the variable is set, its value must be a runtime token (`agmhr_...`),
+  otherwise the supervisor refuses to start Hermes (exit 2). Only such a value
+  is exempt from the scrub and from `provider_secrets_absent`.
 - Every heartbeat (`--interval-s`, default 15) sends the process state and an
   isolation self check: `provider_secrets_absent` (child environment),
   `egress_restricted` (true only if a TCP connect to every `--forbidden-host`
@@ -281,7 +309,10 @@ the file is missing, unreadable, older than `AGENOMIC_HERMES_GUARD_MAX_AGE_S`
 (default 120 s), dated in the future, not `loaded`, or says `paused`,
 `quarantined` or `revoked`. When Hermes unloads the plugin (or the process
 exits) the plugin writes `loaded: false`, so the guard blocks at once instead
-of when the file goes stale. Upstream allows a `fail_closed` hook that exits
+of when the file goes stale; it then drains the exporter, closes its HTTP
+client and removes its `atexit` hook, so reloads do not accumulate adapters or
+connection pools. Shutdown is idempotent and a callback that still reaches an
+unloaded adapter blocks in enforce. Upstream allows a `fail_closed` hook that exits
 non zero with an empty stdout, so every failure path, including internal
 errors, prints `{"action": "block", "message": ...}` and exits 2. Allowing
 prints nothing and exits 0. `AGENOMIC_HERMES_GUARD_MAX_AGE_S` must be a

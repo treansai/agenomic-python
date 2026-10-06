@@ -96,12 +96,25 @@ class _ApiClient:
         )
 
     def close(self) -> None:
-        """Release the connection pool.
+        """Release the connection pool. Later requests fail with ``HermesApiError("closed")``.
 
         Example:
-            >>> RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport()).close()
+            >>> c = RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport())
+            >>> c.close()
+            >>> c.closed
+            True
         """
         self._http.close()
+
+    @property
+    def closed(self) -> bool:
+        """Whether :meth:`close` released the connection pool.
+
+        Example:
+            >>> RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport()).closed
+            False
+        """
+        return self._http.is_closed
 
     def request(
         self,
@@ -125,10 +138,15 @@ class _ApiClient:
         """
         budget = self.report_s if timeout_s is None else timeout_s
         timeout = httpx.Timeout(budget, connect=min(self._connect_s, budget))
+        if self._http.is_closed:
+            raise HermesApiError("closed", f"{method} {path}: client closed", 0)
         try:
             response = self._http.request(
                 method, self._base + path, json=json_body, timeout=timeout
             )
+        except RuntimeError:
+            # httpx refuses a request on a client closed meanwhile (adapter shutdown).
+            raise HermesApiError("closed", f"{method} {path}: client closed", 0) from None
         except httpx.TimeoutException as e:
             logger.warning("%s %s timed out (%s)", method, path, type(e).__name__)
             raise HermesApiError("timeout", f"{method} {path} timed out", 0) from None

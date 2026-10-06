@@ -292,3 +292,75 @@ def test_spool_is_replayed_while_live_traffic_continues(tmp_path: Path) -> None:
     assert replayed_after, "the spool is replayed"
     assert replayed_after[0] < feed_limit, "while live traffic was still flowing"
     exporter.close(2.0)
+
+
+@pytest.mark.parametrize(
+    ("text", "kept", "secret"),
+    [
+        ("Authorization: Basic cGxhaW5zZWNyZXQ=", "Authorization: Basic ***", "cGxhaW5zZWNyZXQ"),
+        ("Authorization: Bearer abc.def-ghi", "Authorization: Bearer ***", "abc.def"),
+        ("authorization: Token tok123secret", "authorization: Token ***", "tok123secret"),
+        ("Authorization: ApiKey key123secret", "Authorization: ApiKey ***", "key123secret"),
+        (
+            'Authorization: Digest username="bob", response="6629fae49393a0539"',
+            "Authorization: Digest ***",
+            "6629fae49393a0539",
+        ),
+        (
+            '{"authorization": "Digest username=\\"bob\\", response=\\"6629fae4\\""}',
+            '{"authorization": "Digest ***"}',
+            "6629fae4",
+        ),
+        (
+            "curl -H 'Proxy-Authorization: Basic dXNlcjpwYXNz' https://x",
+            "curl -H 'Proxy-Authorization: Basic ***' https://x",
+            "dXNlcjpwYXNz",
+        ),
+        (
+            "Authorization: AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/s3, Signature=fe5f80f7",
+            "Authorization: AWS4-HMAC-SHA256 ***",
+            "fe5f80f7",
+        ),
+        (
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/s3, SignedHeaders=host, Signature=fe5f80f7",
+            "AWS4-HMAC-SHA256 Credential=***, SignedHeaders=host, Signature=***",
+            "fe5f80f7",
+        ),
+        (
+            "curl -H 'x-api-key: value12345' https://x",
+            "curl -H 'x-api-key: ***' https://x",
+            "value12345",
+        ),
+        ("GET /v1?api_key=plainkey&page=2", "GET /v1?api_key=***&page=2", "plainkey"),
+        ("login password=hunter2 ok", "login password=*** ok", "hunter2"),
+        ("token: t0k3nvalue", "token: ***", "t0k3nvalue"),
+        ('{"client_secret": "s3cr3t value"}', '{"client_secret": "***"}', "s3cr3t"),
+        ("AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI", "AWS_SECRET_ACCESS_KEY=***", "wJalrXUtnFEMI"),
+        ("Cookie: session=abc123; theme=dark", "Cookie: ***", "abc123"),
+        (
+            "postgres://admin:pa55word@db.example:5432/app",
+            "postgres://admin:***@db.example:5432/app",
+            "pa55word",
+        ),
+    ],
+)
+def test_credential_schemes_are_masked_but_stay_readable(text: str, kept: str, secret: str) -> None:
+    assert mask_text(text) == kept
+    event = EventBuilder("metadata").build("api.request.failed", reason=text)
+    assert secret not in json.dumps(event)
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "the token budget was exceeded",
+        "max_tokens=512",
+        "input_tokens: 3, output_tokens: 7",
+        "authorization required for this tool",
+        "a secret is not shared here",
+        "ssh://git@github.com/org/repo.git",
+        "if token == expected: ok",
+    ],
+)
+def test_ordinary_prose_is_not_masked(prose: str) -> None:
+    assert mask_text(prose) == prose

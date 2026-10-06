@@ -107,6 +107,10 @@ APPROVAL_MESSAGE = (
     "Agenomic approval {approval_id} required; the action was not executed. "
     "Retry the same call after approval."
 )
+APPROVAL_IN_USE_MESSAGE = (
+    "Agenomic approval {approval_id} authorizes a single execution and another call is "
+    "using it; the action was not executed."
+)
 NO_AUTH_MESSAGE = "Agenomic: no valid authorization for this action"
 
 
@@ -135,6 +139,10 @@ class _Pending:
     logical_call_id: str
     attempt: int
     approval_id: str
+    # The invocation currently retrying under this approval. One approval authorizes one
+    # execution: while an invocation holds the claim, any other identical invocation is
+    # blocked instead of being resumed under the same identity (and the same permit).
+    claimed_by: Optional[str] = None
 
 
 @dataclass
@@ -328,6 +336,7 @@ class HermesAdapter:
         self._start_threads = start_threads
         self._lock = threading.RLock()
         self._started = False
+        self._shut_down = False
         self._hello_ok = False
         self._hello_attempt_at = float("-inf")
         self._tools_sent = False
@@ -511,7 +520,8 @@ class HermesAdapter:
         if platform and not self._platform:
             self._platform = platform
         with self._lock:
-            first = not self._started
+            # A shut down adapter never starts again (no heartbeat, no atexit hook).
+            first = not self._started and not self._shut_down
             self._started = True
         if not first:
             return
@@ -529,7 +539,8 @@ class HermesAdapter:
             atexit.register(self.shutdown)
 
     def shutdown(self) -> None:
-        """Stop the heartbeat, mark the guard status not loaded, drain the exporter (bounded).
+        """Stop the heartbeat, mark the guard status not loaded, drain the exporter (bounded),
+        then close the HTTP client and drop the ``atexit`` hook. Idempotent.
 
         Example:
             >>> a = _demo_adapter()
@@ -538,7 +549,17 @@ class HermesAdapter:
             False
             >>> json.loads(a.status_file.read_text())["loaded"]
             False
+            >>> a.client.closed
+            True
+            >>> a.shutdown()  # a second call does nothing
         """
+        with self._lock:
+            if self._shut_down:
+                return
+            self._shut_down = True
+        # The hook holds this bound method, and with it the adapter, its client and its
+        # exporter: a reload must not keep every unloaded adapter alive until exit.
+        atexit.unregister(self.shutdown)
         self._stop.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
@@ -550,6 +571,13 @@ class HermesAdapter:
             self.exporter.close(2.0)
         except Exception as exc:
             logger.debug("exporter close failed: %s", type(exc).__name__)
+        # The heartbeat (acks, report retries) is joined and the exporter drained: nothing
+        # of this adapter sends any more. A late callback gets a transport error and, in
+        # enforce, blocks.
+        try:
+            self.client.close()
+        except Exception as exc:
+            logger.debug("client close failed: %s", type(exc).__name__)
 
     # ------------------------------------------------------------------
     # server state
@@ -1514,6 +1542,14 @@ class HermesAdapter:
                     del queue[i]
                     break
 
+    def _drop_pending(self, key: tuple[str, str, str], pending: Optional[_Pending]) -> None:
+        """Forget the approval this invocation retried under, never one bound to another."""
+        if pending is None:
+            return
+        with self._lock:
+            if self._pending.get(key) is pending:
+                del self._pending[key]
+
     def _approval_gate(self, pending: _Pending) -> tuple[Optional[str], bool]:
         """Before a controlled retry: ``(block, keep_identity)``.
 
@@ -1574,15 +1610,67 @@ class HermesAdapter:
                 if reservation is not None:
                     with self._lock:
                         self._provisional_delegations[key] = reservation
+        claim = tool_call_id or f"hermes-{uuid.uuid4().hex}"
         with self._lock:
             pending = self._pending.get(key)
             previous = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None
+            in_use = pending is not None and pending.claimed_by not in (None, claim)
+            if pending is not None and not in_use:
+                pending.claimed_by = claim
+        if pending is not None and in_use:
+            # Another invocation is retrying under this approval right now; it is the one
+            # the approval authorizes. This one is not resumed under the same identity.
+            message = APPROVAL_IN_USE_MESSAGE.format(approval_id=pending.approval_id)
+            self._emit_decision(
+                sid,
+                tool,
+                tool_call_id,
+                "require_approval",
+                message,
+                local_hash,
+                extra={"local": True, "approval_id": pending.approval_id},
+            )
+            return _Verdict(block=message)
+        try:
+            return self._authorize_claimed(
+                tool=tool,
+                args=args,
+                sid=sid,
+                tool_call_id=tool_call_id,
+                turn_id=turn_id,
+                api_request_id=api_request_id,
+                local_hash=local_hash,
+                key=key,
+                pending=pending,
+                previous=previous,
+            )
+        finally:
+            if pending is not None:
+                with self._lock:
+                    # Still waiting (pending approval, transport error, observe): the next
+                    # retry may claim it. An allowed or denied call already removed it.
+                    if pending.claimed_by == claim:
+                        pending.claimed_by = None
+
+    def _authorize_claimed(
+        self,
+        *,
+        tool: str,
+        args: dict[str, JsonValue],
+        sid: str,
+        tool_call_id: str,
+        turn_id: str,
+        api_request_id: str,
+        local_hash: str,
+        key: tuple[str, str, str],
+        pending: Optional[_Pending],
+        previous: Optional[_Authorization],
+    ) -> _Verdict:
         if pending is not None:
             gate, keep = self._approval_gate(pending)
             if gate is not None:
                 if not keep:
-                    with self._lock:
-                        self._pending.pop(key, None)
+                    self._drop_pending(key, pending)
                     self._settle_delegation(key, commit=False)
                 return _Verdict(block=gate)
             logical_call_id, attempt = pending.logical_call_id, pending.attempt
@@ -1646,8 +1734,7 @@ class HermesAdapter:
         )
         shadow = effective_mode == "shadow"
         if decision == "deny" and not shadow:
-            with self._lock:
-                self._pending.pop(key, None)
+            self._drop_pending(key, pending)
             self._settle_delegation(key, commit=False)
             return _Verdict(
                 block=f"Agenomic denied {tool}: {explanation or 'policy'} (decision {decision_id or 'unknown'})"
@@ -1659,11 +1746,14 @@ class HermesAdapter:
                     "invalid_response", "require_approval without approval_id", status
                 )
             with self._lock:
-                self._pending[key] = _Pending(
-                    _str(resp.get("logical_call_id")) or logical_call_id,
-                    int(cast(Any, resp.get("attempt")) or attempt),
-                    approval_id,
-                )
+                current = self._pending.get(key)
+                # Never replace an approval another invocation is bound to.
+                if current is None or current is pending:
+                    self._pending[key] = _Pending(
+                        _str(resp.get("logical_call_id")) or logical_call_id,
+                        int(cast(Any, resp.get("attempt")) or attempt),
+                        approval_id,
+                    )
             return _Verdict(block=APPROVAL_MESSAGE.format(approval_id=approval_id))
         permit = resp.get("permit")
         record_id = _str(resp.get("record_id")) or None
@@ -1683,8 +1773,8 @@ class HermesAdapter:
             server_hash=_str(resp.get("arguments_hash")) or None,
             decision_id=decision_id,
         )
-        with self._lock:
-            self._pending.pop(key, None)
+        # This invocation consumed the approval: the next identical call needs a new one.
+        self._drop_pending(key, pending)
         if not shadow:
             local_block = self._local_checks(tool, args)
             if local_block is not None:

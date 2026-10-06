@@ -43,7 +43,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator
 
 from agenomic.integrations.hermes.client import HermesApiError, SupervisorClient
 from agenomic.integrations.hermes.config import DEFAULT_TOKEN_ENV
@@ -86,6 +86,66 @@ _SECRET_NAME = re.compile(
 _PROVIDER_KEYS = re.compile(
     r"_API_KEY$|^API_KEY$|^AWS_SECRET_ACCESS_KEY$|^GOOGLE_APPLICATION_CREDENTIALS$", re.I
 )
+#: Prefix of every Agenomic runtime token (the credential the Hermes plugin presents).
+RUNTIME_TOKEN_PREFIX = "agmhr_"
+
+
+def runtime_token_env_problem(name: str) -> Optional[str]:
+    """Why ``name`` cannot carry the runtime token into the child, or ``None``.
+
+    The runtime token variable is the only credential the child receives, so it must
+    not be the supervisor token, a provider key, or any other credential shaped name
+    (``*_API_KEY``, ``*_TOKEN``, ``*_SECRET``, ``*_PASSWORD``...) unless it is an
+    ``AGENOMIC_`` name.
+
+    Example:
+        >>> runtime_token_env_problem("AGENOMIC_HERMES_RUNTIME_TOKEN") is None
+        True
+        >>> runtime_token_env_problem("OPENAI_API_KEY")
+        'OPENAI_API_KEY is a provider credential name, not the Agenomic runtime token'
+    """
+    if name == SUPERVISOR_TOKEN_ENV:
+        return f"{name} is the supervisor credential and is never passed to the child"
+    if _PROVIDER_KEYS.search(name):
+        return f"{name} is a provider credential name, not the Agenomic runtime token"
+    if _SECRET_NAME.search(name) and not name.upper().startswith("AGENOMIC_"):
+        return f"{name} names another credential; use an AGENOMIC_ variable for the runtime token"
+    return None
+
+
+def runtime_token_problem(
+    source: Mapping[str, str], runtime_token_env: str = DEFAULT_TOKEN_ENV
+) -> Optional[str]:
+    """Why the runtime token in ``source`` cannot be given to the child, or ``None``.
+
+    An absent variable is not a problem (the child then has no runtime credential);
+    a present one must be a valid name holding an ``agmhr_`` token.
+
+    Example:
+        >>> runtime_token_problem({"AGENOMIC_HERMES_RUNTIME_TOKEN": "agmhr_x"}) is None
+        True
+        >>> runtime_token_problem({"AGENOMIC_HERMES_RUNTIME_TOKEN": "sk-x"})
+        'AGENOMIC_HERMES_RUNTIME_TOKEN does not hold an Agenomic runtime token (agmhr_...)'
+    """
+    problem = runtime_token_env_problem(runtime_token_env)
+    if problem is not None:
+        return problem
+    value = source.get(runtime_token_env)
+    if value is not None and not value.startswith(RUNTIME_TOKEN_PREFIX):
+        return (
+            f"{runtime_token_env} does not hold an Agenomic runtime token "
+            f"({RUNTIME_TOKEN_PREFIX}...)"
+        )
+    return None
+
+
+def _runtime_token_exempt(name: str, source: Mapping[str, str], runtime_token_env: str) -> bool:
+    """``name`` is the runtime token variable, validly named and holding an ``agmhr_`` value."""
+    return (
+        name == runtime_token_env
+        and runtime_token_env_problem(name) is None
+        and source.get(name, "").startswith(RUNTIME_TOKEN_PREFIX)
+    )
 
 
 def build_child_env(
@@ -98,7 +158,8 @@ def build_child_env(
 
     Only allowlisted names are copied; any ``*_API_KEY``, ``*_TOKEN``,
     ``*_SECRET``... is removed even when allowlisted, except the runtime
-    token variable. The supervisor token is never copied.
+    token variable when its name is valid (:func:`runtime_token_env_problem`) and it
+    holds an ``agmhr_`` token. The supervisor token is never copied.
 
     Example:
         >>> build_child_env({"HOME": "/h", "X": "1"}, allow=["X"])
@@ -109,7 +170,10 @@ def build_child_env(
     for name in sorted(names):
         if name == SUPERVISOR_TOKEN_ENV or name not in source:
             continue
-        if name != runtime_token_env and _SECRET_NAME.search(name):
+        if name == runtime_token_env:
+            if not _runtime_token_exempt(name, source, runtime_token_env):
+                continue
+        elif _SECRET_NAME.search(name):
             continue
         env[name] = source[name]
     return env
@@ -120,14 +184,21 @@ def provider_secrets_absent(
 ) -> bool:
     """No provider key and no supervisor credential in ``env``.
 
+    Only a validly named runtime token variable holding an ``agmhr_`` token is exempt,
+    so a provider key configured as the runtime token variable is still reported.
+
     Example:
         >>> provider_secrets_absent({"OPENAI_API_KEY": "x"})
+        False
+        >>> provider_secrets_absent({"OPENAI_API_KEY": "sk-x"}, runtime_token_env="OPENAI_API_KEY")
         False
     """
     for name in env:
         if name == SUPERVISOR_TOKEN_ENV:
             return False
-        if name != runtime_token_env and (_PROVIDER_KEYS.search(name) or _SECRET_NAME.search(name)):
+        if _runtime_token_exempt(name, env, runtime_token_env):
+            continue
+        if _PROVIDER_KEYS.search(name) or _SECRET_NAME.search(name):
             return False
     return True
 
@@ -339,6 +410,14 @@ class SupervisorSettings(BaseModel):
     restart: bool = True
     max_restarts: int = Field(default=5, ge=0)
     runtime_token_env: str = Field(default=DEFAULT_TOKEN_ENV, min_length=1)
+
+    @field_validator("runtime_token_env")
+    @classmethod
+    def _runtime_token_env_is_not_a_provider_credential(cls, value: str) -> str:
+        problem = runtime_token_env_problem(value)
+        if problem is not None:
+            raise ValueError(problem)
+        return value
 
 
 def _digest_matches(content: bytes, digest: str) -> bool:
@@ -899,6 +978,10 @@ def main(
     except ValidationError as exc:
         logger.error("invalid supervisor settings: %s", exc.errors(include_url=False))
         return 2
+    problem = runtime_token_problem(env, settings.runtime_token_env)
+    if problem is not None:
+        logger.error("refusing to start Hermes: %s", problem)
+        return 2
     client = SupervisorClient(endpoint, token)
     try:
         return Supervisor(settings, client, environ=env).run()
@@ -925,6 +1008,8 @@ __all__ = [
     "egress_restricted",
     "isolation_report",
     "provider_secrets_absent",
+    "runtime_token_env_problem",
+    "runtime_token_problem",
     "sync_skills",
     "writable_by",
 ]

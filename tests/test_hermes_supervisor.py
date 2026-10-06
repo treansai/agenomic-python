@@ -89,8 +89,10 @@ def test_child_env_is_allowlisted_and_scrubbed() -> None:
     assert provider_secrets_absent(env)
     assert not provider_secrets_absent(PARENT_ENV)
     assert not provider_secrets_absent({"AGENOMIC_HERMES_SUPERVISOR_TOKEN": "x"})
-    custom = build_child_env(PARENT_ENV, runtime_token_env="DB_PASSWORD")
-    assert "DB_PASSWORD" in custom
+    custom = build_child_env(
+        {**PARENT_ENV, "AGENOMIC_RT": "agmhr_custom"}, runtime_token_env="AGENOMIC_RT"
+    )
+    assert custom["AGENOMIC_RT"] == "agmhr_custom"
     assert "AGENOMIC_HERMES_RUNTIME_TOKEN" not in custom
 
 
@@ -536,3 +538,84 @@ def test_final_heartbeat_is_report_only(monkeypatch: pytest.MonkeyPatch, tmp_pat
         if proc is not None and proc.poll() is None:
             proc.kill()
             proc.wait(10)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "API_KEY",
+        "AWS_SECRET_ACCESS_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GITHUB_TOKEN",
+        "DB_PASSWORD",
+        "AGENOMIC_HERMES_SUPERVISOR_TOKEN",
+        "AGENOMIC_PROVIDER_API_KEY",
+    ],
+)
+def test_runtime_token_env_cannot_name_another_credential(name: str) -> None:
+    with pytest.raises(ValidationError):
+        SupervisorSettings(argv=["hermes"], hermes_home=Path("/h"), runtime_token_env=name)
+    # Even when called directly, the child does not get that credential and the
+    # isolation self check does not exempt it.
+    env = build_child_env({**PARENT_ENV, name: "agmhr_lookalike"}, runtime_token_env=name)
+    assert name not in env
+    assert not provider_secrets_absent({name: "agmhr_lookalike"}, runtime_token_env=name)
+    assert (
+        SupervisorSettings(
+            argv=["hermes"], hermes_home=Path("/h"), runtime_token_env="AGENOMIC_RT"
+        ).runtime_token_env
+        == "AGENOMIC_RT"
+    )
+
+
+def test_runtime_token_must_be_an_agenomic_runtime_token() -> None:
+    env = {"PATH": "/bin", "AGENOMIC_HERMES_RUNTIME_TOKEN": "sk-provider-key"}
+    assert "AGENOMIC_HERMES_RUNTIME_TOKEN" not in build_child_env(env)
+    assert not provider_secrets_absent(env)
+    assert provider_secrets_absent({"AGENOMIC_HERMES_RUNTIME_TOKEN": "agmhr_x"})
+    assert sup.runtime_token_problem(env) is not None
+    assert sup.runtime_token_problem({"PATH": "/bin"}) is None
+
+
+@posix_only
+@pytest.mark.parametrize(
+    ("extra_args", "environ"),
+    [
+        (["--runtime-token-env", "OPENAI_API_KEY"], {"OPENAI_API_KEY": "sk-openai"}),
+        ([], {"AGENOMIC_HERMES_RUNTIME_TOKEN": "sk-openai"}),
+    ],
+)
+def test_main_refuses_a_provider_credential_as_runtime_token(
+    tmp_path: Path, extra_args: list[str], environ: dict[str, str]
+) -> None:
+    from hermes_fakes import FakeAgenomic
+
+    server = FakeAgenomic()
+    try:
+        code = sup.main(
+            [
+                "--endpoint",
+                server.url,
+                "--hermes-home",
+                str(tmp_path),
+                "--no-restart",
+                "--forbidden-host",
+                "127.0.0.1:9",
+                *extra_args,
+                "--",
+                sys.executable,
+                "-c",
+                "pass",
+            ],
+            environ={
+                "AGENOMIC_HERMES_SUPERVISOR_TOKEN": "agmhs_t",
+                "PATH": os.environ.get("PATH", ""),
+                **environ,
+            },
+        )
+        assert code == 2
+        assert not [r for r in server.requests if r.path == "/v1/hermes/supervisor/heartbeat"]
+    finally:
+        server.close()

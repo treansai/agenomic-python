@@ -255,6 +255,9 @@ class FakeAgenomic:
     fail_events: int = 0
     heartbeat_interval_secs: int = 15
     auto_approve: bool = False
+    #: Answer a repeated authorize of an action whose approval was already consumed with
+    #: ``allow`` again (an idempotent replay of the same logical call and attempt).
+    replay_consumed: bool = False
 
     def __post_init__(self) -> None:
         self.requests: list[Recorded] = []
@@ -471,6 +474,12 @@ class FakeAgenomic:
         pending = self.pending_by_call.get(call_id)
         if pending is not None and self.approvals[pending]["status"] == "approved":
             self.approvals[pending]["status"] = "consumed"
+            outcome = "allow"
+        elif (
+            pending is not None
+            and self.replay_consumed
+            and self.approvals[pending]["status"] == "consumed"
+        ):
             outcome = "allow"
         elif pending is not None and self.approvals[pending]["status"] == "pending":
             outcome = "require_approval"

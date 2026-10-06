@@ -78,15 +78,42 @@ SECRET_KEYS = (
     "client_secret",
     "cookie",
 )
+#: Credential shaped tokens, masked whole wherever they appear.
 _SECRET_PATTERNS = re.compile(
     r"(agmh[rs]_[A-Za-z0-9_\-]+"
     r"|sk-[A-Za-z0-9_\-]{8,}"
-    r"|(?i:bearer)\s+[A-Za-z0-9._\-]+"
     r"|gh[pousr]_[A-Za-z0-9]{16,}"
     r"|AKIA[0-9A-Z]{16}"
     r"|xox[abprs]-[A-Za-z0-9\-]+"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
 )
+#: HTTP authorization schemes kept readable in front of a masked credential.
+_AUTH_SCHEMES = (
+    r"bearer|basic|digest|token|apikey|api-key|aws4-hmac-sha256|hmac-sha256|negotiate|ntlm"
+    r"|dpop|gnap|hoba|mutual|signature|sharedkey|sharedkeylite|vapid"
+)
+#: ``Authorization: <scheme> <credential>`` (also ``Proxy-Authorization``) and cookie
+#: headers: the header name and scheme stay, the rest of the value is masked up to the
+#: quote that encloses the header (shell argument, JSON string) or the end of the line.
+_HEADER_SECRET = re.compile(
+    r"(?i)(?<![\w-])([\"']?)((?:proxy-)?authorization|(?:set-)?cookie)"
+    r"([\"']?[ \t]*[:=][ \t]*)([\"']?)"
+    rf"((?:{_AUTH_SCHEMES})[ \t]+)?"
+)
+#: A bare ``Bearer <token>`` outside a header.
+_BEARER_SECRET = re.compile(r"(?i)(?<![\w-])(bearer[ \t]+)([A-Za-z0-9._~+/\-]+=*)")
+#: ``key=value`` / ``key: value`` pairs whose key names a credential (``api_key``,
+#: ``x-api-key``, ``password``, ``auth_token``, ``client_secret``, AWS ``Credential`` and
+#: ``Signature``...). The key must be followed by ``:`` or ``=``, so prose such as
+#: "the token budget" or ``max_tokens=512`` stays readable.
+_KEY_VALUE_SECRET = re.compile(
+    r"(?i)(?<![\w-])([\w-]*?(?:api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key"
+    r"|token|password|passwd|secret|credentials?|signature))"
+    r"([\"']?[ \t]*[:=][ \t]*)"
+    r"(\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s\"'&,;<>=][^\s\"'&,;<>]*)"
+)
+#: ``scheme://user:password@host``: the password is masked, the user and host stay.
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://[^\s/:@\"']+:)([^\s/@\"']+)(@)")
 _SECRET_KEY_PARTS = tuple(
     sorted({re.sub(r"[^a-z0-9]", "", key) for key in SECRET_KEYS} - {"token"})
 ) + ("credential",)
@@ -162,14 +189,51 @@ def content_hash(value: object) -> str:
         return arguments_hash({"repr": repr(value)})
 
 
+def _mask_quoted(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[0] + _MASK + value[0]
+    return _MASK
+
+
+def _mask_headers(text: str) -> str:
+    out: list[str] = []
+    pos = 0
+    for m in _HEADER_SECRET.finditer(text):
+        if m.start() < pos:
+            continue
+        quote = m.group(4) or m.group(1)
+        end = m.end()
+        while end < len(text) and text[end] not in "\r\n":
+            if quote and text[end] == "\\":
+                end += 2
+                continue
+            if quote and text[end] == quote:
+                break
+            end += 1
+        end = min(end, len(text))
+        if end > m.end():
+            out.append(text[pos : m.end()] + _MASK)
+            pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def mask_text(text: str) -> str:
-    """Mask credential shaped substrings.
+    """Mask credential shaped substrings; schemes and key names stay readable.
 
     Example:
         >>> mask_text("key sk-abcdefghijkl and agmhr_123")
         'key *** and ***'
+        >>> mask_text("Authorization: Basic cGxhaW5zZWNyZXQ=")
+        'Authorization: Basic ***'
+        >>> mask_text("password=hunter2 max_tokens=512 https://u:pw@db.example/x")
+        'password=*** max_tokens=512 https://u:***@db.example/x'
     """
-    return _SECRET_PATTERNS.sub("***", text)
+    text = _mask_headers(text)
+    text = _BEARER_SECRET.sub(lambda m: m.group(1) + _MASK, text)
+    text = _KEY_VALUE_SECRET.sub(lambda m: m.group(1) + m.group(2) + _mask_quoted(m.group(3)), text)
+    text = _URL_USERINFO.sub(lambda m: m.group(1) + _MASK + m.group(3), text)
+    return _SECRET_PATTERNS.sub(_MASK, text)
 
 
 def redacted_preview(value: object, limit: int) -> str:

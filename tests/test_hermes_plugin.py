@@ -283,6 +283,93 @@ def test_require_approval_blocks_then_retry_reuses_identity(
     assert server.reports()[0].body["logical_call_id"] == "call_1"
 
 
+def _approved_write(
+    server: FakeAgenomic, tmp_path: Path
+) -> tuple[HermesAdapter, Runner, dict[str, Any], Path, str]:
+    """A write that required an approval which a human then granted."""
+    server.decide = lambda body: "require_approval"
+    server.replay_consumed = True
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    target = tmp_path / "approved.txt"
+    args = {"path": str(target), "content": "x"}
+    runner.agent_loop("write_file", args, tcid="call_1")
+    approval_id = next(iter(server.approvals))
+    server.approve(approval_id)
+    return adapter, runner, args, target, approval_id
+
+
+def test_one_approval_authorizes_one_concurrent_invocation(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter, runner, args, target, approval_id = _approved_write(server, tmp_path)
+    original = adapter.client.authorize
+    concurrent: list[str] = []
+    interleaved: list[bool] = []
+
+    def authorize_then_interleave(sid: str, body: Any) -> Any:
+        answer = original(sid, body)
+        if not interleaved:
+            interleaved.append(True)
+            # A second identical invocation (another tool_call_id) arrives while the
+            # first retry holds the granted approval and has not executed yet.
+            concurrent.append(
+                runner.agent_loop("write_file", args, tcid="call_3", effect=write_effect(target))
+            )
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", authorize_then_interleave)
+    runner.agent_loop("write_file", args, tcid="call_2", effect=write_effect(target))
+
+    assert runner.executions == 1
+    assert target.read_text() == "x"
+    message = json.loads(concurrent[0])["error"]
+    assert message == plugin_mod.APPROVAL_IN_USE_MESSAGE.format(approval_id=approval_id)
+    assert [c.body["tool_call_id"] for c in server.authorize_calls()] == ["call_1", "call_1"]
+    assert len(server.reports()) == 1
+
+
+def test_consumed_approval_is_not_reused_by_a_later_identical_invocation(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter, runner, args, target, approval_id = _approved_write(server, tmp_path)
+    runner.agent_loop("write_file", args, tcid="call_2", effect=write_effect(target))
+    assert runner.executions == 1
+    later = json.loads(
+        runner.agent_loop("write_file", args, tcid="call_3", effect=write_effect(target))
+    )
+    assert runner.executions == 1
+    assert target.read_text() == "x"
+    retry = server.authorize_calls()[-1].body
+    assert retry["tool_call_id"] == "call_3", "a new logical action, not the approved one"
+    fresh = server.pending_by_call["call_3"]
+    assert fresh != approval_id
+    assert later["error"] == APPROVAL_MESSAGE.format(approval_id=fresh)
+
+
+def test_lost_answer_releases_the_approval_for_the_next_retry(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter, runner, args, target, approval_id = _approved_write(server, tmp_path)
+    original = adapter.client.authorize
+    lost: list[bool] = []
+
+    def lose_first_answer(sid: str, body: Any) -> Any:
+        answer = original(sid, body)
+        if not lost:
+            lost.append(True)
+            raise HermesApiError("timeout", "authorize timed out", 0)
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", lose_first_answer)
+    first = json.loads(runner.agent_loop("write_file", args, tcid="call_2"))
+    assert "error" in first
+    assert server.approvals[approval_id]["status"] == "consumed"
+    runner.agent_loop("write_file", args, tcid="call_3", effect=write_effect(target))
+    assert runner.executions == 1
+    assert server.authorize_calls()[-1].body["tool_call_id"] == "call_1"
+
+
 def test_rejected_approval_blocks_and_forgets_identity(
     server: FakeAgenomic, tmp_path: Path
 ) -> None:
@@ -1229,3 +1316,40 @@ def test_unconfirmed_mutator_change_blocks_in_enforce(
     else:
         assert runner.executions == 1, "shadow records the change but does not block"
         assert len(server.authorize_calls()) == 1
+
+
+def test_shutdown_closes_the_client_and_releases_the_atexit_hook(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hooks: list[Callable[[], None]] = []
+    monkeypatch.setattr(plugin_mod.atexit, "register", hooks.append)
+    monkeypatch.setattr(
+        plugin_mod.atexit, "unregister", lambda f: [hooks.remove(h) for h in list(hooks) if h == f]
+    )
+    config = AdapterConfig.model_validate(
+        {"endpoint": server.url, "buffer": {"flush_interval_s": 0.05}}
+    )
+    ctx = FakeCtx()
+    adapter = HermesAdapter(
+        config, SecretStr("agmhr_t"), ctx=ctx, hermes_home=tmp_path / "h", identity=dict(PINNED)
+    )
+    adapter.install(ctx)
+    adapter.on_session_start(session_id="s", platform="cli")
+    assert hooks == [adapter.shutdown]
+    assert not adapter.client.closed
+
+    closes: list[float] = []
+    original_close = adapter.exporter.close
+    monkeypatch.setattr(
+        adapter.exporter, "close", lambda timeout=None: closes.append(1) or original_close(timeout)
+    )
+    adapter.shutdown()
+    assert hooks == [], "the unloaded adapter is no longer kept alive by atexit"
+    assert adapter.client.closed
+    assert closes == [1]
+    adapter.shutdown()  # idempotent: nothing is drained or closed twice
+    assert closes == [1]
+    # A callback after the unload neither restarts the adapter nor runs the tool.
+    out = Runner(adapter).agent_loop("terminal", {"command": "ls"}, sid="s", tcid="late")
+    assert "error" in json.loads(out)
+    assert hooks == []
