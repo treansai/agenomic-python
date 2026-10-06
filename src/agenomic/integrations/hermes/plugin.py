@@ -409,6 +409,12 @@ class HermesAdapter:
         self.status_file = status_path({"HERMES_HOME": str(self.home)})
         self._start_threads = start_threads
         self._lock = threading.RLock()
+        # Server state updates are ordered by when their request was sent: a response never
+        # replaces a state applied from a request sent after it (heartbeat, hello, session
+        # admission and authorize overlap across threads).
+        self._state_lock = threading.Lock()
+        self._state_sent = 0
+        self._state_applied = 0
         self._started = False
         self._shut_down = False
         self._hello_ok = False
@@ -702,9 +708,26 @@ class HermesAdapter:
             return "shadow"
         return "enforce"
 
-    def _set_state(self, state: object) -> None:
-        if isinstance(state, str) and state:
+    def _state_request(self) -> int:
+        """Sequence number of a request about to be sent whose response carries a state."""
+        with self._state_lock:
+            self._state_sent += 1
+            return self._state_sent
+
+    def _set_state(self, state: object, seq: Optional[int] = None) -> bool:
+        """Apply a server state unless a request sent after ``seq`` already applied one.
+        Without ``seq`` the state counts as the newest. Returns whether it was applied."""
+        if not (isinstance(state, str) and state):
+            return False
+        with self._state_lock:
+            if seq is None:
+                self._state_sent += 1
+                seq = self._state_sent
+            if seq < self._state_applied:
+                return False
+            self._state_applied = seq
             self._effective_state = state
+            return True
 
     def _instance_status(self) -> str:
         if self._local_status:
@@ -816,6 +839,7 @@ class HermesAdapter:
     def _hello(self) -> bool:
         self._hello_attempt_at = time.monotonic()
         foreign = self.foreign_mutators()
+        seq = self._state_request()
         try:
             resp = self.client.hello(self._hello_body(foreign))
         except HermesApiError as exc:
@@ -826,7 +850,7 @@ class HermesAdapter:
         self._foreign = foreign
         self._hello_ok = True
         self._instance_id = _str(resp.get("instance_id")) or None
-        self._set_state(resp.get("effective_state"))
+        self._set_state(resp.get("effective_state"), seq)
         profile = resp.get("profile")
         if isinstance(profile, dict) and isinstance(profile.get("document"), dict):
             self._profile = cast(dict[str, Any], profile["document"])
@@ -928,10 +952,11 @@ class HermesAdapter:
                 active: list[JsonValue] = [
                     s.hermes_session_id for s in self._sessions.values() if s.active
                 ]
+            seq = self._state_request()
             resp = self.client.heartbeat(
                 {"active_sessions": active, "exporter": dict(self.exporter.stats())}
             )
-            self._set_state(resp.get("effective_state"))
+            self._set_state(resp.get("effective_state"), seq)
             commands = resp.get("commands")
             if isinstance(commands, list):
                 for command in commands:
@@ -1176,13 +1201,14 @@ class HermesAdapter:
             body["subagent_id"] = session.subagent_id
         if session.delegation_id:
             body["delegation_id"] = session.delegation_id
+        seq = self._state_request()
         try:
             resp = self.client.create_session(body)
         except HermesApiError as exc:
             logger.warning("session admission failed (%s)", exc.code)
             return
         session.admitted = True
-        self._set_state(resp.get("effective_state"))
+        self._set_state(resp.get("effective_state"), seq)
         info = resp.get("session")
         if isinstance(info, dict) and isinstance(info.get("id"), str):
             session.agenomic_id = cast(str, info["id"])
@@ -2035,6 +2061,7 @@ class HermesAdapter:
             "turn_id": turn_id or None,
             "api_request_id": api_request_id or None,
         }
+        seq = self._state_request()
         status, resp = self.client.authorize(sid, body)
         decision = _str(resp.get("decision"))
         effective_mode = _str(resp.get("effective_mode"))
@@ -2061,13 +2088,20 @@ class HermesAdapter:
                 return _Verdict(
                     block=f"Agenomic: the instance is {current}; the action was not executed."
                 )
-            self._effective_state = "observe"
+            if not self._set_state("observe", seq) and self.local_mode() != "observe":
+                # A state from a request sent after this one (a heartbeat selecting shadow
+                # or enforce) is already applied: the observe answer is stale.
+                self._settle_delegation(provisional, commit=False)
+                return _Verdict(
+                    block="Agenomic: the mode changed while this call was decided; "
+                    "the action was not executed."
+                )
             self._settle_delegation(provisional, commit=False)
             return _Verdict()
         if effective_mode == "shadow" and self._effective_state not in _ENFORCE_LIKE - {"enforce"}:
-            self._effective_state = "shadow"
+            self._set_state("shadow", seq)
         elif effective_mode == "enforce" and self._effective_state not in _ENFORCE_LIKE:
-            self._effective_state = "enforce"
+            self._set_state("enforce", seq)
         explanation = _str(resp.get("explanation"))[:300]
         decision_id = _str(resp.get("decision_id")) or None
         self._emit_decision(

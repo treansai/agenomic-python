@@ -1204,6 +1204,8 @@ class Supervisor:
         self.restarts = 0
         self.refuse_restart = False
         self._stopping = threading.Event()
+        # True during the start-up heartbeat: a ``resume`` then only lifts the refusal.
+        self._deferring_start = False
         self._seen_commands: set[str] = set()
         # Acknowledgements that failed in transport, retried on every tick until accepted.
         self._ack_retries: deque[tuple[str, str, dict[str, JsonValue]]] = deque(maxlen=500)
@@ -1314,8 +1316,14 @@ class Supervisor:
             self.gave_up = True
             return
         self.restarts += 1
-        time.sleep(min(60.0, 2.0**self.restarts))
+        # A shutdown requested during the backoff ends it and starts nothing.
+        if self._backoff_wait(min(60.0, 2.0**self.restarts)):
+            return
         self.start_child()
+
+    def _backoff_wait(self, seconds: float) -> bool:
+        """Wait out the restart backoff; ``True`` when a shutdown was requested meanwhile."""
+        return self._stopping.wait(seconds)
 
     def stop_child(self) -> Optional[int]:
         """SIGTERM the child's process group, SIGKILL after ``grace_s``. Returns the exit code.
@@ -1503,7 +1511,11 @@ class Supervisor:
         elif kind == "resume":
             self.refuse_restart = False
             restarted = False
-            if self.proc is None or self.proc.poll() is not None:
+            if self._deferring_start:
+                # Start-up: Hermes is started by ``run`` once the approved skills are synced,
+                # never before, so it cannot load a stale or revoked skill.
+                pass
+            elif self.proc is None or self.proc.poll() is not None:
                 restarted = self.start_child()
             self._ack(command_id, "applied", {"restarted": restarted, "process_state": self.state})
         else:
@@ -1577,10 +1589,13 @@ class Supervisor:
         # Commands still pending (a quarantine or revoke a previous supervisor only reported)
         # are fetched and applied while Hermes is not running: it starts only if allowed.
         # Without an answer from the gateway, Hermes starts and the next heartbeat applies them.
-        self.heartbeat()
+        self._deferring_start = True
+        try:
+            self.heartbeat()
+        finally:
+            self._deferring_start = False
         self.sync_skills()
-        if self.proc is None:  # a ``resume`` just received already started it
-            self.start_child()
+        self.start_child()
         failed = False
         try:
             while not self._stopping.is_set():

@@ -495,9 +495,8 @@ EXITING_LEADER = (
 
 
 def _no_restart_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
-    real_sleep = time.sleep
-    # The restart backoff waits whole seconds; short polling waits keep their length.
-    monkeypatch.setattr(sup.time, "sleep", lambda s: None if s >= 1 else real_sleep(s))
+    # The restart backoff is skipped (no shutdown requested); polling waits keep their length.
+    monkeypatch.setattr(sup.Supervisor, "_backoff_wait", lambda self, _s: False)
 
 
 @posix_only
@@ -786,7 +785,7 @@ def test_child_drops_supplementary_groups(monkeypatch: pytest.MonkeyPatch, tmp_p
 def test_launch_failure_follows_the_restart_policy(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(sup.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(sup.Supervisor, "_backoff_wait", lambda self, _s: False)
     settings = SupervisorSettings(
         argv=[str(tmp_path / "missing-binary")],
         hermes_home=tmp_path,
@@ -1440,3 +1439,45 @@ def test_dropped_supervisor_acknowledgement_lets_the_command_be_delivered_again(
     monkeypatch.setattr(api, "ack_command", real)
     s.handle_command({"id": "c0", "kind": "noop", "status": "requested"})
     assert ("c0", "refused") in [(c, st) for c, st, _ in api.acks]
+
+
+def test_shutdown_during_the_restart_backoff_starts_nothing(tmp_path: Path) -> None:
+    s = make_supervisor(tmp_path, FakeApi(), [sys.executable, "-c", "pass"])
+    s.settings.restart = True
+    s.settings.max_restarts = 5
+    starts: list[bool] = []
+    s.start_child = lambda: starts.append(True) or True  # type: ignore[method-assign]
+    s.request_stop(15, None)  # SIGTERM arrives during the backoff
+    began = time.monotonic()
+    s._restart_or_give_up("exited")
+    assert time.monotonic() - began < 1.0, "the backoff ends at once"
+    assert starts == [], "no replacement Hermes once shutdown was requested"
+
+
+def test_resume_at_startup_starts_hermes_only_after_the_skills_sync(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    api = FakeApi()
+    api.commands = [{"id": "r1", "kind": "resume", "status": "requested"}]
+    s = make_supervisor(tmp_path, api, [sys.executable, "-c", "pass"])
+    s.settings.restart = False
+    monkeypatch.setattr(sup.signal, "signal", lambda *_a: None)
+    order: list[str] = []
+    monkeypatch.setattr(s, "sync_skills", lambda: order.append("skills"))
+    real_start = s.start_child
+
+    def tracking_start() -> bool:
+        order.append("start")
+        return real_start()
+
+    monkeypatch.setattr(s, "start_child", tracking_start)
+    try:
+        s.run()
+        assert order[:2] == ["skills", "start"], "Hermes starts after the approved skills"
+        assert order.count("start") == 1
+        assert ("r1", "applied") in [(c, st) for c, st, _ in api.acks]
+    finally:
+        proc = s.proc
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait(10)

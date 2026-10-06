@@ -2286,3 +2286,28 @@ def test_dropped_acknowledgement_lets_the_command_be_delivered_again(
     monkeypatch.setattr(adapter.client, "ack_command", real)
     adapter.handle_command({"id": "c0", "kind": "pause", "target_kind": "instance"})
     assert ("c0", "applied") in [(c, b.get("status")) for c, b in server.acks]
+
+
+@pytest.mark.parametrize("request_kind", ["hello", "create_session"])
+def test_delayed_state_response_never_replaces_a_newer_heartbeat_state(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request_kind: str
+) -> None:
+    server.effective_state = "observe"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "observe"
+    original = getattr(adapter.client, request_kind)
+
+    def overtaken_by_a_heartbeat(*args: Any) -> Any:
+        answer = original(*args)  # carries effective_state "observe"
+        # The heartbeat thread sends a later request and applies enforce first.
+        adapter._set_state("enforce", adapter._state_request())
+        return answer
+
+    monkeypatch.setattr(adapter.client, request_kind, overtaken_by_a_heartbeat)
+    if request_kind == "hello":
+        assert adapter._hello()
+    else:
+        adapter.on_session_start(session_id="s-late", platform="cli")
+    assert adapter._effective_state == "enforce", "the stale observe answer is ignored"
+    assert adapter.local_mode() == "enforce"
