@@ -2033,6 +2033,15 @@ class HermesAdapter:
                 "invalid_response", "authorize answer without a valid decision", status
             )
         if decision == "observe" or effective_mode == "observe":
+            current = self._effective_state
+            if current in _ENFORCE_LIKE - {"enforce"}:
+                # A newer heartbeat already set a blocking state (enforce_blocked, paused,
+                # quarantined, revoked): this answer is stale, it never downgrades the state
+                # and the call does not run under it.
+                self._settle_delegation(provisional, commit=False)
+                return _Verdict(
+                    block=f"Agenomic: the instance is {current}; the action was not executed."
+                )
             self._effective_state = "observe"
             self._settle_delegation(provisional, commit=False)
             return _Verdict()

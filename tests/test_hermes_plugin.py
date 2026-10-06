@@ -2207,3 +2207,27 @@ def test_argument_change_never_blocks_once_shadow_is_active(
     # second gate sees the changed arguments.
     runner.agent_loop("read_file", {"path": "/tmp/a"})
     assert runner.executions == 1, "shadow never changes execution"
+
+
+@pytest.mark.parametrize("newer", ["enforce_blocked", "paused", "quarantined", "revoked"])
+def test_stale_observe_answer_never_downgrades_a_newer_blocking_state(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newer: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    original = adapter.client.authorize
+
+    def observe_answer_delayed(sid: str, body: Any) -> Any:
+        server.effective_state = "observe"
+        answer = original(sid, body)
+        # The heartbeat thread receives a newer blocking state before this answer lands.
+        adapter._set_state(newer)
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", observe_answer_delayed)
+    runner = Runner(adapter)
+    out = json.loads(runner.direct("write_file", {"path": "/tmp/x", "content": "y"}))
+    assert adapter._effective_state == newer, "the newer state is kept"
+    assert runner.executions == 0
+    assert newer in out["error"]
