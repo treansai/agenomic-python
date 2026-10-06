@@ -431,7 +431,8 @@ class Supervisor:
         self.child_env = build_child_env(
             self._environ, allow=settings.env_allow, runtime_token_env=settings.runtime_token_env
         )
-        self.child_env.setdefault("HERMES_HOME", str(settings.hermes_home))
+        # The attested home and the home Hermes loads must be the same directory.
+        self.child_env["HERMES_HOME"] = str(settings.hermes_home)
         self.proc: Optional[subprocess.Popen[bytes]] = None
         self.state = "stopped"
         self.exit_code: Optional[int] = None
@@ -440,6 +441,8 @@ class Supervisor:
         self._stopping = threading.Event()
         self._seen_commands: set[str] = set()
         self._ticks = 0
+        self._launch_failed = False
+        self.gave_up = False
 
     # -- child process -----------------------------------------------
     def start_child(self) -> bool:
@@ -460,13 +463,20 @@ class Supervisor:
             kwargs["user"] = self.settings.child_uid
         if self.settings.child_gid is not None:
             kwargs["group"] = self.settings.child_gid
+        if self.settings.child_uid is not None or self.settings.child_gid is not None:
+            # Popen keeps the supervisor's supplementary groups unless told otherwise; the
+            # isolation report models the child with its primary group only.
+            kwargs["extra_groups"] = []
         try:
             self.proc = subprocess.Popen(self.settings.argv, **kwargs)
         except OSError as e:
             logger.error("Hermes did not start: %s", type(e).__name__)
+            self.proc = None
             self.state = "exited"
             self.exit_code = None
+            self._launch_failed = True
             return False
+        self._launch_failed = False
         self.state = "running"
         self.exit_code = None
         logger.info("Hermes started (pid %d)", self.proc.pid)
@@ -482,6 +492,8 @@ class Supervisor:
             'stopped'
         """
         if self.proc is None:
+            if self._launch_failed and not self._stopping.is_set():
+                self._restart_or_give_up("launch failed")
             return
         code = self.proc.poll()
         if code is None:
@@ -491,16 +503,20 @@ class Supervisor:
             self.state = "exited"
             self.exit_code = code
             logger.warning("Hermes exited with code %d", code)
-            if (
-                self.settings.restart
-                and not self.refuse_restart
-                and not self._stopping.is_set()
-                and code != 0
-                and self.restarts < self.settings.max_restarts
-            ):
-                self.restarts += 1
-                time.sleep(min(60.0, 2.0**self.restarts))
-                self.start_child()
+            if code != 0 and not self._stopping.is_set():
+                self._restart_or_give_up(f"exit code {code}")
+
+    def _restart_or_give_up(self, why: str) -> None:
+        if not self.settings.restart or self.refuse_restart:
+            return
+        if self.restarts >= self.settings.max_restarts:
+            if not self.gave_up:
+                logger.error("Hermes not restarted after %d attempts (%s)", self.restarts, why)
+            self.gave_up = True
+            return
+        self.restarts += 1
+        time.sleep(min(60.0, 2.0**self.restarts))
+        self.start_child()
 
     def stop_child(self) -> Optional[int]:
         """SIGTERM the child's process group, SIGKILL after ``grace_s``. Returns the exit code.
@@ -545,6 +561,8 @@ class Supervisor:
             return [self.settings.child_gid]
         if sys.platform == "win32":
             return []
+        if self.settings.child_uid is not None:
+            return [os.getgid()]
         return list({os.getgid(), *os.getgroups()})
 
     def isolation(self) -> dict[str, JsonValue]:
@@ -702,10 +720,14 @@ class Supervisor:
             self.tick()
             if not self.settings.restart and self.state in ("exited", "stopped"):
                 break
+            if self.gave_up:
+                break
             self._stopping.wait(self.settings.interval_s)
         code = self.stop_child()
         self.heartbeat()
-        return code if code is not None else 0
+        if code is None:
+            return 1 if self.gave_up or self._launch_failed else 0
+        return code
 
 
 def _demo_supervisor(
@@ -805,7 +827,7 @@ def main(
         args_list = args_list[:idx]
     args = _parser().parse_args(args_list)
     if sys.platform == "win32":
-        print("agenomic-hermes-supervisor requires a POSIX host", file=sys.stderr)
+        logger.error("agenomic-hermes-supervisor requires a POSIX host")
         return 2
     env = dict(os.environ if environ is None else environ)
     if not child:

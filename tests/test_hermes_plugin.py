@@ -22,6 +22,7 @@ from pydantic import SecretStr
 
 from agenomic.integrations.hermes import plugin as plugin_mod
 from agenomic.integrations.hermes.canonical import arguments_hash
+from agenomic.integrations.hermes.client import HermesApiError
 from agenomic.integrations.hermes.config import AdapterConfig, ConfigError
 from agenomic.integrations.hermes.plugin import APPROVAL_MESSAGE, HermesAdapter
 
@@ -947,3 +948,56 @@ def test_cached_authorization_never_serves_another_session(
     assert adapter.pre_tool_call(args={"path": "/tmp/a"}, **other) is None
     sessions = [r.path.split("/sessions/")[1].split("/")[0] for r in server.authorize_calls()]
     assert sessions == ["sess-a", "sess-b"], "each session asks the gateway for its own call"
+
+
+def test_heartbeat_stays_within_the_guard_deadline(server: FakeAgenomic, tmp_path: Path) -> None:
+    server.heartbeat_interval_secs = 300
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.tick()
+    assert adapter._heartbeat_s <= plugin_mod.DEFAULT_MAX_AGE_S / 3
+
+
+def test_failed_command_ack_is_retried(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    real = adapter.client.ack_command
+    failures = {"left": 1}
+
+    def flaky(command_id: str, status: str, detail: Any) -> Any:
+        if failures["left"]:
+            failures["left"] -= 1
+            raise HermesApiError("unreachable", "connection refused", 0)
+        return real(command_id, status, detail)
+
+    monkeypatch.setattr(adapter.client, "ack_command", flaky)
+    adapter.handle_command({"id": "c9", "kind": "pause", "target_kind": "instance"})
+    assert [(c, b.get("status")) for c, b in server.acks] == [("c9", "applied")]
+    adapter.tick()
+    assert ("c9", "received") in [(c, b.get("status")) for c, b in server.acks]
+
+
+def test_post_status_of_another_session_never_hides_an_execution(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    blocked_kw = runner._kw("read_file", "sess-x", "call_same")
+    adapter.post_tool_call(args={"path": "/tmp/a"}, result="{}", status="blocked", **blocked_kw)
+    runner.agent_loop("read_file", {"path": "/tmp/a"}, sid="sess-y", tcid="call_same")
+    assert runner.executions == 1
+    assert len(server.reports()) == 1, "the executed call of sess-y is reported"
+
+
+def test_rejected_approval_drops_its_delegation_reservation(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    runner.agent_loop("delegate_task", {"tasks": [{"goal": "x"}]}, sid="p", tcid="d1")
+    assert adapter._provisional_delegations
+    for approval in server.approvals.values():
+        approval["status"] = "rejected"
+    runner.agent_loop("delegate_task", {"tasks": [{"goal": "x"}]}, sid="p", tcid="d1")
+    assert not adapter._provisional_delegations, "a rejected action never keeps its reservation"

@@ -64,7 +64,7 @@ from agenomic.integrations.hermes.exporter import (
     now_iso,
     redacted_preview,
 )
-from agenomic.integrations.hermes.guard import STATUS_SCHEMA, status_path
+from agenomic.integrations.hermes.guard import DEFAULT_MAX_AGE_S, STATUS_SCHEMA, status_path
 
 logger = logging.getLogger("agenomic.integrations.hermes.plugin")
 
@@ -336,9 +336,11 @@ class HermesAdapter:
         # and an authorization must never serve another session's or tool's call.
         self._auth: OrderedDict[tuple[str, str, str], _Authorization] = OrderedDict()
         self._pending: dict[tuple[str, str, str], _Pending] = {}
-        self._post_status: OrderedDict[str, str] = OrderedDict()
+        self._post_status: OrderedDict[tuple[str, str, str], str] = OrderedDict()
         self._report_retries: deque[_ReportRetry] = deque(maxlen=1000)
         self._commands_seen: set[str] = set()
+        # Acknowledgements that failed in transport; retried on every tick until accepted.
+        self._ack_retries: deque[tuple[str, str, dict[str, Any]]] = deque(maxlen=500)
         self._cancel_sessions: dict[str, str] = {}
         self._cancel_subagents: dict[str, str] = {}
         self._stop = threading.Event()
@@ -663,7 +665,9 @@ class HermesAdapter:
             self._profile = cast(dict[str, Any], profile["document"])
         interval = resp.get("heartbeat_interval_secs")
         if isinstance(interval, (int, float)) and 1 <= interval <= 3600:
-            self._heartbeat_s = float(interval)
+            # The heartbeat also refreshes the guard status file, so it must run well within
+            # the guard's staleness deadline or healthy tool calls would be blocked.
+            self._heartbeat_s = min(float(interval), _guard_max_age_s() / 3)
         return True
 
     def discover_tools(self) -> int:
@@ -769,16 +773,28 @@ class HermesAdapter:
         except HermesApiError as exc:
             logger.warning("Agenomic heartbeat failed (%s)", exc.code)
         finally:
+            self._retry_acks()
             self._retry_reports()
             self._write_status()
 
-    def _ack(self, command_id: str, status: str, detail: dict[str, Any]) -> None:
+    def _ack(self, command_id: str, status: str, detail: dict[str, Any]) -> bool:
         try:
             self.client.ack_command(command_id, status, detail)
         except HermesApiError as exc:
             logger.warning("command %s ack %s failed (%s)", command_id, status, exc.code)
-            return
+            if exc.status == 0 or exc.status >= 500:
+                self._ack_retries.append((command_id, status, detail))
+            return False
         self._emit("command." + status, None, extra={"command_id": command_id, "detail": detail})
+        return True
+
+    def _retry_acks(self) -> None:
+        for _ in range(len(self._ack_retries)):
+            try:
+                command_id, status, detail = self._ack_retries.popleft()
+            except IndexError:
+                return
+            self._ack(command_id, status, detail)
 
     def handle_command(self, command: Mapping[str, JsonValue]) -> None:
         """Execute one plugin command. ``applied`` is only acknowledged once observed.
@@ -1487,6 +1503,7 @@ class HermesAdapter:
                 if not keep:
                     with self._lock:
                         self._pending.pop(key, None)
+                    self._settle_delegation(key, commit=False)
                 return _Verdict(block=gate)
             logical_call_id, attempt = pending.logical_call_id, pending.attempt
         else:
@@ -1887,8 +1904,9 @@ class HermesAdapter:
         try:
             duration_ms = int((time.monotonic() - started) * 1000)
             tool_call_id = _str(plan.meta.get("tool_call_id"))
+            post_key = (_str(plan.meta.get("sid")), _str(plan.meta.get("tool")), tool_call_id)
             with self._lock:
-                post = self._post_status.get(tool_call_id) if tool_call_id else None
+                post = self._post_status.get(post_key) if tool_call_id else None
             auth = plan.auth
             if auth is not None:
                 with self._lock:
@@ -1983,7 +2001,13 @@ class HermesAdapter:
             status = _str(kwargs.get("status"))
             if tool_call_id:
                 with self._lock:
-                    self._post_status[tool_call_id] = status
+                    self._post_status[
+                        (
+                            _str(kwargs.get("session_id")),
+                            _str(kwargs.get("tool_name")),
+                            tool_call_id,
+                        )
+                    ] = status
                     while len(self._post_status) > _MAX_AUTH:
                         self._post_status.popitem(last=False)
                     auth = self._auth.get(
@@ -2107,6 +2131,14 @@ def _demo_adapter(answer: Optional[Mapping[str, JsonValue]] = None) -> HermesAda
         start_threads=False,
         identity={"version": "0.21.5", "release_date": None, "commit": None},
     )
+
+
+def _guard_max_age_s() -> float:
+    try:
+        value = float(os.environ.get("AGENOMIC_HERMES_GUARD_MAX_AGE_S") or DEFAULT_MAX_AGE_S)
+    except ValueError:
+        value = DEFAULT_MAX_AGE_S
+    return max(value, 3.0)
 
 
 _ADAPTER: Optional[HermesAdapter] = None

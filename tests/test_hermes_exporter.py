@@ -206,3 +206,14 @@ def test_preview_masks_credential_keys_whatever_their_case() -> None:
     for value in ('"v"', '"p"', '"t"'):
         assert value not in text
     assert '"max_tokens":5' in text
+
+
+def test_free_form_fields_are_redacted_in_metadata_mode() -> None:
+    event = EventBuilder("metadata").build(
+        "api.request.failed",
+        reason="Authorization: Bearer sk-abcdefghijklmnop",
+        extra={"detail": {"api_key": "plain", "msg": "token agmhr_abc123"}},
+    )
+    text = json.dumps(event)
+    for secret in ("sk-abcdefghijklmnop", "agmhr_abc123", '"plain"'):
+        assert secret not in text

@@ -99,6 +99,20 @@ def is_secret_key(key: str) -> bool:
     return normalized.endswith("token") or any(part in normalized for part in _SECRET_KEY_PARTS)
 
 
+def _redact_field(value: object) -> object:
+    """Mask credential-named keys and credential-shaped text in any event field."""
+    if isinstance(value, str):
+        return mask_text(value)
+    if isinstance(value, dict):
+        return {
+            k: _MASK if isinstance(k, str) and is_secret_key(k) else _redact_field(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_field(item) for item in value]
+    return value
+
+
 def _mask_secret_keys(value: object) -> object:
     if isinstance(value, dict):
         return {
@@ -234,8 +248,10 @@ class EventBuilder:
             if key not in self._FIELDS:
                 raise ValueError(f"unknown event field {key}")
             if value is not None:
-                event[key] = value
-        extra_doc: dict[str, Any] = dict(extra or {})
+                # Free-form fields (reason, explanation, error text) can carry credentials
+                # in metadata mode too, so every field is redacted, not only content.
+                event[key] = _redact_field(value)
+        extra_doc: dict[str, Any] = {k: _redact_field(v) for k, v in (extra or {}).items()}
         if content:
             extra_doc["content_hashes"] = {k: content_hash(v) for k, v in content.items()}
             if self.capture == "redacted_preview":

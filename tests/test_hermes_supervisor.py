@@ -390,6 +390,7 @@ def test_no_restart_supervisor_exits_with_its_child(tmp_path: Path) -> None:
         server.close()
 
 
+@posix_only
 def test_missing_protected_path_is_writable_through_a_writable_ancestor(tmp_path: Path) -> None:
     deep = tmp_path / "a" / "b" / "config.yaml"
     assert writable_by(deep, os.getuid(), [os.getgid()]), "the child can create a/b/config.yaml"
@@ -403,3 +404,50 @@ def test_supervisor_settings_are_validated() -> None:
     settings = SupervisorSettings(argv=["hermes"], hermes_home=Path("/h"))
     with pytest.raises(ValidationError):
         settings.grace_s = 0
+
+
+def test_configured_hermes_home_wins_over_the_inherited_one(tmp_path: Path) -> None:
+    settings = SupervisorSettings(argv=["hermes"], hermes_home=tmp_path / "configured")
+    s = Supervisor(settings, FakeApi(), environ={**PROCESS_ENV, "HERMES_HOME": "/elsewhere"})
+    assert s.child_env["HERMES_HOME"] == str(tmp_path / "configured")
+
+
+def test_child_drops_supplementary_groups(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen: dict[str, Any] = {}
+
+    class FakeProc:
+        pid = 4242
+
+        def poll(self) -> None:
+            return None
+
+    def fake_popen(argv: list[str], **kwargs: Any) -> FakeProc:
+        seen.update(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr(sup.subprocess, "Popen", fake_popen)
+    settings = SupervisorSettings(
+        argv=["hermes"], hermes_home=tmp_path, child_uid=10001, child_gid=10001
+    )
+    s = Supervisor(settings, FakeApi(), environ=PROCESS_ENV)
+    assert s.start_child()
+    assert seen["extra_groups"] == []
+    assert s._gids() == [10001]
+
+
+def test_launch_failure_follows_the_restart_policy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sup.time, "sleep", lambda _s: None)
+    settings = SupervisorSettings(
+        argv=[str(tmp_path / "missing-binary")],
+        hermes_home=tmp_path,
+        max_restarts=2,
+        interval_s=0.01,
+    )
+    s = Supervisor(settings, FakeApi(), environ=PROCESS_ENV, connect=refuse)
+    monkeypatch.setattr(s, "sync_skills", lambda: None)
+    monkeypatch.setattr(sup.signal, "signal", lambda *_a: None)
+    assert s.run() == 1, "the supervisor stops with a failure instead of idling forever"
+    assert s.restarts == 2
+    assert s.gave_up
