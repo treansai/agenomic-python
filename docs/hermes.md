@@ -394,8 +394,12 @@ id is published by an admission or retry, and refused only once no such
 session remains (a session that ended while its failed admission was in
 flight holds none, nor does one whose admission was refused for good). The
 heartbeat retries the admission of active sessions whose admission failed
-transiently (at most 3 per heartbeat, stopping at the first failure so the
-guard status stays fresh), so an idle session still publishes its id. An
+transiently (at most 3 per heartbeat, stopping at the first failure, which
+moves to the back of the queue so one failing session never starves the
+others), so an idle session still publishes its id. While the heartbeat drains
+its retry queues (admissions, session ends, command acknowledgements, action
+reports) against a slow gateway, the guard status file is rewritten whenever a
+heartbeat interval has passed, so it never goes stale meanwhile. An
 interrupt that applies a cancel ends the session for the adapter.
 The admitted model id is masked like any exported text.
 An acknowledgement that fails on a transport error, a timeout, a 5xx or a

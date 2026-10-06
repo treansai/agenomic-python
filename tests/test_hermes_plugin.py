@@ -4115,3 +4115,55 @@ def test_a_failed_admission_after_a_concurrent_success_leaves_no_stale_entry(
     adapter.on_session_start(session_id="s1", platform="cli")
     assert adapter._sessions["s1"].admitted
     assert "s1" not in adapter._unadmitted
+
+
+def test_the_guard_status_is_refreshed_while_retry_queues_drain(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    for i in range(3):
+        adapter.on_session_start(session_id=f"s{i}", platform="cli")
+
+    def slow_gateway(sid: str, body: dict[str, Any]) -> Any:
+        raise HermesApiError("timeout", "gateway unavailable", 0)
+
+    monkeypatch.setattr(adapter.client, "end_session", slow_gateway)
+    for i in range(3):
+        adapter.on_session_finalize(session_id=f"s{i}", reason="exit")
+    assert len(adapter._pending_ends) == 3
+    writes: list[float] = []
+    real_write = adapter._write_status
+
+    def counting() -> None:
+        writes.append(time.monotonic())
+        real_write()
+
+    monkeypatch.setattr(adapter, "_write_status", counting)
+    adapter._heartbeat_s = 0.0  # every retry outlasts a heartbeat interval
+    adapter.tick()
+    assert len(writes) > 3, "the status file is rewritten between retries, not only after"
+
+
+def test_a_failing_admission_retry_rotates_so_later_sessions_are_retried(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+    state = {"down": True}
+
+    def create(body: dict[str, Any]) -> Any:
+        if state["down"] or body["hermes_session_id"] == "s0":
+            raise HermesApiError("timeout", "lost", 0)
+        return real_create(body)
+
+    monkeypatch.setattr(adapter.client, "create_session", create)
+    adapter.on_session_start(session_id="s0", platform="cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert list(adapter._unadmitted) == ["s0", "s1"]
+    state["down"] = False  # only s0 keeps failing
+    adapter.tick()
+    adapter.tick()
+    assert adapter._sessions["s1"].admitted, "s0 failing never starves s1"
+    assert "s0" in adapter._unadmitted

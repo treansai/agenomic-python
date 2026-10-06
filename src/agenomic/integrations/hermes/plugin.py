@@ -520,6 +520,7 @@ class HermesAdapter:
         # The heartbeat refreshes the guard status file, so even before the server sets an
         # interval it runs within a third of the guard's staleness deadline.
         self._heartbeat_s = min(_DEFAULT_HEARTBEAT_S, _guard_max_age_s() / 3)
+        self._last_status_write = 0.0
         self._platform = ""
         self._identity = identity if identity is not None else _hermes_identity()
         self._contracts: dict[str, Any] = {
@@ -539,7 +540,9 @@ class HermesAdapter:
         # Hermes ids of active sessions whose admission failed (the gateway may have created
         # the session and lost the answer): a cancel naming an unknown Agenomic id may be
         # theirs, so it stays unresolved until they are admitted or end.
-        self._unadmitted: set[str] = set()
+        # Ordered: a retry that fails moves its session to the end, so one failing session
+        # never starves the others of their per-heartbeat retries.
+        self._unadmitted: OrderedDict[str, None] = OrderedDict()
         # Terminal session ends whose report failed transiently, retried every heartbeat;
         # the cancels waiting for them are acknowledged once they are reported.
         self._pending_ends: OrderedDict[str, _PendingEnd] = OrderedDict()
@@ -884,7 +887,15 @@ class HermesAdapter:
         # detected. With either missing, the guard keeps blocking every tool.
         return bool(self._contracts["pre_tool_call"] and self._contracts["tool_execution"])
 
+    def _refresh_status_if_due(self) -> None:
+        """Rewrite the guard status file when a heartbeat interval has passed since the last
+        write: retry queues drained against a slow gateway never let it go stale (the
+        guard would then block every call, in shadow and observe too)."""
+        if time.monotonic() - self._last_status_write >= self._heartbeat_s:
+            self._write_status()
+
     def _write_status(self) -> None:
+        self._last_status_write = time.monotonic()
         if not self._gates_registered():
             logger.error("no enforcement gate registered; the guard keeps blocking tools")
         with self._status_lock:
@@ -1172,6 +1183,7 @@ class HermesAdapter:
                 except IndexError:
                     return
             self._ack(command_id, status, detail)
+            self._refresh_status_if_due()
 
     def handle_command(self, command: Mapping[str, JsonValue]) -> None:
         """Execute one plugin command. ``applied`` is only acknowledged once observed.
@@ -1466,7 +1478,11 @@ class HermesAdapter:
                 self._admit(session)
             except Exception as exc:  # the heartbeat never fails on a retry
                 logger.debug("admission retry failed: %s", type(exc).__name__)
+            self._refresh_status_if_due()
             if not session.admitted:
+                with self._lock:
+                    if session.hermes_session_id in self._unadmitted:
+                        self._unadmitted.move_to_end(session.hermes_session_id)
                 break
 
     def _finish_admission(
@@ -1483,13 +1499,13 @@ class HermesAdapter:
                 # afterwards sees it admitted and never records it as unadmitted.
                 session.admitted = True
             if resp is None and lost and session.active and not session.admitted:
-                self._unadmitted.add(session.hermes_session_id)
+                self._unadmitted[session.hermes_session_id] = None
             else:
                 # Admitted (by this request or a concurrent one), refused for good (no
                 # session was created), or failed after the session already ended (its
                 # terminal callback ran while this request was in flight): no id will be
                 # published for it, so it holds no cancel unresolved.
-                self._unadmitted.discard(session.hermes_session_id)
+                self._unadmitted.pop(session.hermes_session_id, None)
             if isinstance(info, dict) and isinstance(info.get("id"), str):
                 session.agenomic_id = cast(str, info["id"])
                 self._agenomic_sessions[session.agenomic_id] = session.hermes_session_id
@@ -1510,7 +1526,7 @@ class HermesAdapter:
         with self._lock:
             if sid not in self._unadmitted:
                 return
-            self._unadmitted.discard(sid)
+            self._unadmitted.pop(sid, None)
             if self._admissions_in_flight or self._unadmitted:
                 return
             pending = [
@@ -1629,11 +1645,13 @@ class HermesAdapter:
                     # The end stays pending (and its cancels waiting) for as long as it
                     # takes: acknowledging them now would claim an end the control plane
                     # has not recorded.
+                    self._refresh_status_if_due()
                     continue
                 with self._lock:
                     if self._pending_ends.get(sid) is end:
                         del self._pending_ends[sid]
             self._observe_terminal(sid, end.subagent_id, end.how, delivered=outcome == "delivered")
+            self._refresh_status_if_due()
 
     def on_session_end(self, **kwargs: object) -> None:
         """Per TURN end (not final). ``interrupted`` applies a pending cancel.
@@ -3682,6 +3700,7 @@ class HermesAdapter:
                 except IndexError:
                     return
             self._report(item)
+            self._refresh_status_if_due()
 
     def post_tool_call(self, **kwargs: object) -> None:
         """Compare executed arguments with the authorized ones; record the terminal status.
