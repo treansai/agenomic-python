@@ -2034,3 +2034,34 @@ def test_failed_identical_delegations_each_keep_their_reservation(
     assert runner.executions == 2
     assert [r[0] for r in adapter._delegations["p"]] == ["del-d2", "del-d1"]
     assert not adapter._provisional_delegations
+
+
+def test_call_blocked_before_the_middleware_retires_its_authorization(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+
+    def reserve(sid: str, body: Any) -> Any:
+        return {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
+
+    monkeypatch.setattr(adapter.client, "reserve_delegation", reserve)
+    args = {"tasks": [{"goal": "x"}]}
+    kw = Runner(adapter)._kw("delegate_task", "p", "d1")
+    # Direct dispatch: this adapter authorizes, then a later pre_tool_call callback blocks
+    # and Hermes reports the call blocked; tool_execution is never entered.
+    assert adapter.pre_tool_call(args=args, **kw) is None
+    assert [r[0] for r in adapter._delegations["p"]] == ["del-d1"]
+    adapter.post_tool_call(args=args, result="{}", status="blocked", **kw)
+    assert adapter._auth[("p", "delegate_task", "d1")].state == "done"
+    assert not adapter._delegations.get("p"), "the blocked call's reservation is dropped"
+    # A child started later without a reservation of its own never takes d1's delegation.
+    adapter.subagent_start(parent_session_id="p", child_session_id="c1")
+    adapter.on_session_start(session_id="c1", platform="subagent", model="m")
+    admitted = {
+        r.body["hermes_session_id"]: r.body.get("delegation_id")
+        for r in server.calls("/v1/hermes/runtime/sessions")
+    }
+    assert admitted["c1"] is None
+    adapter.exporter.flush(3.0)
+    assert [e for e in server.events if e.get("type") == "tool.call.not_executed"]

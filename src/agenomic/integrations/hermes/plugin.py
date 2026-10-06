@@ -2713,8 +2713,25 @@ class HermesAdapter:
                             tool_call_id,
                         )
                     )
+                    # Direct dispatch: a later pre_tool_call callback blocked the call after
+                    # this adapter authorized it, before tool_execution was entered, so no
+                    # middleware frame will retire the authorization.
+                    unused = False
+                    if auth is not None and status == "blocked" and auth.state == "authorized":
+                        auth.state = "done"
+                        unused = True
             else:
                 auth = None
+                unused = False
+            if unused and auth is not None:
+                self._drop_delegation(auth)
+                self._emit(
+                    "tool.call.not_executed",
+                    _str(kwargs.get("session_id")) or None,
+                    span_id=tool_call_id or None,
+                    tool={"name": _str(kwargs.get("tool_name"))},
+                    reason="blocked by Hermes after authorization",
+                )
             raw_args = kwargs.get("args")
             args = raw_args if isinstance(raw_args, dict) else {}
             try:
