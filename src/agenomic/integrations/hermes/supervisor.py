@@ -1880,11 +1880,12 @@ def main(
     if not endpoint:
         logger.error("endpoint missing: pass --endpoint or set %s", ENDPOINT_ENV)
         return 2
-    parsed = urlsplit(endpoint)
     try:
+        parsed = urlsplit(endpoint)
         port_ok = parsed.port is None or 0 < parsed.port < 65536
-    except ValueError:
-        port_ok = False
+    except ValueError:  # a malformed URL (an unmatched IPv6 bracket) or port
+        logger.error("endpoint must be an absolute http(s) URL")
+        return 2
     if (
         parsed.scheme not in ("http", "https")
         or not parsed.hostname

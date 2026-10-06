@@ -516,6 +516,10 @@ class HermesAdapter:
         self._schema_hashes: dict[str, str] = {}
         self._sessions: dict[str, _Session] = {}
         self._agenomic_sessions: dict[str, str] = {}
+        # A session cancel that names an Agenomic id the adapter does not know yet waits
+        # while an admission is in flight (its id is published when the admission returns).
+        self._admissions_in_flight = 0
+        self._unresolved_cancels: dict[str, list[str]] = {}
         self._children: dict[str, tuple[str, Optional[str]]] = {}
         self._delegations: dict[str, deque[list[Any]]] = {}
         # Hermes builds a delegate_task's children on the thread running that tool, inside
@@ -1203,8 +1207,8 @@ class HermesAdapter:
             self._ack(command_id, "refused", {"reason": "subagent_not_running"})
 
     def _cancel_session(self, command_id: str, target: str) -> None:
-        sid = self._agenomic_sessions.get(target, target)
         with self._lock:
+            sid = self._agenomic_sessions.get(target, target)
             # The active check and the registration are one step: a session ending in
             # between would otherwise leave a waiter no terminal event can reach.
             session = self._sessions.get(sid)
@@ -1213,6 +1217,11 @@ class HermesAdapter:
                 _add_once(self._cancel_sessions, sid, command_id)
                 if session.subagent_id:
                     _add_once(self._cancel_subagents, session.subagent_id, command_id)
+            elif session is None and self._admissions_in_flight:
+                # Possibly the Agenomic id of a session being admitted right now: decided
+                # once its id is published, never refused before.
+                _add_once(self._unresolved_cancels, target, command_id)
+                return
         if not active or session is None:
             self._ack(command_id, "refused", {"reason": "session_not_active"})
             return
@@ -1366,17 +1375,44 @@ class HermesAdapter:
         if session.delegation_id:
             body["delegation_id"] = session.delegation_id
         seq = self._state_request()
+        with self._lock:
+            self._admissions_in_flight += 1
+        resp: Optional[dict[str, Any]] = None
         try:
             resp = self.client.create_session(body)
         except HermesApiError as exc:
             logger.warning("session admission failed (%s)", exc.code)
+        finally:
+            pending = self._finish_admission(session, resp)
+        for command_id, target in pending:
+            self._cancel_session(command_id, target)
+        if resp is None:
             return
         session.admitted = True
         self._set_state(resp.get("effective_state"), seq)
-        info = resp.get("session")
-        if isinstance(info, dict) and isinstance(info.get("id"), str):
-            session.agenomic_id = cast(str, info["id"])
-            self._agenomic_sessions[cast(str, info["id"])] = session.hermes_session_id
+
+    def _finish_admission(
+        self, session: _Session, resp: Optional[Mapping[str, Any]]
+    ) -> list[tuple[str, str]]:
+        """Publish the session's Agenomic id and hand back the cancels to decide now: those
+        naming that id, and, once no admission is in flight, every one still unresolved
+        (they then name no session and are refused)."""
+        info = resp.get("session") if resp is not None else None
+        with self._lock:
+            self._admissions_in_flight -= 1
+            if isinstance(info, dict) and isinstance(info.get("id"), str):
+                session.agenomic_id = cast(str, info["id"])
+                self._agenomic_sessions[session.agenomic_id] = session.hermes_session_id
+            ready: list[str] = []
+            if session.agenomic_id:
+                ready.append(session.agenomic_id)
+            if not self._admissions_in_flight:
+                ready.extend(t for t in self._unresolved_cancels if t not in ready)
+            return [
+                (command_id, target)
+                for target in ready
+                for command_id in self._unresolved_cancels.pop(target, [])
+            ]
 
     def on_session_start(self, **kwargs: object) -> None:
         """Admit the session (idempotent server side) and emit ``session.started``.

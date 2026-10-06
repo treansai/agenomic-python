@@ -3392,3 +3392,58 @@ def test_unknown_state_applied_between_the_gates_blocks(
     out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
     assert runner.executions == 0, "an unknown state is never allowed"
     assert "something_new" in json.loads(str(out))["error"]
+
+
+def test_session_cancel_arriving_during_admission_is_not_refused(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+
+    def cancel_delivered_while_admitting(body: dict[str, Any]) -> Any:
+        resp = real_create(body)
+        # The gateway already knows the session: the heartbeat delivers a cancel by its
+        # Agenomic id before this admission returns and publishes the mapping.
+        adapter.handle_command(
+            {
+                "id": "k1",
+                "kind": "cancel",
+                "target_kind": "session",
+                "target_ref": resp["session"]["id"],
+                "status": "requested",
+            }
+        )
+        return resp
+
+    monkeypatch.setattr(adapter.client, "create_session", cancel_delivered_while_admitting)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert ("k1", "refused") not in [(c, b["status"]) for c, b in server.acks]
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("read_file", {"path": "/tmp/a"}, sid="s1"))
+    assert runner.executions == 0, "the cancel is pending and blocks the session's calls"
+    assert "cancelled" in out["error"]
+
+
+def test_session_cancel_for_an_unknown_id_is_refused_once_admissions_settle(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+
+    def cancel_for_another_id(body: dict[str, Any]) -> Any:
+        adapter.handle_command(
+            {
+                "id": "k2",
+                "kind": "cancel",
+                "target_kind": "session",
+                "target_ref": "no-such-session",
+                "status": "requested",
+            }
+        )
+        return real_create(body)
+
+    monkeypatch.setattr(adapter.client, "create_session", cancel_for_another_id)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert ("k2", "refused") in [(c, b["status"]) for c, b in server.acks]
