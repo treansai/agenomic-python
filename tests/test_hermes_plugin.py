@@ -3038,3 +3038,67 @@ def test_shadow_fail_open_rechecks_before_executing(
     out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
     assert runner.executions == 0, f"{applied} applied during the outage stops the call"
     assert "not executed" in json.loads(str(out))["error"]
+
+
+@pytest.mark.parametrize("applied", ["pause", "enforce"])
+def test_pre_tool_call_failure_fallback_rechecks_before_allowing(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, applied: str
+) -> None:
+    server.effective_state = "shadow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "shadow"
+
+    def broken_authorize(**kwargs: Any) -> Any:
+        raise RuntimeError("third-party registry failed")
+
+    monkeypatch.setattr(adapter, "authorize", broken_authorize)
+    real_unavailable = adapter._unavailable
+
+    def applied_during_the_fallback(*a: Any, **k: Any) -> Any:
+        out = real_unavailable(*a, **k)  # read shadow: no block message
+        if applied == "pause":
+            adapter.handle_command({"id": "k1", "kind": "pause", "target_kind": "instance"})
+        else:
+            adapter._set_state("enforce", adapter._state_request())
+        return out
+
+    monkeypatch.setattr(adapter, "_unavailable", applied_during_the_fallback)
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    directive = adapter.pre_tool_call(args={"path": "/tmp/a"}, **kw)
+    assert directive is not None
+    assert directive["action"] == "block"
+
+
+@pytest.mark.parametrize("applied", ["pause", "enforce"])
+def test_tool_execution_failure_fallback_rechecks_before_executing(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, applied: str
+) -> None:
+    server.effective_state = "shadow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    real_mode = adapter.local_mode
+    calls = {"n": 0}
+
+    def broken_gate(kwargs: Any) -> Any:
+        raise RuntimeError("bug in the gate")
+
+    def mode_then_command() -> Any:
+        mode = real_mode()
+        calls["n"] += 1
+        if calls["n"] == 1:  # the fallback read shadow; a command lands right after
+            if applied == "pause":
+                adapter.handle_command({"id": "k1", "kind": "pause", "target_kind": "instance"})
+            else:
+                adapter._set_state("enforce", adapter._state_request())
+        return mode
+
+    monkeypatch.setattr(adapter, "_execution_gate", broken_gate)
+    monkeypatch.setattr(adapter, "local_mode", mode_then_command)
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, f"{applied} applied during the fallback stops the call"
+    assert "error" in json.loads(str(out))

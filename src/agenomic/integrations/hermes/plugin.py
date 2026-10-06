@@ -2810,9 +2810,17 @@ class HermesAdapter:
         except Exception as exc:
             logger.warning("pre_tool_call failed: %s", type(exc).__name__)
             message = self._unavailable(sid, tool, tool_call_id, exc)
-            if self.local_mode() == "observe":
-                return None
-            return _block(message) if message else None
+            if message and self.local_mode() != "observe":
+                return _block(message)
+            # Failing open (observe, shadow) goes through the same locked recheck as any
+            # admission without an authorization: a command or enforce applied since blocks.
+            raw_args = kwargs.get("args")
+            fallback_args: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
+            try:
+                plan = self._admit_without_authorization(sid, tool, tool_call_id, fallback_args, {})
+            except Exception:
+                return _block(NO_AUTH_MESSAGE)
+            return None if plan.proceed else _block(plan.error or NO_AUTH_MESSAGE)
 
     def _mismatch(
         self, auth: _Authorization, local_hash: str, where: str
@@ -3075,7 +3083,20 @@ class HermesAdapter:
             if mode == "enforce":
                 plan = _ExecutionPlan(False, error=NO_AUTH_MESSAGE)
             else:
-                plan = _ExecutionPlan(True, observe=mode == "observe")
+                # Failing open goes through the locked recheck of commands, blocking
+                # states and the mode, as every admission without an authorization does.
+                raw_args = kwargs.get("args")
+                try:
+                    plan = self._admit_without_authorization(
+                        _str(kwargs.get("session_id")),
+                        _str(kwargs.get("tool_name")),
+                        _str(kwargs.get("tool_call_id")),
+                        raw_args if isinstance(raw_args, dict) else {},
+                        {},
+                        observe=mode == "observe",
+                    )
+                except Exception:
+                    plan = _ExecutionPlan(False, error=NO_AUTH_MESSAGE)
         if not plan.proceed:
             try:
                 self._emit(
