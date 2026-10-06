@@ -338,9 +338,9 @@ to a tool proxy of your own; without one, a tool call fails the trial.
 ## Serving trials
 
 A workspace owner registers the runner in Agenomic Cloud, names the agents it
-may serve and receives its runner token, `agr_` followed by 64 hexadecimal
-characters, once. The token authenticates the runner routes only: it cannot
-read experiments, and API keys and sessions cannot claim trials.
+may serve and receives its runner token, `agr_` followed by 64 lowercase
+hexadecimal characters, once. The token authenticates the runner routes only:
+it cannot read experiments, and API keys and sessions cannot claim trials.
 
 ```python
 import os
@@ -652,6 +652,10 @@ snapshot = snapshot_case(
 )
 print(snapshot["input"]["provenance"])
 ```
+
+`create_release` and `move_channel` are calls of the local engine, a
+simulation of the governed path: in Agenomic Cloud a channel move is a
+session-only, approved action, and the SDK cannot make it.
 
 - `snapshot_case` reads the thread through your own checkpointer and never
   writes it, its store or its release. Pass the compiled graph, not the
