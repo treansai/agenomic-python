@@ -108,6 +108,7 @@ _SECRET_PATTERNS = re.compile(
     r"|gh[pousr]_[A-Za-z0-9]{16,}"
     r"|github_pat_[A-Za-z0-9_]{20,}"
     r"|AKIA[0-9A-Z]{16}"
+    r"|hf_[A-Za-z0-9]{30,}"
     # A JWT (JWS, or the first segments of a JWE): base64url JSON header and payload,
     # both starting with ``{"`` (``eyJ``); the signature may be empty (``alg: none``).
     r"|eyJ[A-Za-z0-9_\-]{4,}\.eyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]*"

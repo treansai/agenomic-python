@@ -542,6 +542,8 @@ class HermesAdapter:
         # Keyed by (session, tool, tool_call_id): providers reuse call ids across sessions,
         # and an authorization must never serve another session's or tool's call.
         self._auth: OrderedDict[tuple[str, str, str], _Authorization] = OrderedDict()
+        # Call identities (session, tool, tool_call_id) whose authorization is in flight.
+        self._authorizing: set[tuple[str, str, str]] = set()
         # Every approval issued for an identical action, in issue order: concurrent identical
         # calls can each get their own approval, and each keeps its own identity.
         self._pending: dict[tuple[str, str, str], list[_Pending]] = {}
@@ -2201,6 +2203,49 @@ class HermesAdapter:
         mode = self.local_mode()
         if mode == "observe":
             return _Verdict()
+        # One authorization in flight per call identity: two invocations racing through the
+        # first gate would otherwise both obtain a permit and both execute.
+        ident = (sid, tool, tool_call_id) if tool_call_id else None
+        if ident is not None:
+            with self._lock:
+                busy = ident in self._authorizing
+                if not busy:
+                    self._authorizing.add(ident)
+            if busy:
+                if mode == "shadow":
+                    return _Verdict()  # shadow never blocks; this invocation holds no permit
+                return _Verdict(
+                    block=f"Agenomic: another invocation of {tool} with the same call id is "
+                    "being authorized; the action was not executed."
+                )
+        try:
+            return self._authorize_once(
+                tool=tool,
+                args=args,
+                sid=sid,
+                tool_call_id=tool_call_id,
+                turn_id=turn_id,
+                api_request_id=api_request_id,
+                local_hash=local_hash,
+                mode=mode,
+            )
+        finally:
+            if ident is not None:
+                with self._lock:
+                    self._authorizing.discard(ident)
+
+    def _authorize_once(
+        self,
+        *,
+        tool: str,
+        args: dict[str, JsonValue],
+        sid: str,
+        tool_call_id: str,
+        turn_id: str,
+        api_request_id: str,
+        local_hash: str,
+        mode: LocalMode,
+    ) -> _Verdict:
         key = (sid, tool, local_hash)
         claim = tool_call_id or f"hermes-{uuid.uuid4().hex}"
         with self._lock:

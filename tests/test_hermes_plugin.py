@@ -3495,8 +3495,9 @@ def test_llm_request_replaces_the_session_header_case_insensitively(
 def test_api_clients_refuse_an_endpoint_the_adapter_would_refuse(endpoint: str, cls: str) -> None:
     from agenomic.integrations.hermes import client as client_module
 
+    token = "agmhr_x" if cls == "RuntimeClient" else "agmhs_x"
     with pytest.raises(ValueError, match="endpoint"):
-        getattr(client_module, cls)(endpoint, "agmhr_x")
+        getattr(client_module, cls)(endpoint, token)
 
 
 @pytest.mark.parametrize("where", ["name", "toolset"])
@@ -3549,3 +3550,54 @@ def test_credential_shaped_tool_name_never_reaches_authorize(
             assert "unavailable" in json.loads(out)["error"]
     assert runner.executions == (0 if mode == "enforce" else 2), "shadow never blocks"
     assert all(secret not in json.dumps(r.body) for r in server.authorize_calls())
+
+
+@pytest.mark.parametrize(
+    ("cls", "token"),
+    [
+        ("RuntimeClient", "sk-" + "providerkey123456"),
+        ("RuntimeClient", "agmhs_x"),
+        ("SupervisorClient", "agmhr_x"),
+        ("SupervisorClient", "ghp_" + "0123456789abcdefABCD"),
+    ],
+)
+def test_api_clients_refuse_a_token_of_another_role(cls: str, token: str) -> None:
+    from agenomic.integrations.hermes import client as client_module
+
+    with pytest.raises(ValueError, match="token must be an agmh"):
+        getattr(client_module, cls)("https://a.example", token)
+
+
+def test_concurrent_first_gates_for_one_call_get_a_single_permit(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    server.decide = lambda body: "allow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    inside = threading.Event()
+    release = threading.Event()
+    real = adapter.client.authorize
+
+    def slow_authorize(sid: str, body: Any) -> Any:
+        inside.set()
+        assert release.wait(5)
+        return real(sid, body)
+
+    monkeypatch.setattr(adapter.client, "authorize", slow_authorize)
+    kw = Runner(adapter)._kw("read_file", "s1", "call_1")
+    results: list[Any] = []
+    first = threading.Thread(
+        target=lambda: results.append(adapter.pre_tool_call(args={"path": "/tmp/a"}, **kw))
+    )
+    first.start()
+    assert inside.wait(5)
+    second = adapter.pre_tool_call(args={"path": "/tmp/a"}, **kw)
+    release.set()
+    first.join(5)
+    assert results == [None], "the first invocation is authorized"
+    assert second is not None, "the racing invocation never gets its own permit"
+    assert "being authorized" in second["message"]
+    assert len(server.authorize_calls()) == 1

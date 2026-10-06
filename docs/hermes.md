@@ -194,7 +194,10 @@ Hermes has two call orders, both verified in the pinned source:
 
 Whichever of the two runs first for a `tool_call_id` calls
 `POST /sessions/:sid/actions/authorize` (`decision_s` budget); the other reuses
-that decision. The middleware never raises before `next_call` (Hermes would
+that decision. One authorization per call identity is in flight at a time: a
+concurrent invocation with the same `tool_call_id` is blocked in enforce (it
+would otherwise get its own permit and execute twice) and gets no permit in
+shadow. The middleware never raises before `next_call` (Hermes would
 skip the frame and execute: fail open); it returns
 `{"error": "Agenomic: no valid authorization for this action"}` instead.
 
@@ -282,7 +285,7 @@ it reaches the queue or the spool. With `capture.content: redacted_preview`,
 previews go through `redacted_preview` in `exporter.py` (credential keys masked at any depth,
 including a content mapping's own top-level keys), credential pattern
 masking and truncation. Pattern masking covers token shapes (`agmhr_`, `sk-`,
-`ghp_`, `github_pat_`, `AKIA...`, `xox?-`, JWTs, private key blocks), `Authorization`/`Proxy-Authorization`
+`ghp_`, `github_pat_`, `hf_`, `AKIA...`, `xox?-`, JWTs, private key blocks), `Authorization`/`Proxy-Authorization`
 values for every scheme (`Bearer`, `Basic`, `Digest`, `Token`, `ApiKey`,
 `AWS4-HMAC-SHA256`, ...), cookie headers, `key=value` and `key: value` pairs
 whose key names a credential (`api_key`, `x-api-key`, `password`, `token`,

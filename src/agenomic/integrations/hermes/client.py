@@ -26,7 +26,11 @@ from pydantic import JsonValue
 
 from agenomic._version import __version__
 from agenomic.exceptions import CloudError
-from agenomic.integrations.hermes.config import check_endpoint
+from agenomic.integrations.hermes.config import (
+    RUNTIME_TOKEN_PREFIX,
+    SUPERVISOR_TOKEN_PREFIX,
+    check_endpoint,
+)
 
 logger = logging.getLogger("agenomic.integrations.hermes.client")
 
@@ -218,6 +222,9 @@ class RuntimeClient(_ApiClient):
         report_s: float = 10.0,
         transport: Optional[httpx.BaseTransport] = None,
     ) -> None:
+        # Never another credential (a provider key, the other role's token) as the bearer.
+        if not token.startswith(RUNTIME_TOKEN_PREFIX):
+            raise ValueError(f"token must be an {RUNTIME_TOKEN_PREFIX} token")
         super().__init__(
             endpoint,
             token,
@@ -395,6 +402,9 @@ class SupervisorClient(_ApiClient):
         report_s: float = 10.0,
         transport: Optional[httpx.BaseTransport] = None,
     ) -> None:
+        # Never another credential (a provider key, the other role's token) as the bearer.
+        if not token.startswith(SUPERVISOR_TOKEN_PREFIX):
+            raise ValueError(f"token must be an {SUPERVISOR_TOKEN_PREFIX} token")
         super().__init__(
             endpoint,
             token,

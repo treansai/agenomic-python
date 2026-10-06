@@ -972,3 +972,11 @@ def test_standalone_jwts_are_masked(signature: str) -> None:
 def test_dotted_identifiers_are_not_mistaken_for_jwts() -> None:
     text = "module.submodule.attr and eyJ.short.x"
     assert mask_text(text) == text
+
+
+def test_hugging_face_tokens_are_masked() -> None:
+    token = "hf_" + "AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+    masked = mask_text(f"HF login {token} ok")
+    assert token not in masked
+    assert masked.startswith("HF login ")
+    assert mask_text("hf_short and hf_model_name") == "hf_short and hf_model_name"
