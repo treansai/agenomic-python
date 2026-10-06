@@ -1053,3 +1053,101 @@ def test_later_ack_supersedes_a_queued_earlier_one(
     monkeypatch.setattr(adapter.client, "ack_command", flaky)
     adapter.handle_command({"id": "c7", "kind": "pause", "target_kind": "instance"})
     assert not adapter._ack_retries, "received is dropped once applied was accepted"
+
+
+def test_failed_hello_after_a_mutator_change_is_resent(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.tick()
+    assert server.calls("/hello")[-1].body["foreign_mutators"] == []
+
+    def other_plugin(**kwargs: Any) -> dict[str, Any]:
+        return {"action": "modify", "args": {}}
+
+    adapter.ctx._manager._hooks["pre_tool_call"].append(other_plugin)
+    real = adapter.client.hello
+    failures = {"left": 1}
+
+    def flaky(body: Any) -> Any:
+        if failures["left"]:
+            failures["left"] -= 1
+            raise HermesApiError("unreachable", "connection refused", 0)
+        return real(body)
+
+    monkeypatch.setattr(adapter.client, "hello", flaky)
+    adapter.tick()
+    assert failures["left"] == 0, "the changed mutator list triggered a hello"
+    adapter.tick()
+    hello = server.calls("/hello")[-1].body
+    assert len(hello["foreign_mutators"]) == 1, "the server learns about the new mutator"
+
+
+@pytest.mark.parametrize("outcome", ["blocked", "raised", "error"])
+def test_unexecuted_delegation_drops_its_reservation(
+    server: FakeAgenomic, tmp_path: Path, outcome: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="parent", platform="cli", model="m")
+    args: dict[str, Any] = {"tasks": [{"goal": "a"}]}
+    kw = Runner(adapter)._kw("delegate_task", "parent", "d1")
+
+    def terminal(next_args: Optional[dict[str, Any]] = None) -> str:
+        assert adapter.pre_tool_call(args=args, **kw) is None
+        if outcome == "blocked":
+            # Another Hermes hook blocks the call after Agenomic allowed it.
+            result = json.dumps({"error": "blocked by another plugin"})
+            adapter.post_tool_call(args=args, result=result, status="blocked", **kw)
+            return result
+        if outcome == "raised":
+            raise RuntimeError("delegation failed")
+        return json.dumps({"error": "no child started"})
+
+    try:
+        adapter.tool_execution(args=args, next_call=terminal, **kw)
+    except RuntimeError:
+        assert outcome == "raised"
+    assert len(server.calls("/delegations")) == 1
+    assert not adapter._delegations.get("parent"), "no reservation outlives the failed call"
+
+    adapter.subagent_start(
+        parent_session_id="parent",
+        child_session_id="later-child",
+        child_subagent_id="sa-1",
+        child_goal="b",
+    )
+    adapter.on_session_start(session_id="later-child", platform="subagent", model="m")
+    child = [
+        r.body
+        for r in server.calls("/v1/hermes/runtime/sessions")
+        if r.body["hermes_session_id"] == "later-child"
+    ]
+    assert "delegation_id" not in child[0], "an unrelated child never takes a stale delegation"
+
+
+def test_shutdown_makes_the_guard_block(server: FakeAgenomic, tmp_path: Path) -> None:
+    config = AdapterConfig.model_validate(
+        {"endpoint": server.url, "buffer": {"flush_interval_s": 0.05}}
+    )
+    ctx = FakeCtx()
+    adapter = HermesAdapter(
+        config, SecretStr("agmhr_t"), ctx=ctx, hermes_home=tmp_path / "h", identity=dict(PINNED)
+    )
+    adapter.install(ctx)
+    server.heartbeat_interval_secs = 1
+    adapter.on_session_start(session_id="s", platform="cli")
+    assert wait_for(lambda: len(server.calls("/heartbeat")) >= 1)
+    status = guard_mod._read_status(adapter.status_file)
+    assert guard_mod.evaluate(status, max_age_s=60) is None, "the loaded adapter allows"
+
+    assert ctx.unload
+    for callback in ctx.unload:
+        callback()
+    assert adapter._thread is not None
+    assert not adapter._thread.is_alive()
+    status = guard_mod._read_status(adapter.status_file)
+    assert status is not None
+    assert status["loaded"] is False
+    assert guard_mod.evaluate(status, max_age_s=60) is not None, "the guard blocks after unload"
+    adapter.tick()  # a late heartbeat never reopens the guard
+    assert guard_mod._read_status(adapter.status_file)["loaded"] is False  # type: ignore[index]

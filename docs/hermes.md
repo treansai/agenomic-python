@@ -177,7 +177,9 @@ skip the frame and execute: fail open); it returns
 - `delegate_task` first reserves `POST /sessions/:sid/delegations` (`count` =
   number of tasks). `subagent_start` links the child session (it fires before
   the child's `on_session_start`), which is admitted with
-  `parent_hermes_session_id`, `subagent_id` and `delegation_id`.
+  `parent_hermes_session_id`, `subagent_id` and `delegation_id`. A
+  reservation is queued for children only once the action is allowed, and
+  dropped when Hermes blocks the call afterwards or it fails.
 - Writes by `write_file`/`patch` into `$HERMES_HOME/skills`, `plugins`,
   `config.yaml`, `.env`, `/etc/hermes` or the profile's `protected_paths` are
   decided by the server and, in enforce, also denied locally.
@@ -262,7 +264,9 @@ status file the plugin keeps fresh, `$HERMES_HOME/agenomic/status.json`
 (`loaded`, `instance_status`, `effective_state`, `updated_at`). It blocks when
 the file is missing, unreadable, older than `AGENOMIC_HERMES_GUARD_MAX_AGE_S`
 (default 120 s), dated in the future, not `loaded`, or says `paused`,
-`quarantined` or `revoked`. Upstream allows a `fail_closed` hook that exits
+`quarantined` or `revoked`. When Hermes unloads the plugin (or the process
+exits) the plugin writes `loaded: false`, so the guard blocks at once instead
+of when the file goes stale. Upstream allows a `fail_closed` hook that exits
 non zero with an empty stdout, so every failure path, including internal
 errors, prints `{"action": "block", "message": ...}` and exits 2. Allowing
 prints nothing and exits 0. Shell hooks are registered by the Hermes CLI,

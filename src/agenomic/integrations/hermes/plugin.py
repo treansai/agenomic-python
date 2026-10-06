@@ -123,6 +123,8 @@ class _Authorization:
     permit: Optional[dict[str, Any]] = None
     server_hash: Optional[str] = None
     decision_id: Optional[str] = None
+    # The delegation reservation this call queued for its children (``delegate_task``).
+    delegation: Optional[list[Any]] = None
     # authorized -> executing -> done
     state: str = "authorized"
 
@@ -363,6 +365,8 @@ class HermesAdapter:
         self._cancel_subagents: dict[str, str] = {}
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Serializes status writes so a heartbeat in flight cannot undo shutdown's "not loaded".
+        self._status_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # installation and lifecycle
@@ -522,15 +526,23 @@ class HermesAdapter:
             atexit.register(self.shutdown)
 
     def shutdown(self) -> None:
-        """Stop the heartbeat and drain the exporter (bounded).
+        """Stop the heartbeat, mark the guard status not loaded, drain the exporter (bounded).
 
         Example:
             >>> a = _demo_adapter()
             >>> a.shutdown()
             >>> a.exporter.submit({"event_id": "e1"})
             False
+            >>> json.loads(a.status_file.read_text())["loaded"]
+            False
         """
         self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(2.0)
+        # No callback of this adapter will ask the gateway any more: the guard must block now
+        # instead of allowing tool calls until the status file goes stale.
+        self._write_status()
         try:
             self.exporter.close(2.0)
         except Exception as exc:
@@ -581,15 +593,18 @@ class HermesAdapter:
     def _write_status(self) -> None:
         if not self._gates_registered():
             logger.error("no enforcement gate registered; the guard keeps blocking tools")
-        try:
-            write_status(
-                self.status_file,
-                loaded=self._gates_registered(),
-                instance_status=self._instance_status(),
-                effective_state=self._effective_state,
-            )
-        except OSError as exc:
-            logger.warning("status file not written: %s", type(exc).__name__)
+        with self._status_lock:
+            try:
+                write_status(
+                    self.status_file,
+                    # After shutdown every write says "not loaded", so a late heartbeat cannot
+                    # reopen the guard.
+                    loaded=self._gates_registered() and not self._stop.is_set(),
+                    instance_status=self._instance_status(),
+                    effective_state=self._effective_state,
+                )
+            except OSError as exc:
+                logger.warning("status file not written: %s", type(exc).__name__)
 
     def _provider(self) -> dict[str, Any]:
         model = _hermes_config().get("model")
@@ -656,13 +671,12 @@ class HermesAdapter:
         )
         return results
 
-    def _hello_body(self) -> dict[str, Any]:
-        self._foreign = self.foreign_mutators()
+    def _hello_body(self, foreign: list[dict[str, str]]) -> dict[str, Any]:
         return {
             "hermes": self._identity,
             "adapter": {"version": ADAPTER_VERSION, "config_schema": CONFIG_SCHEMA},
             "contracts": self._contracts,
-            "foreign_mutators": self._foreign,
+            "foreign_mutators": foreign,
             "provider": self._provider(),
             "compat_results": self._compat_results(),
             "platform": self._platform or "cli",
@@ -670,11 +684,15 @@ class HermesAdapter:
 
     def _hello(self) -> bool:
         self._hello_attempt_at = time.monotonic()
+        foreign = self.foreign_mutators()
         try:
-            resp = self.client.hello(self._hello_body())
+            resp = self.client.hello(self._hello_body(foreign))
         except HermesApiError as exc:
             logger.warning("Agenomic hello failed (%s)", exc.code)
             return False
+        # Only a delivered hello updates the list the server knows; a failed one is re-sent
+        # on the next tick because the list still differs.
+        self._foreign = foreign
         self._hello_ok = True
         self._instance_id = _str(resp.get("instance_id")) or None
         self._set_state(resp.get("effective_state"))
@@ -1460,12 +1478,26 @@ class HermesAdapter:
             return f"Agenomic denied delegate_task: {explanation or 'delegation limit'}", None
         raise HermesApiError("invalid_response", "delegation answer without a valid decision", 200)
 
-    def _settle_delegation(self, key: tuple[str, str, str], commit: bool) -> None:
+    def _settle_delegation(self, key: tuple[str, str, str], commit: bool) -> Optional[list[Any]]:
         """Queue the provisional reservation for the child once the action is allowed."""
         with self._lock:
             reservation = self._provisional_delegations.pop(key, None)
             if commit and reservation is not None:
                 self._delegations.setdefault(key[0], deque()).append(reservation)
+                return reservation
+            return None
+
+    def _drop_delegation(self, auth: _Authorization) -> None:
+        """Forget the unconsumed part of a reservation whose call did not run its children."""
+        with self._lock:
+            reservation, auth.delegation = auth.delegation, None
+            queue = self._delegations.get(auth.session_id)
+            if reservation is None or not queue:
+                return
+            for i, queued in enumerate(queue):
+                if queued is reservation:
+                    del queue[i]
+                    break
 
     def _approval_gate(self, pending: _Pending) -> tuple[Optional[str], bool]:
         """Before a controlled retry: ``(block, keep_identity)``.
@@ -1655,7 +1687,7 @@ class HermesAdapter:
                     local_hash,
                     extra={"local": True, "shadow": True},
                 )
-        self._settle_delegation(key, commit=True)
+        auth.delegation = self._settle_delegation(key, commit=True)
         with self._lock:
             auth_key = (auth.session_id, auth.tool, auth.tool_call_id)
             self._auth[auth_key] = auth
@@ -1951,6 +1983,8 @@ class HermesAdapter:
                     auth.state = "done"
             if post == "blocked":
                 # Hermes (scope, another plugin, guardrails) blocked it inside next_call: not executed.
+                if auth is not None:
+                    self._drop_delegation(auth)
                 self._emit(
                     "tool.call.not_executed",
                     _str(plan.meta.get("sid")) or None,
@@ -1960,6 +1994,9 @@ class HermesAdapter:
                 )
                 return
             is_error = raised or _result_is_error(result)
+            if is_error and auth is not None:
+                # Children not started by a failed delegate_task never claim its reservation.
+                self._drop_delegation(auth)
             output_hash = None if raised else content_hash(result)
             self._emit(
                 "tool.call.executed",
