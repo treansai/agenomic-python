@@ -392,8 +392,11 @@ while an admission is in flight, or while an active session's admission failed
 (the gateway may have created it and lost the answer): it is decided once the
 id is published by an admission or retry, and refused only once no such
 session remains (a session that ended while its failed admission was in
-flight holds none). The heartbeat retries the admission of every active
-session whose admission failed, so an idle session still publishes its id.
+flight holds none, nor does one whose admission was refused for good). The
+heartbeat retries the admission of active sessions whose admission failed
+transiently (at most 3 per heartbeat, stopping at the first failure so the
+guard status stays fresh), so an idle session still publishes its id. An
+interrupt that applies a cancel ends the session for the adapter.
 The admitted model id is masked like any exported text.
 An acknowledgement that fails on a transport error, a timeout, a 5xx or a
 transient 4xx (408, 425, 429) is queued and retried on the next heartbeat, by

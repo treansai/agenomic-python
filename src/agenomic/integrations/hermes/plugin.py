@@ -136,6 +136,7 @@ APPROVAL_IN_USE_MESSAGE = (
 _SESSION_HEADER = "X-Agenomic-Hermes-Session"
 _DECISION_STATUS = {"allow": 200, "observe": 200, "require_approval": 202, "deny": 403}
 _DELEGATION_STATUS = {"allow": 200, "observe": 200, "deny": 403}
+_MAX_ADMISSION_RETRIES_PER_TICK = 3
 NO_AUTH_MESSAGE = "Agenomic: no valid authorization for this action"
 #: Reason recorded when a call's arguments have no canonical form (``agenomic.canon/v1``).
 NOT_CANONICAL_REASON = "arguments_not_canonical"
@@ -1426,6 +1427,9 @@ class HermesAdapter:
         with self._lock:
             self._admissions_in_flight += 1
         resp: Optional[dict[str, Any]] = None
+        # Whether the gateway may have created the session without this process learning
+        # its id (a transient failure): only then is it retried and may it hold cancels.
+        lost = True
         try:
             resp = self.client.create_session(body)
             info = resp.get("session")
@@ -1436,13 +1440,13 @@ class HermesAdapter:
                 resp = None
         except HermesApiError as exc:
             logger.warning("session admission failed (%s)", exc.code)
+            lost = exc.retryable
         finally:
-            pending = self._finish_admission(session, resp)
+            pending = self._finish_admission(session, resp, lost=lost)
         for command_id, target in pending:
             self._cancel_session(command_id, target)
         if resp is None:
             return
-        session.admitted = True
         self._set_state(resp.get("effective_state"), seq)
 
     def _retry_admissions(self) -> None:
@@ -1455,14 +1459,18 @@ class HermesAdapter:
                 for sid in self._unadmitted
                 if sid in self._sessions and self._sessions[sid].active
             ]
-        for session in pending:
+        # Bounded per heartbeat, and stopped at the first failure (the gateway is likely
+        # unavailable): a backlog never delays the status file past the guard's deadline.
+        for session in pending[:_MAX_ADMISSION_RETRIES_PER_TICK]:
             try:
                 self._admit(session)
             except Exception as exc:  # the heartbeat never fails on a retry
                 logger.debug("admission retry failed: %s", type(exc).__name__)
+            if not session.admitted:
+                break
 
     def _finish_admission(
-        self, session: _Session, resp: Optional[Mapping[str, Any]]
+        self, session: _Session, resp: Optional[Mapping[str, Any]], *, lost: bool = True
     ) -> list[tuple[str, str]]:
         """Publish the session's Agenomic id and hand back the cancels to decide now: those
         naming that id, and, once no admission is in flight, every one still unresolved
@@ -1470,12 +1478,17 @@ class HermesAdapter:
         info = resp.get("session") if resp is not None else None
         with self._lock:
             self._admissions_in_flight -= 1
-            if resp is None and session.active:
+            if resp is not None:
+                # Under the lock: a concurrent admission of the same session that fails
+                # afterwards sees it admitted and never records it as unadmitted.
+                session.admitted = True
+            if resp is None and lost and session.active and not session.admitted:
                 self._unadmitted.add(session.hermes_session_id)
             else:
-                # Admitted, or failed after the session already ended (its terminal callback
-                # ran while this request was in flight): no id will ever be published for
-                # it, so it holds no cancel unresolved.
+                # Admitted (by this request or a concurrent one), refused for good (no
+                # session was created), or failed after the session already ended (its
+                # terminal callback ran while this request was in flight): no id will be
+                # published for it, so it holds no cancel unresolved.
                 self._unadmitted.discard(session.hermes_session_id)
             if isinstance(info, dict) and isinstance(info.get("id"), str):
                 session.agenomic_id = cast(str, info["id"])
@@ -1655,6 +1668,13 @@ class HermesAdapter:
             )
             if interrupted:
                 session = self._sessions.get(sid)
+                if status == "cancelled":
+                    # The cancel's interrupt ends the session: it is no longer advertised
+                    # as active, retried for admission, nor a target for later cancels.
+                    with self._lock:
+                        if session is not None:
+                            session.active = False
+                    self._forget_unadmitted(sid)
                 self._end_terminal(
                     sid,
                     False,

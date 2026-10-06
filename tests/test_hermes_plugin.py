@@ -4044,3 +4044,74 @@ def test_a_credential_shaped_model_id_is_masked_in_the_admission(
     adapter.on_session_start(session_id="s1", platform="cli", model=f"custom/{secret}")
     assert bodies
     assert secret not in json.dumps(bodies)
+
+
+def test_a_cancelled_interrupt_ends_the_session_for_the_adapter(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {"id": "k12", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+    adapter.on_session_end(session_id="s1", interrupted=True)
+    assert not adapter._sessions["s1"].active, "no longer advertised nor admitted"
+    assert ("k12", "applied") in [(c, b["status"]) for c, b in server.acks]
+
+
+def test_admission_retries_are_bounded_within_a_heartbeat(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    calls: list[str] = []
+
+    def unavailable(body: dict[str, Any]) -> Any:
+        calls.append(body["hermes_session_id"])
+        raise HermesApiError("timeout", "gateway unavailable", 0)
+
+    monkeypatch.setattr(adapter.client, "create_session", unavailable)
+    for i in range(6):
+        adapter.on_session_start(session_id=f"s{i}", platform="cli")
+    assert len(adapter._unadmitted) == 6
+    calls.clear()
+    adapter.tick()
+    assert len(calls) == 1, "a failing gateway stops the retries of this heartbeat"
+
+
+def test_a_permanently_refused_admission_is_not_retried(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+
+    def refused(body: dict[str, Any]) -> Any:
+        raise HermesApiError("unprocessable", "refused", 422)
+
+    monkeypatch.setattr(adapter.client, "create_session", refused)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert "s1" not in adapter._unadmitted
+
+
+def test_a_failed_admission_after_a_concurrent_success_leaves_no_stale_entry(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+    nested = {"done": False}
+
+    def concurrent_success_then_lost(body: dict[str, Any]) -> Any:
+        if not nested["done"]:
+            nested["done"] = True
+            # Another callback admits the same session while this request is in flight.
+            monkeypatch.setattr(adapter.client, "create_session", real_create)
+            adapter._admit(adapter._sessions["s1"])
+            raise HermesApiError("timeout", "lost", 0)
+        return real_create(body)
+
+    monkeypatch.setattr(adapter.client, "create_session", concurrent_success_then_lost)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert adapter._sessions["s1"].admitted
+    assert "s1" not in adapter._unadmitted
