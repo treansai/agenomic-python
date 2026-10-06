@@ -75,7 +75,10 @@ The endpoint is validated first (absolute http(s) URL, no credentials, query
 or fragment), as the adapter, the supervisor and the HTTP clients do, and so are the plugin
 `settings`: unknown keys and literal values the adapter would refuse are
 rejected, while `${env:VAR}` references are checked when the adapter loads
-(only in string fields: `timeouts`, `buffer` and `capture` are mappings and
+(a value made only of references is checked then; a reference mixed with
+literal text is validated as written, so it fits text fields such as
+`buffer.spool_path` but never a number or an enumeration; `timeouts`,
+`buffer` and `capture` are mappings and
 take references in their fields, never as a whole, and an unknown field is
 refused even when its value is a reference). A
 configuration Hermes could not load is never rendered. It produces:
@@ -197,7 +200,11 @@ Whichever of the two runs first for a `tool_call_id` calls
 that decision. One authorization per call identity is in flight at a time: a
 concurrent invocation with the same `tool_call_id` is blocked in enforce (it
 would otherwise get its own permit and execute twice) and gets no permit in
-shadow. The middleware never raises before `next_call` (Hermes would
+shadow. The arguments sent to `/authorize` (and reported with the permit) are a
+redacted copy: credential-named keys and credential-shaped values are masked,
+so the gateway's policy, hash and permit bind that copy; the binding to the
+arguments that actually execute is the adapter's own hash of the originals,
+checked at every gate. The middleware never raises before `next_call` (Hermes would
 skip the frame and execute: fail open); it returns
 `{"error": "Agenomic: no valid authorization for this action"}` instead.
 

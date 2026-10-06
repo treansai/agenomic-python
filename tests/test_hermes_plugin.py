@@ -3601,3 +3601,25 @@ def test_concurrent_first_gates_for_one_call_get_a_single_permit(
     assert second is not None, "the racing invocation never gets its own permit"
     assert "being authorized" in second["message"]
     assert len(server.authorize_calls()) == 1
+
+
+def test_credential_values_in_arguments_never_reach_the_gateway(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.decide = lambda body: "allow"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    secret = "sk-" + "abcdefghijklmnop"
+    pat = "ghp_" + "0123456789abcdefABCD"
+    args = {"api_key": secret, "url": "https://api.example/v1", "note": f"use {pat}"}
+    out = runner.agent_loop("web_fetch", args)
+    assert "error" not in json.loads(out)
+    assert runner.executions == 1, "the original arguments execute"
+    (call,) = server.authorize_calls()
+    (report,) = server.reports()
+    for body in (call.body, report.body):
+        dumped = json.dumps(body)
+        assert secret not in dumped
+        assert pat not in dumped
+    assert call.body["arguments"]["url"] == "https://api.example/v1"
+    assert report.body["arguments"] == call.body["arguments"], "the permit's copy is reported"

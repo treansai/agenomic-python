@@ -66,6 +66,7 @@ MODEL_GATEWAY_PATH = "/v1/hermes/runtime/model/v1"
 
 _ENV_REF = re.compile(r"^\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}$")
 _ANY_ENV_REF = re.compile(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}")
+_ONLY_ENV_REFS = re.compile(r"^(?:\$\{env:[A-Za-z_][A-Za-z0-9_]*\})+$")
 _LOOPBACK = {"localhost", "127.0.0.1", "::1"}
 _SETTINGS_KEYS = (
     "schema_version",
@@ -397,13 +398,15 @@ def settings_from_context(ctx: object) -> dict[str, object]:
 
 
 def _without_env_refs(value: Any) -> Any:
-    """``value`` with the entries holding an ``${env:VAR}`` reference left out (their
-    defaults are validated instead)."""
+    """``value`` with the entries made only of ``${env:VAR}`` references left out (their
+    defaults are validated instead). A reference mixed with literal text stays and is
+    validated as written: it fits a text field, never a number or an enumeration (after
+    expansion ``${env:T}s`` would still not be a number)."""
     if isinstance(value, dict):
         return {
             k: _without_env_refs(v)
             for k, v in value.items()
-            if not (isinstance(v, str) and _ANY_ENV_REF.search(v))
+            if not (isinstance(v, str) and _ONLY_ENV_REFS.match(v))
         }
     return value
 
@@ -501,7 +504,8 @@ def render_hermes_config(
                 raise ValueError(
                     f"{key} is a mapping; use ${{env:VAR}} references in its fields instead"
                 )
-            continue
+            if _ONLY_ENV_REFS.match(value):
+                continue  # known in the Hermes environment only: checked when loaded
         if key in _OBJECT_SETTINGS and isinstance(value, dict):
             # Checked before references are left out: an unknown field is refused by the
             # adapter whatever its value, also one that only Hermes can expand.

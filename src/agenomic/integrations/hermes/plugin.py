@@ -2326,10 +2326,14 @@ class HermesAdapter:
             attempt = (
                 previous.attempt + 1 if previous is not None and previous.state == "done" else 1
             )
+        # The gateway decides on, hashes and later verifies a redacted copy: credential
+        # values never leave the process. The binding to the arguments that execute stays
+        # local (``local_hash``, over the original arguments, checked at every gate).
+        sent_args = cast(dict[str, JsonValue], redact(args))
         body: dict[str, Any] = {
             "tool_call_id": logical_call_id,
             "tool": tool,
-            "arguments": args,
+            "arguments": sent_args,
             "attempt": attempt,
             "schema_hash": self._schema_hash_for(tool),
             "turn_id": turn_id or None,
@@ -2469,7 +2473,8 @@ class HermesAdapter:
             logical_call_id=_str(resp.get("logical_call_id")) or logical_call_id,
             attempt=int(cast(Any, resp.get("attempt")) or attempt),
             local_hash=local_hash,
-            arguments=args,
+            # Reported with the permit: the copy the gateway hashed, never the original.
+            arguments=sent_args,
             effective_mode=effective_mode,
             record_id=record_id,
             permit=permit if isinstance(permit, dict) else None,
