@@ -2118,3 +2118,27 @@ def test_session_and_subagent_cancels_of_one_child_are_both_applied(
     adapter.subagent_stop(parent_session_id="p", child_session_id="c", child_status="interrupted")
     applied = sorted(c for c, b in server.acks if b["status"] == "applied")
     assert applied == ["k_ses", "k_sub"], "every cancel waiting for this end is acknowledged"
+
+
+@pytest.mark.parametrize("target_kind", ["session", "subagent"])
+def test_every_cancel_of_one_target_is_applied(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_kind: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    monkeypatch.setattr(adapter, "_interrupt_subagent", lambda sid: True)
+    adapter.subagent_start(parent_session_id="p", child_session_id="c", child_subagent_id="sa-1")
+    adapter.on_session_start(session_id="c", platform="subagent", model="m")
+    target = "c" if target_kind == "session" else "sa-1"
+    for command_id in ("k1", "k2"):
+        adapter.handle_command(
+            {
+                "id": command_id,
+                "kind": "cancel",
+                "target_kind": target_kind,
+                "target_ref": target,
+                "status": "requested",
+            }
+        )
+    adapter.subagent_stop(parent_session_id="p", child_session_id="c", child_status="interrupted")
+    applied = [c for c, b in server.acks if b["status"] == "applied"]
+    assert applied == ["k1", "k2"], "each waiting cancel is acknowledged once"

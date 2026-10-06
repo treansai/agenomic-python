@@ -220,6 +220,13 @@ class _ExecutionPlan:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
+def _add_once(waiting: dict[str, list[str]], target: str, command_id: str) -> None:
+    """Record ``command_id`` as waiting for ``target``'s end, once."""
+    ids = waiting.setdefault(target, [])
+    if command_id not in ids:
+        ids.append(command_id)
+
+
 def _str(value: object) -> str:
     return value if isinstance(value, str) else ""
 
@@ -443,8 +450,10 @@ class HermesAdapter:
         self._commands_seen: set[str] = set()
         # Acknowledgements that failed in transport; retried on every tick until accepted.
         self._ack_retries: deque[tuple[str, str, dict[str, Any]]] = deque(maxlen=500)
-        self._cancel_sessions: dict[str, str] = {}
-        self._cancel_subagents: dict[str, str] = {}
+        # Every cancel command waiting for the end of a session or subagent, oldest first:
+        # each one is acknowledged when Hermes reports that end.
+        self._cancel_sessions: dict[str, list[str]] = {}
+        self._cancel_subagents: dict[str, list[str]] = {}
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         # Serializes status writes so a heartbeat in flight cannot undo shutdown's "not loaded".
@@ -1004,7 +1013,7 @@ class HermesAdapter:
             self._ack(command_id, "refused", {"reason": "missing_target"})
             return
         if self._interrupt_subagent(subagent_id):
-            self._cancel_subagents[subagent_id] = command_id
+            _add_once(self._cancel_subagents, subagent_id, command_id)
         else:
             self._ack(command_id, "refused", {"reason": "subagent_not_running"})
 
@@ -1015,11 +1024,9 @@ class HermesAdapter:
         if session is None or not session.active:
             self._ack(command_id, "refused", {"reason": "session_not_active"})
             return
-        self._cancel_sessions[sid] = command_id
+        _add_once(self._cancel_sessions, sid, command_id)
         if session.subagent_id and self._interrupt_subagent(session.subagent_id):
-            # A subagent cancel already waiting keeps its own command id: both are
-            # acknowledged when the end is observed.
-            self._cancel_subagents.setdefault(session.subagent_id, command_id)
+            _add_once(self._cancel_subagents, session.subagent_id, command_id)
         # Root sessions expose no interrupt handle to plugins: further tool calls are blocked and
         # the command is applied once Hermes reports the session's end.
 
@@ -1046,12 +1053,13 @@ class HermesAdapter:
         """Every cancel waiting for this end (of the session and of the subagent it runs
         as, possibly distinct commands) is acknowledged as applied, each exactly once."""
         command_ids: list[str] = []
-        for command_id in (
-            self._cancel_sessions.pop(sid, None) if sid else None,
-            self._cancel_subagents.pop(subagent_id, None) if subagent_id else None,
+        for waiting in (
+            self._cancel_sessions.pop(sid, []) if sid else [],
+            self._cancel_subagents.pop(subagent_id, []) if subagent_id else [],
         ):
-            if command_id and command_id not in command_ids:
-                command_ids.append(command_id)
+            for command_id in waiting:
+                if command_id not in command_ids:
+                    command_ids.append(command_id)
         for command_id in command_ids:
             self._ack(command_id, "applied", {"observed": how, "hermes_session_id": sid})
 

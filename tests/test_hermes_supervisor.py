@@ -1046,6 +1046,42 @@ def test_oversized_manifest_reconciles_the_whole_directory(
     assert not (out / "b" / "SKILL.md").exists()
 
 
+@posix_only
+@pytest.mark.parametrize("how", ["chown", "foreign_uid"])
+def test_manifest_not_owned_by_the_supervisor_is_not_trusted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A"), _skill("b", "B")], out)
+    manifest = out / ".agenomic_manifest.json"
+    # The child (able to write the directory) replaces the manifest to hide b from removal.
+    manifest.unlink()
+    manifest.write_text('{"files": []}')
+    if how == "chown":
+        if os.geteuid() != 0:
+            pytest.skip("needs chown")
+        os.chown(manifest, 65534, 65534)
+    else:
+        # The files on disk belong to another uid than the supervisor's.
+        owner = manifest.stat().st_uid
+        monkeypatch.setattr(sup, "_supervisor_uid", lambda: owner + 1)
+    counts = sync_skills([_skill("a", "A")], out)
+    assert counts["removed"] == 1, "the untrusted manifest is ignored: the directory is reconciled"
+    assert not (out / "b" / "SKILL.md").exists()
+    assert (out / "a" / "SKILL.md").read_text() == "A"
+
+
+@posix_only
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() != 0, reason="needs chown")
+def test_skill_file_not_owned_by_the_supervisor_is_rewritten(tmp_path: Path) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A")], out)
+    skill = out / "a" / "SKILL.md"
+    os.chown(skill, 65534, 65534)  # same content, but the child could now change it
+    assert sync_skills([_skill("a", "A")], out)["written"] == 1
+    assert skill.stat().st_uid == os.geteuid()
+
+
 def test_skill_named_like_the_manifest_is_rejected(tmp_path: Path) -> None:
     body = '{"files": []}'
     skill = {

@@ -779,13 +779,16 @@ def _unchanged_at(root_fd: int, parts: Sequence[str], data: bytes) -> bool:  # p
         return False
     try:
         try:
-            mode = os.lstat(parts[-1], dir_fd=dir_fd).st_mode
+            st = os.lstat(parts[-1], dir_fd=dir_fd)
         except FileNotFoundError:
             return False
+        mode = st.st_mode
         if stat.S_ISLNK(mode):
             raise UnsafeSkillsPathError(f"{'/'.join(parts)} is a symbolic link")
         if not stat.S_ISREG(mode):
             raise UnsafeSkillsPathError(f"{'/'.join(parts)} is not a regular file")
+        if st.st_uid != _supervisor_uid():
+            return False  # replaced by someone else: rewritten, so the supervisor owns it
         fd = _open_regular_at(parts[-1], dir_fd)
         with os.fdopen(fd, "rb") as fh:
             if fh.read(len(data) + 1) != data:
@@ -801,16 +804,28 @@ def _unchanged_at(root_fd: int, parts: Sequence[str], data: bytes) -> bool:  # p
 _MANIFEST_MAX_BYTES = 16 * 1024 * 1024
 
 
+def _supervisor_uid() -> int:  # pragma: posix-only
+    """The effective uid that owns every file this supervisor writes."""
+    if sys.platform == "win32":
+        raise NotImplementedError("file ownership is POSIX only")
+    return os.geteuid()
+
+
 def _open_regular_at(name: str, dir_fd: int) -> int:  # pragma: posix-only
     """Open ``name`` read only in ``dir_fd``, never through a symbolic link and never
     blocking: a FIFO or device planted there is opened nonblocking, then refused with
-    :class:`UnsafeSkillsPathError` because ``fstat`` does not report a regular file."""
+    :class:`UnsafeSkillsPathError` because ``fstat`` does not report a regular file. A
+    file the supervisor does not own (planted or replaced by the child, which can write
+    the directory) is refused the same way: only what the supervisor wrote is trusted."""
     if sys.platform == "win32":
         raise NotImplementedError("directory descriptors are POSIX only")
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=dir_fd)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
             raise UnsafeSkillsPathError(f"{name} is not a regular file")
+        if st.st_uid != _supervisor_uid():
+            raise UnsafeSkillsPathError(f"{name} is not owned by the supervisor")
         os.set_blocking(fd, True)
     except BaseException:
         os.close(fd)
