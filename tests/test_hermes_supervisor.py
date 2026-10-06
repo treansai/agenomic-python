@@ -1935,3 +1935,15 @@ def test_an_entry_that_cannot_be_inspected_fails_the_inventory(
             sup._managed_files_at(fd)
     finally:
         os.close(fd)
+
+
+def test_max_restarts_is_a_supervisor_option(tmp_path: Path) -> None:
+    args = sup._parser().parse_args(["--endpoint", "https://a.example", "--max-restarts", "2"])
+    assert sup._settings_from_args(args, ["hermes"], tmp_path).max_restarts == 2
+    with pytest.raises(SystemExit):
+        sup._parser().parse_args(["--max-restarts", "-1"])
+
+
+def test_a_skill_path_with_a_nul_byte_is_rejected_not_raised() -> None:
+    assert sup._skill_parts("skills/demo/\x00") is None
+    assert sup._skill_parts("demo\x00/SKILL.md") is None

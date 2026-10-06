@@ -3646,3 +3646,79 @@ def test_an_observe_decision_under_a_stricter_mode_never_downgrades(
     assert "invalid_response" in out["error"]
     assert runner.executions == 0
     assert adapter.local_mode() == "enforce", "the global state is not set to observe"
+
+
+def test_a_cancel_survives_an_admission_whose_answer_was_lost(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+    created: dict[str, Any] = {}
+
+    def committed_then_lost(body: dict[str, Any]) -> Any:
+        created.update(real_create(body))
+        # The gateway created the session and delivers a cancel by its id while the
+        # admission answer is lost on the way back.
+        adapter.handle_command(
+            {
+                "id": "k3",
+                "kind": "cancel",
+                "target_kind": "session",
+                "target_ref": created["session"]["id"],
+                "status": "requested",
+            }
+        )
+        raise HermesApiError("transport_error", "connection reset", 0)
+
+    monkeypatch.setattr(adapter.client, "create_session", committed_then_lost)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert ("k3", "refused") not in [(c, b["status"]) for c, b in server.acks]
+    monkeypatch.setattr(adapter.client, "create_session", real_create)  # the retry succeeds
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("read_file", {"path": "/tmp/a"}, sid="s1"))
+    assert ("k3", "refused") not in [(c, b["status"]) for c, b in server.acks]
+    assert runner.executions == 0, "the cancel applies once the retry publishes the id"
+    assert "cancelled" in out["error"]
+
+
+def test_a_cancel_for_an_unadmitted_session_is_refused_once_it_ends(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+
+    def lost(body: dict[str, Any]) -> Any:
+        raise HermesApiError("transport_error", "connection reset", 0)
+
+    monkeypatch.setattr(adapter.client, "create_session", lost)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {"id": "k4", "kind": "cancel", "target_kind": "session", "target_ref": "ags_x"}
+    )
+    assert ("k4", "refused") not in [(c, b["status"]) for c, b in server.acks]
+    adapter.on_session_finalize(session_id="s1", reason="exit")
+    assert ("k4", "refused") in [(c, b["status"]) for c, b in server.acks]
+
+
+@pytest.mark.parametrize(("status", "decision"), [(202, "allow"), (403, "allow"), (200, "deny")])
+def test_an_authorize_decision_contradicting_its_status_blocks(
+    server: FakeAgenomic,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    decision: str,
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    answer = {
+        "decision": decision,
+        "effective_mode": "enforce",
+        "record_id": "rec-1",
+        "permit": {"document": {"record_id": "rec-1"}, "signature": "x"},
+    }
+    monkeypatch.setattr(adapter.client, "authorize", lambda sid, body: (status, answer))
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("write_file", {"path": "/tmp/a"}))
+    assert "invalid_response" in out["error"]
+    assert runner.executions == 0

@@ -134,6 +134,7 @@ APPROVAL_IN_USE_MESSAGE = (
     "using it; the action was not executed."
 )
 _SESSION_HEADER = "X-Agenomic-Hermes-Session"
+_DECISION_STATUS = {"allow": 200, "observe": 200, "require_approval": 202, "deny": 403}
 NO_AUTH_MESSAGE = "Agenomic: no valid authorization for this action"
 #: Reason recorded when a call's arguments have no canonical form (``agenomic.canon/v1``).
 NOT_CANONICAL_REASON = "arguments_not_canonical"
@@ -524,6 +525,10 @@ class HermesAdapter:
         # while an admission is in flight (its id is published when the admission returns).
         self._admissions_in_flight = 0
         self._unresolved_cancels: dict[str, list[str]] = {}
+        # Hermes ids of active sessions whose admission failed (the gateway may have created
+        # the session and lost the answer): a cancel naming an unknown Agenomic id may be
+        # theirs, so it stays unresolved until they are admitted or end.
+        self._unadmitted: set[str] = set()
         self._children: dict[str, tuple[str, Optional[str]]] = {}
         self._delegations: dict[str, deque[list[Any]]] = {}
         # Hermes builds a delegate_task's children on the thread running that tool, inside
@@ -1231,9 +1236,10 @@ class HermesAdapter:
                 _add_once(self._cancel_sessions, sid, command_id)
                 if session.subagent_id:
                     _add_once(self._cancel_subagents, session.subagent_id, command_id)
-            elif session is None and self._admissions_in_flight:
-                # Possibly the Agenomic id of a session being admitted right now: decided
-                # once its id is published, never refused before.
+            elif session is None and (self._admissions_in_flight or self._unadmitted):
+                # Possibly the Agenomic id of a session being admitted right now, or of one
+                # whose admission answer was lost: decided once its id is published (or the
+                # session ends unadmitted), never refused before.
                 _add_once(self._unresolved_cancels, target, command_id)
                 return
         if not active or session is None:
@@ -1414,19 +1420,40 @@ class HermesAdapter:
         info = resp.get("session") if resp is not None else None
         with self._lock:
             self._admissions_in_flight -= 1
+            if resp is None:
+                self._unadmitted.add(session.hermes_session_id)
+            else:
+                self._unadmitted.discard(session.hermes_session_id)
             if isinstance(info, dict) and isinstance(info.get("id"), str):
                 session.agenomic_id = cast(str, info["id"])
                 self._agenomic_sessions[session.agenomic_id] = session.hermes_session_id
             ready: list[str] = []
             if session.agenomic_id:
                 ready.append(session.agenomic_id)
-            if not self._admissions_in_flight:
+            if not self._admissions_in_flight and not self._unadmitted:
                 ready.extend(t for t in self._unresolved_cancels if t not in ready)
             return [
                 (command_id, target)
                 for target in ready
                 for command_id in self._unresolved_cancels.pop(target, [])
             ]
+
+    def _forget_unadmitted(self, sid: str) -> None:
+        """A session ended without being admitted: no id will be published for it, so once
+        nothing else may still name the unresolved cancels they are decided (refused)."""
+        with self._lock:
+            if sid not in self._unadmitted:
+                return
+            self._unadmitted.discard(sid)
+            if self._admissions_in_flight or self._unadmitted:
+                return
+            pending = [
+                (command_id, target)
+                for target in list(self._unresolved_cancels)
+                for command_id in self._unresolved_cancels.pop(target, [])
+            ]
+        for command_id, target in pending:
+            self._cancel_session(command_id, target)
 
     def on_session_start(self, **kwargs: object) -> None:
         """Admit the session (idempotent server side) and emit ``session.started``.
@@ -1531,6 +1558,7 @@ class HermesAdapter:
             with self._lock:
                 if session is not None:
                     session.active = False
+            self._forget_unadmitted(sid)
             self._observe_terminal(sid, subagent_id, "on_session_finalize")
         except Exception as exc:
             logger.debug("on_session_finalize failed: %s", type(exc).__name__)
@@ -1618,6 +1646,7 @@ class HermesAdapter:
                     session = self._sessions.get(child)
                     if session is not None:
                         session.active = False
+                self._forget_unadmitted(child)
                 self._observe_terminal(child, subagent_id, "subagent_stop")
         except Exception as exc:
             logger.debug("subagent_stop failed: %s", type(exc).__name__)
@@ -2355,6 +2384,12 @@ class HermesAdapter:
         ):
             raise HermesApiError(
                 "invalid_response", "authorize answer without a valid decision", status
+            )
+        if status != _DECISION_STATUS[decision]:
+            # The gateway answers allow and observe with 200, require_approval with 202 and
+            # deny with 403: a decision contradicting its status is not trusted.
+            raise HermesApiError(
+                "invalid_response", "authorize answer contradicting its HTTP status", status
             )
         if (decision == "observe") != (effective_mode == "observe"):
             # The gateway answers observe exactly when its effective mode is observe: an

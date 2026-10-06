@@ -572,7 +572,8 @@ def _skill_parts(rel: str) -> Optional[tuple[str, ...]]:
         >>> _skill_parts("demo/SKILL.md"), _skill_parts("a/../b.md"), _skill_parts("../x")
         (('demo', 'SKILL.md'), ('b.md',), None)
     """
-    if not rel or os.path.isabs(rel) or rel.startswith("/"):
+    if not rel or os.path.isabs(rel) or rel.startswith("/") or "\0" in rel:
+        # A NUL byte can name no file: the entry is rejected, not left to raise later.
         return None
     norm = posixpath.normpath(rel.replace(os.sep, "/"))
     if norm in (".", "..") or norm.startswith(("../", "/")):
@@ -1830,8 +1831,21 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--grace-s", type=float, default=10.0)
     p.add_argument("--interval-s", type=float, default=15.0)
     p.add_argument("--no-restart", action="store_true")
+    p.add_argument(
+        "--max-restarts",
+        type=_non_negative_int,
+        default=5,
+        help="restarts after a crash before the supervisor gives up (a resume rearms them)",
+    )
     p.add_argument("--runtime-token-env", default=DEFAULT_TOKEN_ENV)
     return p
+
+
+def _non_negative_int(value: str) -> int:
+    n = int(value)
+    if n < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return n
 
 
 def _settings_from_args(
@@ -1852,6 +1866,7 @@ def _settings_from_args(
         grace_s=args.grace_s,
         interval_s=args.interval_s,
         restart=not args.no_restart,
+        max_restarts=args.max_restarts,
         runtime_token_env=args.runtime_token_env,
     )
 
