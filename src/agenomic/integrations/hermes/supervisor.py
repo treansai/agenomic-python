@@ -1219,8 +1219,6 @@ class Supervisor:
         self.restarts = 0
         self.refuse_restart = False
         self._stopping = threading.Event()
-        # True during the start-up heartbeat: a ``resume`` then only lifts the refusal.
-        self._deferring_start = False
         # Hermes waits for a successful first skills sync: until then it is not started, so
         # it never loads skills left over from before (possibly revoked since).
         self._start_after_sync = False
@@ -1548,14 +1546,16 @@ class Supervisor:
             self._ack(command_id, "applied", {"process_state": self.state, "exit_code": code})
         elif kind == "resume":
             self.refuse_restart = False
-            restarted = False
-            if self._deferring_start:
-                # Start-up: Hermes is started by ``run`` once the approved skills are synced,
-                # never before, so it cannot load a stale or revoked skill.
-                pass
-            elif self.proc is None or self.proc.poll() is not None:
-                restarted = self.start_child()
-            self._ack(command_id, "applied", {"restarted": restarted, "process_state": self.state})
+            pending = self.proc is None or self.proc.poll() is not None
+            if pending:
+                # Never started here: the next skills sync must succeed first (same tick),
+                # so a resumed Hermes cannot load a stale or revoked skill.
+                self._start_after_sync = True
+            self._ack(
+                command_id,
+                "applied",
+                {"restarted": False, "start_pending": pending, "process_state": self.state},
+            )
         else:
             self._ack(command_id, "refused", {"reason": "unsupported_command", "kind": kind})
 
@@ -1579,12 +1579,13 @@ class Supervisor:
         skills = resp.get("skills")
         if not isinstance(skills, list):
             return None
+        valid = [s for s in skills if isinstance(s, dict)]
         try:
             # An unsafe directory is a failed sync (``None``), not "every skill rejected":
             # Hermes is not started on a tree that was never reconciled.
-            return _sync_skills_checked(
-                [s for s in skills if isinstance(s, dict)], self.settings.skills_dir
-            )
+            counts = _sync_skills_checked(valid, self.settings.skills_dir)
+            counts["rejected"] += len(skills) - len(valid)  # malformed entries
+            return counts
         except UnsafeSkillsPathError as e:
             logger.error("approved skills not synced: %s", e)
             return None
@@ -1609,9 +1610,11 @@ class Supervisor:
         self._retry_acks()
 
     def _start_when_synced(self, synced: Optional[dict[str, int]]) -> None:
-        """Start Hermes once the approved skills are reconciled (or no skills directory is
-        configured); after a failed sync it stays stopped and the next tick retries."""
-        if self.settings.skills_dir is not None and synced is None:
+        """Start Hermes once the approved skills are fully reconciled (or no skills directory
+        is configured). A failed sync, or one that rejected an entry (bad digest, unsafe or
+        linked destination, write failure: that path was not reconciled), keeps it stopped
+        and the next tick retries."""
+        if self.settings.skills_dir is not None and (synced is None or synced.get("rejected")):
             if not self._start_after_sync:
                 logger.error("approved skills not synced; Hermes is not started until they are")
             self._start_after_sync = True
@@ -1644,11 +1647,7 @@ class Supervisor:
         # Commands still pending (a quarantine or revoke a previous supervisor only reported)
         # are fetched and applied while Hermes is not running: it starts only if allowed.
         # Without an answer from the gateway, Hermes starts and the next heartbeat applies them.
-        self._deferring_start = True
-        try:
-            self.heartbeat()
-        finally:
-            self._deferring_start = False
+        self.heartbeat()
         self._start_when_synced(self.sync_skills())
         failed = False
         try:

@@ -361,7 +361,9 @@ def test_quarantine_stops_and_refuses_restart_then_resume(tmp_path: Path) -> Non
     ]
     s.heartbeat()
     assert api.acks[-1][:2] == ("r1", "applied")
-    assert api.acks[-1][2]["restarted"] is True
+    assert api.acks[-1][2]["start_pending"] is True
+    assert s.state == "stopped", "never started before the approved skills are synced"
+    s.tick()  # heartbeat, then a successful sync, then the start
     assert s.state == "running"
     api.commands = [{"id": "x1", "kind": "pause", "status": "requested"}]
     s.heartbeat()
@@ -1474,6 +1476,7 @@ def test_redelivered_quarantine_whose_ack_was_dropped_never_stops_a_resumed_herm
             s.handle_command({"id": f"n{i}", "kind": "noop", "status": "requested"})
         monkeypatch.setattr(api, "ack_command", real)
         s.handle_command({"id": "r1", "kind": "resume", "status": "requested"})
+        s.tick()  # the resume starts Hermes after the skills sync
         assert s.state == "running"
         s.handle_command({"id": "q1", "kind": "quarantine", "status": "received"})
         assert s.state == "running", "the old quarantine is answered, not executed again"
@@ -1548,3 +1551,36 @@ def test_hermes_waits_for_a_successful_first_skills_sync(
         if proc is not None and proc.poll() is None:
             proc.kill()
             proc.wait(10)
+
+
+def test_resume_waits_for_a_sync_without_rejected_entries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, SLEEPER)
+    results = [
+        None,  # gateway unreachable
+        {"written": 0, "unchanged": 0, "removed": 0, "rejected": 1},  # an entry not reconciled
+        dict(SYNCED),
+    ]
+    monkeypatch.setattr(s, "sync_skills", lambda: results.pop(0))
+    s.handle_command({"id": "r1", "kind": "resume", "status": "requested"})
+    try:
+        s.tick()
+        assert s.state == "stopped", "failed sync"
+        s.tick()
+        assert s.state == "stopped", "a rejected entry keeps Hermes stopped"
+        s.tick()
+        assert s.state == "running"
+    finally:
+        s.stop_child()
+
+
+def test_malformed_skill_entries_count_as_rejected(tmp_path: Path) -> None:
+    api = FakeApi()
+    api.skills = [_skill("a", "A"), "not-a-skill"]  # type: ignore[list-item]
+    s = make_supervisor(tmp_path, api, SLEEPER)
+    counts = s.sync_skills()
+    assert counts is not None
+    assert counts["written"] == 1
+    assert counts["rejected"] == 1
