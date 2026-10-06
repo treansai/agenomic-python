@@ -2386,3 +2386,41 @@ def test_failed_mutator_hello_blocks_when_enforce_starts_meanwhile(
     out = json.loads(runner.direct("read_file", {"path": "/tmp/a"}))
     assert runner.executions == 0
     assert "has not confirmed them" in out["error"]
+
+
+def test_repeated_enforce_answer_orders_an_older_heartbeat_out(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    runner = Runner(adapter)
+    runner.direct("read_file", {"path": "/tmp/a"}, tcid="call_0")  # session admitted
+    heartbeat_seq = adapter._state_request()  # a heartbeat is in flight
+    runner.direct("read_file", {"path": "/tmp/a"}, tcid="call_1")  # authorize: enforce
+    assert not adapter._set_state("observe", heartbeat_seq), "the older answer is rejected"
+    assert adapter.local_mode() == "enforce"
+
+
+@pytest.mark.parametrize("interrupted", [True, False])
+def test_subagent_ending_while_it_is_interrupted_applies_the_cancel(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted: bool
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.subagent_start(parent_session_id="p", child_session_id="c", child_subagent_id="sa-1")
+    adapter.on_session_start(session_id="c", platform="subagent", model="m")
+
+    def stops_before_the_interrupt_returns(subagent_id: str) -> bool:
+        # The child ends on another thread before the interrupt call returns.
+        adapter.subagent_stop(
+            parent_session_id="p", child_session_id="c", child_status="interrupted"
+        )
+        return interrupted
+
+    monkeypatch.setattr(adapter, "_interrupt_subagent", stops_before_the_interrupt_returns)
+    adapter.handle_command(
+        {"id": "k1", "kind": "cancel", "target_kind": "subagent", "target_ref": "sa-1"}
+    )
+    k1 = [b.get("status") for c, b in server.acks if c == "k1"]
+    assert k1 == ["received", "applied"], "the end found the cancel waiting"
+    assert not adapter._cancel_subagents

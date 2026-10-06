@@ -1231,7 +1231,14 @@ def test_symlinked_skills_dir_is_refused_and_reported(tmp_path: Path) -> None:
     s = make_supervisor(tmp_path, api, SLEEPER)
     assert s.settings.skills_dir is not None
     s.settings.skills_dir.symlink_to(real)
-    assert s.sync_skills() == {"written": 0, "unchanged": 0, "removed": 0, "rejected": 1}
+    # Nothing was reconciled: a failed sync, so Hermes is not started on that tree.
+    assert s.sync_skills() is None
+    assert sync_skills(api.skills, s.settings.skills_dir) == {
+        "written": 0,
+        "unchanged": 0,
+        "removed": 0,
+        "rejected": 1,
+    }
     assert list(real.iterdir()) == []
     assert s.isolation()["skills_readonly"] is False
 
@@ -1439,10 +1446,40 @@ def test_dropped_supervisor_acknowledgement_lets_the_command_be_delivered_again(
     # Each unsupported command queues two acknowledgements (received, refused).
     for i in range(limit):
         s.handle_command({"id": f"c{i}", "kind": "noop", "status": "requested"})
-    assert "c0" not in s._seen_commands, "its acknowledgements were dropped"
+    # c0's terminal acknowledgement was dropped: its result is kept as a tombstone.
+    assert s._terminal_acks["c0"][0] == "refused"
     monkeypatch.setattr(api, "ack_command", real)
     s.handle_command({"id": "c0", "kind": "noop", "status": "requested"})
     assert ("c0", "refused") in [(c, st) for c, st, _ in api.acks]
+
+
+def test_redelivered_quarantine_whose_ack_was_dropped_never_stops_a_resumed_hermes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, SLEEPER)
+    real = api.ack_command
+
+    def ack_endpoint_down(command_id: str, status: str, detail: dict[str, Any]) -> Any:
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(api, "ack_command", ack_endpoint_down)
+    try:
+        assert s.start_child()
+        s.handle_command({"id": "q1", "kind": "quarantine", "status": "requested"})
+        assert s.state == "stopped"
+        limit = s._ack_retries.maxlen
+        assert limit is not None
+        for i in range(limit):  # the outage drops q1's acknowledgements
+            s.handle_command({"id": f"n{i}", "kind": "noop", "status": "requested"})
+        monkeypatch.setattr(api, "ack_command", real)
+        s.handle_command({"id": "r1", "kind": "resume", "status": "requested"})
+        assert s.state == "running"
+        s.handle_command({"id": "q1", "kind": "quarantine", "status": "received"})
+        assert s.state == "running", "the old quarantine is answered, not executed again"
+        assert ("q1", "applied") in [(c, st) for c, st, _ in api.acks]
+    finally:
+        s.stop_child()
 
 
 def test_shutdown_during_the_restart_backoff_starts_nothing(tmp_path: Path) -> None:

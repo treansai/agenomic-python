@@ -732,6 +732,11 @@ class HermesAdapter:
             self._state_sent += 1
             return self._state_sent
 
+    def _note_state_seq(self, seq: int) -> None:
+        """Record that a request sent as ``seq`` was answered without changing the state."""
+        with self._state_lock:
+            self._state_applied = max(self._state_applied, seq)
+
     def _set_state(self, state: object, seq: Optional[int] = None) -> bool:
         """Apply a server state unless a request sent after ``seq`` already applied one.
         Without ``seq`` the state counts as the newest. Returns whether it was applied."""
@@ -1080,9 +1085,13 @@ class HermesAdapter:
         if not subagent_id:
             self._ack(command_id, "refused", {"reason": "missing_target"})
             return
-        if self._interrupt_subagent(subagent_id):
+        # Registered before the interrupt: the subagent may end on another thread before
+        # the interrupt returns, and that end must find the command waiting.
+        with self._lock:
             _add_once(self._cancel_subagents, subagent_id, command_id)
-        else:
+        if not self._interrupt_subagent(subagent_id) and self._withdraw_cancel(
+            self._cancel_subagents, subagent_id, command_id
+        ):
             self._ack(command_id, "refused", {"reason": "subagent_not_running"})
 
     def _cancel_session(self, command_id: str, target: str) -> None:
@@ -1092,11 +1101,27 @@ class HermesAdapter:
         if session is None or not session.active:
             self._ack(command_id, "refused", {"reason": "session_not_active"})
             return
-        _add_once(self._cancel_sessions, sid, command_id)
-        if session.subagent_id and self._interrupt_subagent(session.subagent_id):
-            _add_once(self._cancel_subagents, session.subagent_id, command_id)
+        with self._lock:
+            _add_once(self._cancel_sessions, sid, command_id)
+            if session.subagent_id:
+                _add_once(self._cancel_subagents, session.subagent_id, command_id)
+        if session.subagent_id and not self._interrupt_subagent(session.subagent_id):
+            # Not interruptible: the command waits for the session's end only.
+            self._withdraw_cancel(self._cancel_subagents, session.subagent_id, command_id)
         # Root sessions expose no interrupt handle to plugins: further tool calls are blocked and
         # the command is applied once Hermes reports the session's end.
+
+    def _withdraw_cancel(self, waiting: dict[str, list[str]], target: str, command_id: str) -> bool:
+        """Remove a waiting cancel; ``False`` when it is gone already (its end was observed
+        and acknowledged meanwhile)."""
+        with self._lock:
+            ids = waiting.get(target)
+            if not ids or command_id not in ids:
+                return False
+            ids.remove(command_id)
+            if not ids:
+                del waiting[target]
+            return True
 
     def _cancel_pending(self, sid: str) -> bool:
         return self._cancel_kind(sid) is not None
@@ -1121,10 +1146,12 @@ class HermesAdapter:
         """Every cancel waiting for this end (of the session and of the subagent it runs
         as, possibly distinct commands) is acknowledged as applied, each exactly once."""
         command_ids: list[str] = []
-        for waiting in (
-            self._cancel_sessions.pop(sid, []) if sid else [],
-            self._cancel_subagents.pop(subagent_id, []) if subagent_id else [],
-        ):
+        with self._lock:
+            pending = (
+                self._cancel_sessions.pop(sid, []) if sid else [],
+                self._cancel_subagents.pop(subagent_id, []) if subagent_id else [],
+            )
+        for waiting in pending:
             for command_id in waiting:
                 if command_id not in command_ids:
                     command_ids.append(command_id)
@@ -2125,10 +2152,12 @@ class HermesAdapter:
             self._settle_delegation(provisional, commit=False)
             return _Verdict()
         applied = True
-        if effective_mode == "shadow" and self._effective_state not in _ENFORCE_LIKE - {"enforce"}:
-            applied = self._set_state("shadow", seq)
-        elif effective_mode == "enforce" and self._effective_state not in _ENFORCE_LIKE:
-            applied = self._set_state("enforce", seq)
+        if self._effective_state in _ENFORCE_LIKE - {"enforce"}:
+            # A blocking state is kept, but this newer request still orders later answers.
+            self._note_state_seq(seq)
+        elif effective_mode in ("shadow", "enforce"):
+            # Also when the mode is unchanged: an older heartbeat must not override it.
+            applied = self._set_state(effective_mode, seq)
         if not applied and self.local_mode() != effective_mode:
             # A request sent after this one already applied another mode: the verdict is
             # read in that mode, never in the stale one.

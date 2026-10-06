@@ -41,7 +41,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
@@ -378,6 +378,8 @@ class _SupervisorApi(Protocol):
 
 #: Acknowledgement order: a later state supersedes a queued earlier one.
 _ACK_RANK = {"received": 1, "applied": 2, "refused": 2}
+#: Terminal results kept for redelivered commands whose acknowledgement was dropped.
+_MAX_TERMINAL_ACKS = 10_000
 
 
 class SupervisorSettings(BaseModel):
@@ -939,20 +941,33 @@ def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> 
         >>> sync_skills([{"target": "skills/demo/SKILL.md", "digest": sha, "content": body}], d)
         {'written': 1, 'unchanged': 0, 'removed': 0, 'rejected': 0}
     """
+    try:
+        return _sync_skills_checked(skills, skills_dir)
+    except _UnsafeSkillsDirError as e:
+        logger.error("skills directory %s %s; approved skills not written", skills_dir, e)
+        return {"written": 0, "unchanged": 0, "removed": 0, "rejected": len(skills)}
+
+
+class _UnsafeSkillsDirError(UnsafeSkillsPathError):
+    """The skills directory itself cannot be used: nothing was reconciled."""
+
+
+def _sync_skills_checked(
+    skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path
+) -> dict[str, int]:
+    """:func:`sync_skills`, raising :class:`_UnsafeSkillsDirError` when the directory itself
+    is unsafe instead of reporting every skill rejected (the supervisor then keeps Hermes
+    stopped: nothing was reconciled)."""
     counts = {"written": 0, "unchanged": 0, "removed": 0, "rejected": 0}
     problem = skills_dir_problem(skills_dir)
     if problem is not None:
-        logger.error("skills directory %s %s; approved skills not written", skills_dir, problem)
-        counts["rejected"] = len(skills)
-        return counts
+        raise _UnsafeSkillsDirError(problem)
     if sys.platform == "win32":
         return _sync_skills_portable(skills, skills_dir, counts)
     try:
         root_fd = _open_skills_root(skills_dir)
     except UnsafeSkillsPathError as e:
-        logger.error("skills directory %s %s; approved skills not written", skills_dir, e)
-        counts["rejected"] = len(skills)
-        return counts
+        raise _UnsafeSkillsDirError(str(e)) from e
     try:
         return _sync_skills_at(skills, root_fd, counts)
     finally:
@@ -1212,6 +1227,7 @@ class Supervisor:
         self._seen_commands: set[str] = set()
         # Acknowledgements that failed in transport, retried on every tick until accepted.
         self._ack_retries: deque[tuple[str, str, dict[str, JsonValue]]] = deque(maxlen=500)
+        self._terminal_acks: OrderedDict[str, tuple[str, dict[str, JsonValue]]] = OrderedDict()
         self._ticks = 0
         self._launch_failed = False
         self.gave_up = False
@@ -1465,8 +1481,7 @@ class Supervisor:
                 )
                 self._ack_retries.append((command_id, status, detail))
                 if evicted is not None and all(q[0] != evicted[0] for q in self._ack_retries):
-                    # Dropped unacknowledged: the gateway's redelivery is executed again.
-                    self._seen_commands.discard(evicted[0])
+                    self._forget_dropped_ack(*evicted)
             return
         rank = _ACK_RANK.get(status, 0)
         kept = [
@@ -1477,6 +1492,21 @@ class Supervisor:
         if len(kept) != len(self._ack_retries):
             self._ack_retries.clear()
             self._ack_retries.extend(kept)
+
+    def _forget_dropped_ack(
+        self, command_id: str, status: str, detail: dict[str, JsonValue]
+    ) -> None:
+        """An acknowledgement dropped from the full retry queue. A terminal one (``applied``,
+        ``refused``) is kept as a tombstone: the gateway's redelivery is answered with it and
+        never executed again (an old quarantine must not stop a Hermes started by a later
+        resume). A ``received`` one makes the command executable again."""
+        if _ACK_RANK.get(status, 0) >= _ACK_RANK["applied"]:
+            self._terminal_acks[command_id] = (status, detail)
+            while len(self._terminal_acks) > _MAX_TERMINAL_ACKS:
+                oldest, _ = self._terminal_acks.popitem(last=False)
+                self._seen_commands.discard(oldest)
+        else:
+            self._seen_commands.discard(command_id)
 
     def _retry_acks(self) -> None:
         for _ in range(len(self._ack_retries)):
@@ -1496,6 +1526,11 @@ class Supervisor:
             (True, 'stopped')
         """
         command_id = str(command.get("id") or "")
+        if command_id in self._terminal_acks:
+            # Its terminal acknowledgement was dropped: answer the redelivery with it.
+            status, detail = self._terminal_acks.pop(command_id)
+            self._ack(command_id, status, detail)
+            return
         if not command_id or command_id in self._seen_commands:
             return
         self._seen_commands.add(command_id)
@@ -1545,7 +1580,11 @@ class Supervisor:
         if not isinstance(skills, list):
             return None
         try:
-            return sync_skills([s for s in skills if isinstance(s, dict)], self.settings.skills_dir)
+            # An unsafe directory is a failed sync (``None``), not "every skill rejected":
+            # Hermes is not started on a tree that was never reconciled.
+            return _sync_skills_checked(
+                [s for s in skills if isinstance(s, dict)], self.settings.skills_dir
+            )
         except UnsafeSkillsPathError as e:
             logger.error("approved skills not synced: %s", e)
             return None
