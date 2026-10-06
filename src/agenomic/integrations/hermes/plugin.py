@@ -2793,13 +2793,28 @@ class HermesAdapter:
             blocked = self._mismatch(auth, local_hash, "tool_execution")
             if blocked is not None:
                 return _ExecutionPlan(False, error=blocked["message"], meta=meta)
-        with self._lock:
+        blocked_by: Optional[str] = None
+        # Admission is atomic with server state updates (lock order: _lock, then
+        # _state_lock; _set_state never takes _lock): a blocking state applied after the
+        # earlier checks is seen here, before the call is marked executing.
+        with self._lock, self._state_lock:
             if auth.state == "executing":
                 # A second chain run for the same tool_call_id while the first is executing.
                 if auth.effective_mode == "shadow":
                     return _ExecutionPlan(True, meta=meta)
                 return _ExecutionPlan(False, error=NO_AUTH_MESSAGE, meta=meta)
-            auth.state = "executing"
+            if self._effective_state in _ENFORCE_LIKE - {"enforce"}:
+                blocked_by = self._effective_state
+                auth.state = "done"
+            else:
+                auth.state = "executing"
+        if blocked_by is not None:
+            self._drop_delegation(auth)
+            return _ExecutionPlan(
+                False,
+                error=f"Agenomic: the instance is {blocked_by}; the action was not executed.",
+                meta=meta,
+            )
         self._emit(
             "tool.call.started",
             sid or None,

@@ -1655,3 +1655,23 @@ def test_crash_restart_applies_a_queued_quarantine_first(
         assert ("q1", "applied") in [(c, st) for c, st, _ in api.acks]
     finally:
         s.stop_child()
+
+
+def test_filesystem_error_during_the_skills_sync_is_a_failed_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+
+    api = FakeApi()
+    api.skills = [_skill("a", "A")]
+    s = make_supervisor(tmp_path, api, SLEEPER)
+
+    def disk_full(*_a: Any) -> Any:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(sup, "_sync_skills_checked", disk_full)
+    assert s.sync_skills() is None, "a failed sync, not an exception"
+    s.handle_command({"id": "r1", "kind": "resume", "status": "requested"})
+    s.tick()  # never raises; Hermes stays stopped until a sync succeeds
+    assert s.state == "stopped"
+    assert s._start_after_sync

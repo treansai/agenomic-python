@@ -1611,6 +1611,11 @@ class Supervisor:
         except UnsafeSkillsPathError as e:
             logger.error("approved skills not synced: %s", e)
             return None
+        except OSError as e:
+            # Disk full, permission or I/O errors: a failed sync (Hermes stays stopped
+            # when it waits for one), retried on the next tick, never a supervisor crash.
+            logger.error("approved skills not synced: %s", type(e).__name__)
+            return None
 
     def tick(self) -> None:
         """One supervision step.
