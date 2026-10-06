@@ -980,3 +980,23 @@ def test_hugging_face_tokens_are_masked() -> None:
     assert token not in masked
     assert masked.startswith("HF login ")
     assert mask_text("hf_short and hf_model_name") == "hf_short and hf_model_name"
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "AIza" + "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q",
+        "ASIA" + "ABCDEFGHIJKLMNOP",
+        "glpat-" + "aBcDeFgHiJkLmNoPqRsT",
+        "npm_" + "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789",
+        "pypi-" + "AgEIcHlwaS5vcmcCJGFiY2RlZmdoLWlqa2wtbW5vcC1xcnN0LXV2d3h5ejAxMjM0",
+        "sk_live_" + "aBcDeFgHiJkLmNoPqRsT",
+        "rk_test_" + "aBcDeFgHiJkLmNoPqRsT",
+        "SG." + "aBcDeFgHiJkLmNoPqRsT" + "." + "uVwXyZ0123456789aBcD",
+        "shpat_" + "0123456789abcdef0123456789abcdef",
+    ],
+)
+def test_other_standalone_token_families_are_masked(token: str) -> None:
+    masked = mask_text(f"value {token} end")
+    assert token not in masked
+    assert masked.startswith("value ")

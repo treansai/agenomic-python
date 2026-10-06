@@ -109,6 +109,14 @@ _SECRET_PATTERNS = re.compile(
     r"|github_pat_[A-Za-z0-9_]{20,}"
     r"|AKIA[0-9A-Z]{16}"
     r"|hf_[A-Za-z0-9]{30,}"
+    r"|AIza[0-9A-Za-z_\-]{35}"  # Google API key
+    r"|ASIA[0-9A-Z]{16}"  # AWS temporary access key id
+    r"|glpat-[A-Za-z0-9_\-]{20,}"  # GitLab personal access token
+    r"|npm_[A-Za-z0-9]{36}"  # npm access token
+    r"|pypi-[A-Za-z0-9_\-]{50,}"  # PyPI API token
+    r"|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}"  # Stripe secret / restricted key
+    r"|SG\.[A-Za-z0-9_\-]{16,}\.[A-Za-z0-9_\-]{16,}"  # SendGrid API key
+    r"|shp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}"  # Shopify access token
     # A JWT (JWS, or the first segments of a JWE): base64url JSON header and payload,
     # both starting with ``{"`` (``eyJ``); the signature may be empty (``alg: none``).
     r"|eyJ[A-Za-z0-9_\-]{4,}\.eyJ[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]*"

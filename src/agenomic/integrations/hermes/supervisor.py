@@ -874,10 +874,10 @@ def _managed_files_at(root_fd: int) -> set[str]:  # pragma: posix-only
         for name in [*dirs, *files]:
             if name == _MANIFEST and name in files:
                 continue
-            try:
-                mode = os.lstat(name, dir_fd=dfd).st_mode
-            except OSError:
-                continue
+            # An entry that cannot be inspected (renamed or removed meanwhile, unreadable)
+            # fails the inventory like an unreadable directory: its new name may be
+            # missing from this snapshot, so the reconciliation would not be complete.
+            mode = os.lstat(name, dir_fd=dfd).st_mode
             if not stat.S_ISDIR(mode):
                 found.add(posixpath.normpath(posixpath.join(dirpath, name)))
     return found

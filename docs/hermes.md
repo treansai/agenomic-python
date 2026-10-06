@@ -285,7 +285,7 @@ it reaches the queue or the spool. With `capture.content: redacted_preview`,
 previews go through `redacted_preview` in `exporter.py` (credential keys masked at any depth,
 including a content mapping's own top-level keys), credential pattern
 masking and truncation. Pattern masking covers token shapes (`agmhr_`, `sk-`,
-`ghp_`, `github_pat_`, `hf_`, `AKIA...`, `xox?-`, JWTs, private key blocks), `Authorization`/`Proxy-Authorization`
+`ghp_`, `github_pat_`, `hf_`, `AKIA...`/`ASIA...`, `AIza...`, `glpat-`, `npm_`, `pypi-`, Stripe `sk_live_`/`rk_live_`, SendGrid `SG.`, Shopify `shpat_`, `xox?-`, JWTs, private key blocks), `Authorization`/`Proxy-Authorization`
 values for every scheme (`Bearer`, `Basic`, `Digest`, `Token`, `ApiKey`,
 `AWS4-HMAC-SHA256`, ...), cookie headers, `key=value` and `key: value` pairs
 whose key names a credential (`api_key`, `x-api-key`, `password`, `token`,
@@ -424,7 +424,8 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
 - With `--skills-dir`, Hermes is started (at start-up and on `resume`) only
   after a sync of the approved skills that completed with no rejected entry;
   while the gateway or the directory is unavailable, or an entry could not be
-  reconciled (bad digest, unsafe or linked destination, malformed entry), it
+  reconciled (bad digest, unsafe or linked destination, malformed entry, a
+  directory or entry of the skills directory that cannot be inspected), it
   stays stopped and every tick retries the sync, so it never loads skills left
   over from before (possibly revoked since). Pending commands are fetched and
   applied before the first start, and a restart after a crash goes through the

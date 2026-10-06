@@ -1910,3 +1910,26 @@ def test_resume_rearms_a_supervisor_that_gave_up_restarting(tmp_path: Path) -> N
     assert not s.gave_up, "run() would otherwise stop the resumed child at once"
     assert s.restarts == 0
     assert s._start_after_sync
+
+
+@posix_only
+def test_an_entry_that_cannot_be_inspected_fails_the_inventory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "SKILL.md").write_text("x")
+    (tmp_path / "b.md").write_text("y")
+    real_lstat = os.lstat
+
+    def renamed_meanwhile(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        if path == "b.md":
+            raise FileNotFoundError(path)
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(sup.os, "lstat", renamed_meanwhile)
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(FileNotFoundError):
+            sup._managed_files_at(fd)
+    finally:
+        os.close(fd)
