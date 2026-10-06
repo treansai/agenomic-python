@@ -468,14 +468,15 @@ def _write_atomic(path: Path, data: bytes, mode: int) -> None:
 
 
 def _managed_files(root: Path) -> set[str]:
-    """Every regular file under ``root`` (symbolic links and the manifest excluded), relative."""
+    """Every regular file under ``root`` (symbolic links and the manifest excluded), relative
+    and with ``/`` separators on every platform, so manifest entries compare equal on Windows."""
     found: set[str] = set()
     for dirpath, _dirs, files in os.walk(root):
         for name in files:
             full = Path(dirpath) / name
             if name == _MANIFEST or full.is_symlink() or not full.is_file():
                 continue
-            found.add(str(full.relative_to(root)))
+            found.add(full.relative_to(root).as_posix())
     return found
 
 
@@ -544,7 +545,7 @@ def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> 
             logger.warning("approved skill %s skipped: digest mismatch", rel)
             counts["rejected"] += 1
             continue
-        relative = str(dest.relative_to(root))
+        relative = dest.relative_to(root).as_posix()
         current.add(relative)
         if dest.exists() and dest.read_bytes() == data:
             if sys.platform != "win32" and stat.S_IMODE(dest.stat().st_mode) != 0o644:
@@ -552,7 +553,7 @@ def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> 
             counts["unchanged"] += 1
             continue
         writes.append((dest, data))
-    if any(str(dest.relative_to(root)) not in previous for dest, _ in writes):
+    if any(dest.relative_to(root).as_posix() not in previous for dest, _ in writes):
         # Record the new files before writing them: a sync interrupted after a write still
         # leaves a manifest that names it, so a later sync removes it once unapproved.
         _write_atomic(
