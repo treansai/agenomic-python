@@ -1033,6 +1033,9 @@ def _sync_skills_at(
             counts["rejected"] += 1
             continue
         counts["written"] += 1
+    # Stale paths that could not be removed safely stay in the manifest (a later sync keeps
+    # trying) and count as rejected, so Hermes is not started on an unreconciled tree.
+    unreconciled: set[str] = set()
     for stale in sorted(previous - current):
         stale_parts = _skill_parts(stale)
         if stale_parts is None or stale_parts == (_MANIFEST,):
@@ -1041,6 +1044,7 @@ def _sync_skills_at(
             dir_fd = _open_dir_at(root_fd, stale_parts[:-1], create=False)
         except UnsafeSkillsPathError:
             logger.warning("stale skill %s kept: its path goes through a symbolic link", stale)
+            unreconciled.add(stale)
             continue
         if dir_fd is None:
             continue
@@ -1049,15 +1053,22 @@ def _sync_skills_at(
                 mode = os.lstat(stale_parts[-1], dir_fd=dir_fd).st_mode
             except FileNotFoundError:
                 continue
-            if stat.S_ISLNK(mode):
-                logger.warning("stale skill %s kept: it is a symbolic link", stale)
-            elif stat.S_ISREG(mode):
+            if stat.S_ISLNK(mode) or stat.S_ISREG(mode):
+                # unlink relative to the trusted descriptor removes a link itself, never
+                # what it points to.
                 os.unlink(stale_parts[-1], dir_fd=dir_fd)
                 counts["removed"] += 1
+            else:
+                logger.warning("stale skill %s kept: it is not a regular file", stale)
+                unreconciled.add(stale)
         finally:
             os.close(dir_fd)
+    counts["rejected"] += len(unreconciled)
     _write_atomic_at(
-        root_fd, _MANIFEST, json.dumps({"files": sorted(current)}).encode("utf-8"), 0o644
+        root_fd,
+        _MANIFEST,
+        json.dumps({"files": sorted(current | unreconciled)}).encode("utf-8"),
+        0o644,
     )
     return counts
 
@@ -1124,16 +1135,23 @@ def _sync_skills_portable(
             counts["rejected"] += 1
             continue
         counts["written"] += 1
+    unreconciled: set[str] = set()
     for stale in sorted(previous - current):
         lexical = Path(os.path.normpath(root / stale))
         path = lexical.resolve()
         if path != lexical:
             logger.warning("stale skill %s kept: its path goes through a symbolic link", stale)
+            unreconciled.add(stale)
             continue
         if str(path).startswith(str(root) + os.sep) and path.is_file():
             path.unlink()
             counts["removed"] += 1
-    _write_atomic(manifest_path, json.dumps({"files": sorted(current)}).encode("utf-8"), 0o644)
+    counts["rejected"] += len(unreconciled)
+    _write_atomic(
+        manifest_path,
+        json.dumps({"files": sorted(current | unreconciled)}).encode("utf-8"),
+        0o644,
+    )
     return counts
 
 

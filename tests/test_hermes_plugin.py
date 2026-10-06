@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -2424,3 +2425,57 @@ def test_subagent_ending_while_it_is_interrupted_applies_the_cancel(
     k1 = [b.get("status") for c, b in server.acks if c == "k1"]
     assert k1 == ["received", "applied"], "the end found the cancel waiting"
     assert not adapter._cancel_subagents
+
+
+def test_stale_observe_verdict_under_a_newer_shadow_proceeds(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    original = adapter.client.authorize
+
+    def observe_answer_overtaken_by_shadow(sid: str, body: Any) -> Any:
+        server.effective_state = "observe"
+        answer = original(sid, body)  # an observe answer
+        adapter._set_state("shadow", adapter._state_request())
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", observe_answer_overtaken_by_shadow)
+    runner = Runner(adapter)
+    runner.direct("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 1, "shadow never changes execution"
+    assert adapter.local_mode() == "shadow"
+
+
+def test_cancel_racing_a_session_end_is_applied_or_refused_never_stuck(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    real_sessions = adapter._sessions
+    ended = threading.Event()
+
+    class EndsDuringLookup(dict):  # type: ignore[type-arg]
+        def get(self, key: Any, default: Any = None) -> Any:
+            if key == "s1" and not ended.is_set():
+                ended.set()
+                # The session ends on another thread while the cancel is being registered.
+                t = threading.Thread(
+                    target=adapter.on_session_finalize, kwargs={"session_id": "s1"}
+                )
+                t.start()
+                t.join(0.2)
+            return super().get(key, default)
+
+    adapter._sessions = EndsDuringLookup(real_sessions)
+    adapter.handle_command(
+        {"id": "k1", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+    assert wait_for(lambda: not adapter._sessions["s1"].active)
+    assert wait_for(
+        lambda: [b.get("status") for c, b in server.acks if c == "k1"][-1:] != ["received"]
+    )
+    statuses = [b.get("status") for c, b in server.acks if c == "k1"]
+    assert statuses[-1] in ("applied", "refused")
+    assert "s1" not in adapter._cancel_sessions, "no waiter left behind"

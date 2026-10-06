@@ -1584,3 +1584,34 @@ def test_malformed_skill_entries_count_as_rejected(tmp_path: Path) -> None:
     assert counts is not None
     assert counts["written"] == 1
     assert counts["rejected"] == 1
+
+
+@posix_only
+def test_revoked_skill_replaced_by_a_link_is_removed_not_kept(tmp_path: Path) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A"), _skill("b", "B")], out)
+    target = tmp_path / "outside.md"
+    target.write_text("outside")
+    skill_b = out / "b" / "SKILL.md"
+    skill_b.unlink()
+    skill_b.symlink_to(target)  # the child swapped the file for a link
+    counts = sync_skills([_skill("a", "A")], out)  # b is revoked
+    assert counts["removed"] == 1
+    assert counts["rejected"] == 0
+    assert not skill_b.is_symlink(), "the link itself is removed"
+    assert not skill_b.exists()
+    assert target.read_text() == "outside", "never what it points to"
+
+
+@posix_only
+def test_stale_skill_behind_a_linked_directory_keeps_hermes_stopped(tmp_path: Path) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A"), _skill("b", "B")], out)
+    elsewhere = tmp_path / "elsewhere"
+    (out / "b").rename(elsewhere)
+    (out / "b").symlink_to(elsewhere)  # b's directory is now a link
+    counts = sync_skills([_skill("a", "A")], out)
+    assert counts["rejected"] == 1, "not reconciled: Hermes is not started on it"
+    manifest = json.loads((out / ".agenomic_manifest.json").read_text())
+    assert "b/SKILL.md" in manifest["files"], "a later sync keeps trying"
+    assert (elsewhere / "SKILL.md").exists(), "nothing followed through the link"

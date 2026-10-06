@@ -1097,14 +1097,17 @@ class HermesAdapter:
     def _cancel_session(self, command_id: str, target: str) -> None:
         sid = self._agenomic_sessions.get(target, target)
         with self._lock:
+            # The active check and the registration are one step: a session ending in
+            # between would otherwise leave a waiter no terminal event can reach.
             session = self._sessions.get(sid)
-        if session is None or not session.active:
+            active = session is not None and session.active
+            if active and session is not None:
+                _add_once(self._cancel_sessions, sid, command_id)
+                if session.subagent_id:
+                    _add_once(self._cancel_subagents, session.subagent_id, command_id)
+        if not active or session is None:
             self._ack(command_id, "refused", {"reason": "session_not_active"})
             return
-        with self._lock:
-            _add_once(self._cancel_sessions, sid, command_id)
-            if session.subagent_id:
-                _add_once(self._cancel_subagents, session.subagent_id, command_id)
         if session.subagent_id and not self._interrupt_subagent(session.subagent_id):
             # Not interruptible: the command waits for the session's end only.
             self._withdraw_cancel(self._cancel_subagents, session.subagent_id, command_id)
@@ -2141,9 +2144,10 @@ class HermesAdapter:
                 return _Verdict(
                     block=f"Agenomic: the instance is {current}; the action was not executed."
                 )
-            if not self._set_state("observe", seq) and self.local_mode() != "observe":
-                # A state from a request sent after this one (a heartbeat selecting shadow
-                # or enforce) is already applied: the observe answer is stale.
+            if not self._set_state("observe", seq) and self.local_mode() == "enforce":
+                # A state from a request sent after this one (a heartbeat selecting enforce)
+                # is already applied: the observe answer is stale. Under a newer shadow the
+                # call proceeds: shadow never changes execution.
                 self._settle_delegation(provisional, commit=False)
                 return _Verdict(
                     block="Agenomic: the mode changed while this call was decided; "
