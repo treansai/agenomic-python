@@ -704,6 +704,10 @@ class EventExporter:
         self._cond = threading.Condition()
         self._closed = False
         self._in_flight = 0
+        # The live batch the worker is posting, and the one ``close`` already spooled
+        # because the worker outlived the close timeout (the worker then skips it).
+        self._live_batch: Optional[list[dict[str, Any]]] = None
+        self._handed_off: Optional[list[dict[str, Any]]] = None
         self._dropped = 0
         self._buffer_full = False
         self._last_error: Optional[str] = None
@@ -860,6 +864,13 @@ class EventExporter:
             leftover = [e for e, _, _ in self._buf]
             self._buf.clear()
             self._bytes = 0
+            if self._thread.is_alive() and self._live_batch is not None:
+                # The worker is still blocked posting a batch it already took from the
+                # buffer; a daemon thread may not survive process exit, so the batch is
+                # spooled now. Should the post succeed after all, the gateway drops the
+                # duplicate by ``event_id``.
+                self._handed_off = self._live_batch
+                leftover = list(self._live_batch) + leftover
         if leftover:
             self._overflow(leftover, "exporter closed before delivery")
         return drained
@@ -890,6 +901,7 @@ class EventExporter:
                 if self._closed and not self._buf:
                     return
                 batch = self._take_batch()
+                self._live_batch = batch or None
             try:
                 if batch:
                     self._deliver(batch)
@@ -909,6 +921,7 @@ class EventExporter:
             finally:
                 with self._cond:
                     self._in_flight = 0
+                    self._live_batch = None
                     self._cond.notify_all()
 
     def _spool_failed(self, what: str, error: OSError) -> None:
@@ -938,6 +951,9 @@ class EventExporter:
         self._last_failure_at = time.monotonic()
         if not spool_on_failure:  # a replayed batch is still in the spool
             return False
+        with self._cond:
+            if self._handed_off is batch:  # close() already spooled it
+                return False
         self._overflow(batch, f"delivery failed after {self._max_retries + 1} attempt(s)")
         return False
 

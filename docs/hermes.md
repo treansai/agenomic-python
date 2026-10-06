@@ -143,8 +143,11 @@ Two local reasons block in every mode, shadow and observe included, because
 they are operator commands rather than policy decisions: a pending `cancel` of
 the session or of the subagent it runs as, and a local `pause`, `quarantine` or
 `revoke` status (it makes the adapter treat the instance as enforce until
-`resume`). A call blocked by a pending cancel is recorded as a local
-`tool.call.decision` (`deny`, reason code `cancel_pending`).
+`resume`). Both are checked at each gate before an authorization cached by the
+other gate is reused, so a command applied between the two gates still stops the
+call. A call blocked by a pending cancel is recorded as a local
+`tool.call.decision` (`deny`, reason code `cancel_pending`); one blocked by a
+local `pause`, `quarantine` or `revoke`, with reason code `instance_stopped`.
 
 ## How a tool call is controlled
 

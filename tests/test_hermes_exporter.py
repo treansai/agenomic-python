@@ -193,6 +193,41 @@ def test_close_spools_leftovers(tmp_path: Path) -> None:
     assert len(spool.read_text().splitlines()) == 1
 
 
+@pytest.mark.parametrize("then", ["fails", "succeeds"])
+def test_close_spools_the_batch_a_hung_post_still_holds(tmp_path: Path, then: str) -> None:
+    spool = tmp_path / "s.jsonl"
+    posting = threading.Event()
+    release = threading.Event()
+    posted: list[list[dict[str, Any]]] = []
+
+    def hung(batch: list[dict[str, Any]]) -> None:
+        posting.set()
+        release.wait(10)
+        if then == "fails":
+            raise ConnectionError("down")
+        posted.append(batch)
+
+    exporter = EventExporter(hung, max_retries=0, flush_interval_s=0.01, spool_path=str(spool))
+    exporter.submit(EventBuilder().build("x"))
+    assert posting.wait(5)
+    exporter.close(0.2)  # returns while the worker is still blocked in the post
+    lines = spool.read_text().splitlines()
+    assert len(lines) == 1, "the in-flight batch is on disk before close returns"
+    release.set()
+    exporter._thread.join(5)
+    assert not exporter._thread.is_alive()
+    if then == "fails":
+        # A late failure does not spool the batch a second time.
+        assert spool.read_text().splitlines() == lines
+        assert posted == []
+    else:
+        # A late success may also replay the spooled copy: the same event_id, which the
+        # gateway deduplicates.
+        event_id = json.loads(lines[0])["event_id"]
+        assert posted
+        assert {e["event_id"] for b in posted for e in b} == {event_id}
+
+
 def test_oversized_and_invalid_events() -> None:
     batches, post = collect()
     exporter = EventExporter(post, flush_interval_s=0.01)

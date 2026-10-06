@@ -1872,3 +1872,42 @@ def test_authorization_outage_fails_open_outside_enforce(
     assert adapter._unavailable("s1", "read_file", "call_1", exc)
     adapter.exporter.flush(3.0)
     assert "authorization.unavailable" in server.event_types()
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+@pytest.mark.parametrize("state", ["observe", "shadow", "enforce"])
+@pytest.mark.parametrize("kind", ["pause", "quarantine", "revoke"])
+def test_stop_command_between_the_gates_blocks_a_cached_authorization(
+    server: FakeAgenomic,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    order: str,
+    state: str,
+    kind: str,
+) -> None:
+    server.effective_state = state
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    # The command lands after the first gate answered, before the second gate runs.
+    second_gate = "pre_tool_call" if order == "agent_loop" else "tool_execution"
+    real = getattr(adapter, second_gate)
+
+    def stop_then_gate(**kwargs: Any) -> Any:
+        adapter.handle_command({"id": "stop-1", "kind": kind, "target_kind": "instance"})
+        return real(**kwargs)
+
+    monkeypatch.setattr(adapter, second_gate, stop_then_gate)
+    runner = Runner(adapter)
+    target = tmp_path / "raced.txt"
+    out = getattr(runner, order)(
+        "write_file", {"path": str(target), "content": "x"}, effect=write_effect(target)
+    )
+    status = {"pause": "paused", "quarantine": "quarantined", "revoke": "revoked"}[kind]
+    message = f"Agenomic: this instance is {status}; the action was not executed."
+    assert runner.executions == 0, f"a local {kind} stops the call in {state}"
+    assert not target.exists()
+    assert message in out
+    adapter.exporter.flush(3.0)
+    recorded = _local_decisions(server, message)
+    assert len(recorded) == 1
+    assert recorded[0]["extra"]["reason_codes"] == ["instance_stopped"]

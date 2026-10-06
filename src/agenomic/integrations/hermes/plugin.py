@@ -117,6 +117,9 @@ NO_AUTH_MESSAGE = "Agenomic: no valid authorization for this action"
 NOT_CANONICAL_REASON = "arguments_not_canonical"
 #: Reason recorded when a tool call is blocked because a cancel of its session or subagent is pending.
 CANCEL_PENDING_REASON = "cancel_pending"
+#: Reason recorded when a tool call is blocked because a ``pause``, ``quarantine`` or
+#: ``revoke`` command was applied locally.
+INSTANCE_STOPPED_REASON = "instance_stopped"
 #: Reason codes of the local checks enforce applies after the gateway allowed; outside
 #: enforce they are recorded as counterfactuals.
 PROTECTED_PATH_REASON = "protected_path"
@@ -2294,13 +2297,20 @@ class HermesAdapter:
     def _blocked_session(
         self, sid: str, tool: str, tool_call_id: str, args: Mapping[str, object]
     ) -> Optional[str]:
-        """A pending cancel of this session or of its subagent blocks in every mode (the
-        interrupt is asynchronous: a tool call racing with it must not run). The block is
-        recorded as a local ``tool.call.decision``."""
-        kind = self._cancel_kind(sid)
-        if kind is None:
-            return None
-        message = f"Agenomic cancelled this {kind}; the action was not executed."
+        """A locally applied pause, quarantine or revoke, or a pending cancel of this
+        session or of its subagent, blocks in every mode, an authorization cached by the
+        other gate included (the command is asynchronous: a tool call racing with it must
+        not run). The block is recorded as a local ``tool.call.decision``."""
+        status = self._local_status
+        if status in _BLOCKING_STATUS:
+            message = f"Agenomic: this instance is {status}; the action was not executed."
+            reason = INSTANCE_STOPPED_REASON
+        else:
+            kind = self._cancel_kind(sid)
+            if kind is None:
+                return None
+            message = f"Agenomic cancelled this {kind}; the action was not executed."
+            reason = CANCEL_PENDING_REASON
         self._emit_decision(
             sid,
             tool,
@@ -2311,7 +2321,7 @@ class HermesAdapter:
             extra={
                 "local": True,
                 "local_mode": self.local_mode(),
-                "reason_codes": [CANCEL_PENDING_REASON],
+                "reason_codes": [reason],
             },
         )
         return message
