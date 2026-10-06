@@ -262,16 +262,35 @@ def _mode_allows_write(st: os.stat_result, uid: int, groups: set[int]) -> bool:
     return bool(mode & stat.S_IWOTH)
 
 
-def writable_by(path: Path, uid: int, gids: Iterable[int]) -> bool:
-    """Whether ``uid`` (with ``gids``) could modify ``path`` or replace it in its directory.
+def _replaceable(entry: Path, uid: int, groups: set[int]) -> bool:
+    """Whether ``uid`` could rename or remove the existing ``entry`` from its directory:
+    the directory is writable, not on a read only mount, and its sticky bit (only the
+    owner of the entry or of the directory may then remove or rename it) does not apply.
+    The root directory has no parent and is never replaceable."""
+    parent = entry.parent
+    if parent == entry or _readonly_fs(parent):
+        return False
+    if uid == 0:
+        return True
+    pst = parent.stat()
+    if not _mode_allows_write(pst, uid, groups):
+        return False
+    sticky_protected = (
+        bool(pst.st_mode & stat.S_ISVTX) and entry.lstat().st_uid != uid and pst.st_uid != uid
+    )
+    return not sticky_protected
 
-    Mode bits and ownership are checked for the file, then for its parent
-    directory (a writable directory lets the file be renamed or removed), with
-    POSIX sticky bit semantics: in a sticky directory only the owner of the
-    entry or of the directory may remove or rename it. A missing path is
-    writable when its nearest existing ancestor is (the child can create the
-    missing directories). A read only mount wins. Root can write anything that
-    is not on a read only mount.
+
+def writable_by(path: Path, uid: int, gids: Iterable[int]) -> bool:
+    """Whether ``uid`` (with ``gids``) could modify ``path`` or replace it.
+
+    Mode bits and ownership are checked for the file, then for every directory on its
+    path: a writable directory lets the entry below it be renamed or removed, and with
+    it the whole subtree that holds ``path``, which can then be recreated. POSIX sticky
+    bit semantics apply: in a sticky directory only the owner of the entry or of the
+    directory may remove or rename it. A missing path is writable when its nearest
+    existing ancestor is (the child can create the missing directories). A read only
+    mount wins. Root can write anything that is not on a read only mount.
 
     Example:
         >>> import tempfile
@@ -280,37 +299,25 @@ def writable_by(path: Path, uid: int, gids: Iterable[int]) -> bool:
         True
     """
     groups = set(gids)
-    parent = path.parent
-    exists = path.exists()
-    if (
-        exists
-        and not _readonly_fs(path)
-        and (uid == 0 or _mode_allows_write(path.stat(), uid, groups))
-    ):
-        return True
-    if not exists:
-        ancestor = parent
-        while not ancestor.exists():
-            if ancestor.parent == ancestor:
+    path = Path(os.path.abspath(path))  # every ancestor, without resolving links
+    entry = path
+    if path.exists():
+        if not _readonly_fs(path) and (uid == 0 or _mode_allows_write(path.stat(), uid, groups)):
+            return True
+    else:
+        entry = path.parent
+        while not entry.exists():
+            if entry.parent == entry:
                 return False
-            ancestor = ancestor.parent
-        if _readonly_fs(ancestor):
-            return False
-        return uid == 0 or _mode_allows_write(ancestor.stat(), uid, groups)
-    if parent == path or _readonly_fs(parent):
-        return False
-    if uid == 0:
-        return True
-    pst = parent.stat()
-    if not _mode_allows_write(pst, uid, groups):
-        return False
-    sticky_protected = (
-        exists
-        and bool(pst.st_mode & stat.S_ISVTX)
-        and path.stat().st_uid != uid
-        and pst.st_uid != uid
-    )
-    return not sticky_protected
+            entry = entry.parent
+        if not _readonly_fs(entry) and (uid == 0 or _mode_allows_write(entry.stat(), uid, groups)):
+            return True
+    # The entry itself, then every ancestor directory up to the root.
+    while entry.parent != entry:
+        if _replaceable(entry, uid, groups):
+            return True
+        entry = entry.parent
+    return False
 
 
 def isolation_report(

@@ -144,6 +144,43 @@ def test_writability_by_mode_bits(tmp_path: Path) -> None:
         os.chmod(ro_dir, 0o755)
 
 
+@posix_only
+def test_writability_through_a_higher_ancestor(tmp_path: Path) -> None:
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    inner.mkdir(parents=True)
+    cfg = inner / "config.yaml"
+    cfg.write_text("x")
+    os.chmod(cfg, 0o444)
+    os.chmod(inner, 0o555)
+    other_uid = 65534 if os.getuid() != 65534 else 65533
+    try:
+        os.chmod(outer, 0o755)
+        assert not writable_by(cfg, other_uid, [other_uid])
+        # inner itself is read only, but the child can rename it out of outer and
+        # recreate inner/config.yaml.
+        os.chmod(outer, 0o757)
+        assert writable_by(cfg, other_uid, [other_uid])
+        assert writable_by(inner / "missing.yaml", other_uid, [other_uid])
+        report = isolation_report(
+            {},
+            child_uid=other_uid,
+            child_gids=[other_uid],
+            config_paths=[cfg],
+            skills_paths=[inner],
+            forbidden_hosts=[],
+            docker_sockets=[],
+        )
+        assert report["config_readonly"] is False
+        assert report["skills_readonly"] is False
+        os.chmod(outer, 0o1757)
+        if inner.stat().st_uid != other_uid and outer.stat().st_uid != other_uid:
+            assert not writable_by(cfg, other_uid, [other_uid]), "sticky: not the owner"
+    finally:
+        os.chmod(outer, 0o755)
+        os.chmod(inner, 0o755)
+
+
 def test_isolation_report(tmp_path: Path) -> None:
     sock_path = tmp_path / "docker.sock"
     report = isolation_report(
