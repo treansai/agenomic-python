@@ -40,9 +40,9 @@ import threading
 import time
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Optional, Protocol
+from typing import Any, Callable, Optional, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from agenomic.integrations.hermes.client import HermesApiError, SupervisorClient
 from agenomic.integrations.hermes.config import DEFAULT_TOKEN_ENV
@@ -131,6 +131,14 @@ def provider_secrets_absent(
     return True
 
 
+class _Closable(Protocol):
+    def close(self) -> None: ...
+
+
+#: ``socket.create_connection`` shape: ``connect((host, port), timeout_s)`` returns a socket.
+_Connect = Callable[[tuple[str, int], float], _Closable]
+
+
 def _parse_host(spec: str) -> tuple[str, int]:
     host, _, port = spec.rpartition(":")
     if not host:
@@ -139,7 +147,7 @@ def _parse_host(spec: str) -> tuple[str, int]:
 
 
 def egress_restricted(
-    hosts: Sequence[str], *, timeout_s: float = 2.0, connect: Any = socket.create_connection
+    hosts: Sequence[str], *, timeout_s: float = 2.0, connect: _Connect = socket.create_connection
 ) -> bool:
     """``True`` only when a TCP connect to every forbidden host fails.
 
@@ -263,9 +271,9 @@ def isolation_report(
     skills_paths: Sequence[Path],
     forbidden_hosts: Sequence[str],
     runtime_token_env: str = DEFAULT_TOKEN_ENV,
-    connect: Any = socket.create_connection,
+    connect: _Connect = socket.create_connection,
     docker_sockets: Sequence[str] = DOCKER_SOCKETS,
-) -> dict[str, Any]:
+) -> dict[str, JsonValue]:
     """Isolation attestation sent with every supervisor heartbeat.
 
     Example:
@@ -291,13 +299,13 @@ def isolation_report(
 
 
 class _SupervisorApi(Protocol):
-    def heartbeat(self, body: dict[str, Any]) -> dict[str, Any]: ...
+    def heartbeat(self, body: Mapping[str, JsonValue]) -> dict[str, JsonValue]: ...
 
     def ack_command(
-        self, command_id: str, status: str, detail: dict[str, Any]
-    ) -> dict[str, Any]: ...
+        self, command_id: str, status: str, detail: Mapping[str, JsonValue]
+    ) -> dict[str, JsonValue]: ...
 
-    def approved_skills(self) -> dict[str, Any]: ...
+    def approved_skills(self) -> dict[str, JsonValue]: ...
 
 
 class SupervisorSettings(BaseModel):
@@ -338,7 +346,7 @@ def _digest_matches(content: bytes, digest: str) -> bool:
     return False
 
 
-def sync_skills(skills: Sequence[Mapping[str, Any]], skills_dir: Path) -> dict[str, int]:
+def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> dict[str, int]:
     """Write approved skills into ``skills_dir``; remove files a previous sync wrote and
     that are no longer approved. Targets escaping the directory or failing their digest
     are skipped.
@@ -400,7 +408,13 @@ def sync_skills(skills: Sequence[Mapping[str, Any]], skills_dir: Path) -> dict[s
 
 
 class Supervisor:
-    """Runs one Hermes child under Agenomic control."""
+    """Runs one Hermes child under Agenomic control.
+
+    Example:
+        >>> sup = _demo_supervisor()
+        >>> sup.state, sup.refuse_restart, "AGENOMIC_HERMES_SUPERVISOR_TOKEN" in sup.child_env
+        ('stopped', False, False)
+    """
 
     def __init__(
         self,
@@ -408,7 +422,7 @@ class Supervisor:
         client: _SupervisorApi,
         *,
         environ: Optional[Mapping[str, str]] = None,
-        connect: Any = socket.create_connection,
+        connect: _Connect = socket.create_connection,
     ) -> None:
         self.settings = settings
         self.client = client
@@ -429,7 +443,15 @@ class Supervisor:
 
     # -- child process -----------------------------------------------
     def start_child(self) -> bool:
-        """Start Hermes unless restarts are refused."""
+        """Start Hermes unless restarts are refused.
+
+        Example:
+            >>> sup = _demo_supervisor(["sleep", "5"])
+            >>> sup.start_child(), sup.state
+            (True, 'running')
+            >>> sup.stop_child()
+            -15
+        """
         if self.refuse_restart or not self.settings.argv:
             return False
         self.state = "starting"
@@ -451,7 +473,14 @@ class Supervisor:
         return True
 
     def poll(self) -> None:
-        """Refresh the child state; restart on failure when allowed."""
+        """Refresh the child state; restart on failure when allowed.
+
+        Example:
+            >>> sup = _demo_supervisor()
+            >>> sup.poll()
+            >>> sup.state
+            'stopped'
+        """
         if self.proc is None:
             return
         code = self.proc.poll()
@@ -474,7 +503,15 @@ class Supervisor:
                 self.start_child()
 
     def stop_child(self) -> Optional[int]:
-        """SIGTERM the child's process group, SIGKILL after ``grace_s``. Returns the exit code."""
+        """SIGTERM the child's process group, SIGKILL after ``grace_s``. Returns the exit code.
+
+        Example:
+            >>> sup = _demo_supervisor(["sleep", "5"])
+            >>> sup.start_child()
+            True
+            >>> sup.stop_child(), sup.state
+            (-15, 'stopped')
+        """
         proc = self.proc
         if proc is None:
             self.state = "stopped"
@@ -510,8 +547,14 @@ class Supervisor:
             return []
         return list({os.getgid(), *os.getgroups()})
 
-    def isolation(self) -> dict[str, Any]:
-        """Self check of the child's isolation."""
+    def isolation(self) -> dict[str, JsonValue]:
+        """Self check of the child's isolation.
+
+        Example:
+            >>> iso = _demo_supervisor().isolation()
+            >>> iso["provider_secrets_absent"], iso["egress_restricted"]
+            (True, False)
+        """
         home = self.settings.hermes_home
         config_paths = self.settings.config_paths or [home / "config.yaml", home / ".env"]
         skills_paths = [
@@ -532,8 +575,15 @@ class Supervisor:
         )
 
     def heartbeat(self) -> None:
-        """Report process state and isolation; execute returned commands."""
-        body = {
+        """Report process state and isolation; execute returned commands.
+
+        Example:
+            >>> sup = _demo_supervisor(commands=[{"id": "c1", "kind": "quarantine"}])
+            >>> sup.heartbeat()
+            >>> sup.refuse_restart
+            True
+        """
+        body: dict[str, JsonValue] = {
             "process": {
                 "state": self.state,
                 "pid": self.proc.pid if self.proc is not None and self.state == "running" else None,
@@ -553,14 +603,21 @@ class Supervisor:
                 if isinstance(command, dict):
                     self.handle_command(command)
 
-    def _ack(self, command_id: str, status: str, detail: dict[str, Any]) -> None:
+    def _ack(self, command_id: str, status: str, detail: dict[str, JsonValue]) -> None:
         try:
             self.client.ack_command(command_id, status, detail)
         except HermesApiError as e:
             logger.warning("supervisor ack %s failed (%s)", status, e.code)
 
-    def handle_command(self, command: Mapping[str, Any]) -> None:
-        """``quarantine``/``revoke`` stop and refuse restarts; ``resume`` allows them."""
+    def handle_command(self, command: Mapping[str, JsonValue]) -> None:
+        """``quarantine``/``revoke`` stop and refuse restarts; ``resume`` allows them.
+
+        Example:
+            >>> sup = _demo_supervisor()
+            >>> sup.handle_command({"id": "c1", "kind": "revoke"})
+            >>> sup.refuse_restart, sup.state
+            (True, 'stopped')
+        """
         command_id = str(command.get("id") or "")
         if not command_id or command_id in self._seen_commands:
             return
@@ -582,7 +639,15 @@ class Supervisor:
             self._ack(command_id, "refused", {"reason": "unsupported_command", "kind": kind})
 
     def sync_skills(self) -> Optional[dict[str, int]]:
-        """Pull approved skills into the supervisor owned skills directory."""
+        """Pull approved skills into the supervisor owned skills directory.
+
+        Example:
+            >>> import tempfile
+            >>> sup = _demo_supervisor()
+            >>> sup.settings.skills_dir = Path(tempfile.mkdtemp())
+            >>> sup.sync_skills()
+            {'written': 0, 'unchanged': 0, 'removed': 0, 'rejected': 0}
+        """
         if self.settings.skills_dir is None:
             return None
         try:
@@ -596,7 +661,14 @@ class Supervisor:
         return sync_skills([s for s in skills if isinstance(s, dict)], self.settings.skills_dir)
 
     def tick(self) -> None:
-        """One supervision step."""
+        """One supervision step.
+
+        Example:
+            >>> sup = _demo_supervisor(commands=[{"id": "c1", "kind": "quarantine"}])
+            >>> sup.tick()
+            >>> sup.refuse_restart
+            True
+        """
         self.poll()
         if self._ticks % max(1, self.settings.skills_every) == 0:
             self.sync_skills()
@@ -604,12 +676,24 @@ class Supervisor:
         self.heartbeat()
 
     def request_stop(self, *_: object) -> None:
-        """Signal handler: stop at the next loop iteration."""
+        """Signal handler: stop at the next loop iteration.
+
+        Example:
+            >>> sup = _demo_supervisor()
+            >>> sup.request_stop(15, None)
+            >>> sup._stopping.is_set()
+            True
+        """
         self._stopping.set()
 
     def run(self) -> int:
         """Start Hermes and supervise until SIGTERM/SIGINT, or until the child ended when
-        restarts are disabled. Returns the child's exit code."""
+        restarts are disabled. Returns the child's exit code.
+
+        Example:
+            >>> _demo_supervisor(["true"]).run()  # doctest: +SKIP
+            0
+        """
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
         self.sync_skills()
@@ -622,6 +706,26 @@ class Supervisor:
         code = self.stop_child()
         self.heartbeat()
         return code if code is not None else 0
+
+
+def _demo_supervisor(
+    argv: Sequence[str] = ("true",), *, commands: Sequence[Mapping[str, JsonValue]] = ()
+) -> Supervisor:
+    """Offline supervisor for the examples: a fake API, a temporary home, no egress probe."""
+    import tempfile
+
+    import httpx
+
+    answer: dict[str, JsonValue] = {"commands": [dict(c) for c in commands], "skills": []}
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=answer))
+    settings = SupervisorSettings(
+        argv=list(argv),
+        hermes_home=Path(tempfile.mkdtemp()),
+        forbidden_hosts=[],
+        restart=False,
+    )
+    client = SupervisorClient("https://a.example", "agmhs_x", transport=transport)
+    return Supervisor(settings, client, environ={"PATH": os.environ.get("PATH", "")})
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -687,7 +791,12 @@ def _settings_from_args(
 def main(
     argv: Optional[Sequence[str]] = None, *, environ: Optional[Mapping[str, str]] = None
 ) -> int:
-    """Parse ``[options] -- hermes ...`` and run the supervisor."""
+    """Parse ``[options] -- hermes ...`` and run the supervisor.
+
+    Example:
+        >>> main(["--endpoint", "https://a.example"], environ={})  # no command after --
+        2
+    """
     args_list = list(sys.argv[1:] if argv is None else argv)
     child: list[str] = []
     if "--" in args_list:
@@ -726,7 +835,13 @@ def main(
 
 
 def cli() -> None:
-    """Console script entry point."""
+    """Console script entry point.
+
+    Example:
+        >>> cli()  # doctest: +SKIP
+        Traceback (most recent call last):
+        SystemExit: 0
+    """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     raise SystemExit(main())
 

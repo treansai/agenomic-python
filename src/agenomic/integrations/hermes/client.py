@@ -15,11 +15,14 @@ Example:
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Optional
+from collections.abc import Mapping, Sequence
+from typing import Optional, cast
 from urllib.parse import quote
 
 import httpx
+from pydantic import JsonValue
 
 from agenomic._version import __version__
 from agenomic.exceptions import CloudError
@@ -48,6 +51,18 @@ class HermesApiError(CloudError):
 
 def _seg(value: str) -> str:
     return quote(value, safe="")
+
+
+def _echo_transport() -> httpx.MockTransport:
+    """Offline transport for the examples: answers 200 with the method, path and body."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content) if request.content else None
+        return httpx.Response(
+            200, json={"method": request.method, "path": request.url.path, "body": body}
+        )
+
+    return httpx.MockTransport(handle)
 
 
 class _ApiClient:
@@ -81,7 +96,11 @@ class _ApiClient:
         )
 
     def close(self) -> None:
-        """Release the connection pool."""
+        """Release the connection pool.
+
+        Example:
+            >>> RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport()).close()
+        """
         self._http.close()
 
     def request(
@@ -89,15 +108,20 @@ class _ApiClient:
         method: str,
         path: str,
         *,
-        json_body: Optional[dict[str, Any]] = None,
+        json_body: Optional[Mapping[str, JsonValue]] = None,
         timeout_s: Optional[float] = None,
         ok_statuses: tuple[int, ...] = (200, 201),
         decision_statuses: tuple[int, ...] = (),
-    ) -> tuple[int, dict[str, Any]]:
+    ) -> tuple[int, dict[str, JsonValue]]:
         """Send one request; return ``(status, body)`` for accepted statuses.
 
         ``decision_statuses`` are non 2xx statuses whose body is a decision
         (``403`` deny, ``202`` approval) and must carry a ``decision`` field.
+
+        Example:
+            >>> c = RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport())
+            >>> c.request("POST", "/hello", json_body={"a": 1})
+            (200, {'method': 'POST', 'path': '/v1/hermes/runtime/hello', 'body': {'a': 1}})
         """
         budget = self.report_s if timeout_s is None else timeout_s
         timeout = httpx.Timeout(budget, connect=min(self._connect_s, budget))
@@ -150,39 +174,108 @@ class RuntimeClient(_ApiClient):
         'deny'
     """
 
-    def __init__(self, endpoint: str, token: str, **kwargs: Any) -> None:
-        super().__init__(endpoint, token, RUNTIME_BASE, **kwargs)
+    def __init__(
+        self,
+        endpoint: str,
+        token: str,
+        *,
+        connect_s: float = 3.0,
+        decision_s: float = 5.0,
+        report_s: float = 10.0,
+        transport: Optional[httpx.BaseTransport] = None,
+    ) -> None:
+        super().__init__(
+            endpoint,
+            token,
+            RUNTIME_BASE,
+            connect_s=connect_s,
+            decision_s=decision_s,
+            report_s=report_s,
+            transport=transport,
+        )
 
-    def hello(self, body: dict[str, Any]) -> dict[str, Any]:
-        """``POST /hello``: capability and compatibility report."""
+    def hello(self, body: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """``POST /hello``: capability and compatibility report.
+
+        Example:
+            >>> c = RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport())
+            >>> c.hello({"platform": "cli"})["path"]
+            '/v1/hermes/runtime/hello'
+        """
         return self.request("POST", "/hello", json_body=body, timeout_s=self.decision_s)[1]
 
-    def heartbeat(self, body: dict[str, Any]) -> dict[str, Any]:
-        """``POST /heartbeat``: liveness and exporter stats; returns pending commands."""
+    def heartbeat(self, body: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """``POST /heartbeat``: liveness and exporter stats; returns pending commands.
+
+        Example:
+            >>> c = RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport())
+            >>> c.heartbeat({"active_sessions": ["s1"]})["body"]
+            {'active_sessions': ['s1']}
+        """
         return self.request("POST", "/heartbeat", json_body=body, timeout_s=self.decision_s)[1]
 
-    def tools_discovered(self, tools: list[dict[str, Any]]) -> dict[str, Any]:
-        """``POST /tools/discovered`` (at most 500 tools)."""
-        return self.request("POST", "/tools/discovered", json_body={"tools": tools})[1]
+    def tools_discovered(self, tools: Sequence[Mapping[str, JsonValue]]) -> dict[str, JsonValue]:
+        """``POST /tools/discovered`` (at most 500 tools).
 
-    def create_session(self, body: dict[str, Any]) -> dict[str, Any]:
-        """``POST /sessions``: idempotent on ``hermes_session_id``."""
+        Example:
+            >>> c = RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport())
+            >>> c.tools_discovered([{"tool_name": "terminal"}])["body"]
+            {'tools': [{'tool_name': 'terminal'}]}
+        """
+        return self.request(
+            "POST", "/tools/discovered", json_body={"tools": cast(JsonValue, tools)}
+        )[1]
+
+    def create_session(self, body: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """``POST /sessions``: idempotent on ``hermes_session_id``.
+
+        Example:
+            >>> c = RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport())
+            >>> c.create_session({"hermes_session_id": "s1", "platform": "cli"})["path"]
+            '/v1/hermes/runtime/sessions'
+        """
         return self.request("POST", "/sessions", json_body=body, timeout_s=self.decision_s)[1]
 
-    def end_session(self, hermes_session_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        """``POST /sessions/:sid/end``."""
+    def end_session(
+        self, hermes_session_id: str, body: Mapping[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        """``POST /sessions/:sid/end``.
+
+        Example:
+            >>> c = RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport())
+            >>> c.end_session("s1", {"final": True, "status": "completed"})["path"]
+            '/v1/hermes/runtime/sessions/s1/end'
+        """
         path = f"/sessions/{_seg(hermes_session_id)}/end"
         return self.request("POST", path, json_body=body)[1]
 
-    def reserve_delegation(self, hermes_session_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        """``POST /sessions/:sid/delegations``; a 403 deny is returned, not raised."""
+    def reserve_delegation(
+        self, hermes_session_id: str, body: Mapping[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        """``POST /sessions/:sid/delegations``; a 403 deny is returned, not raised.
+
+        Example:
+            >>> import httpx
+            >>> t = httpx.MockTransport(lambda r: httpx.Response(403, json={"decision": "deny"}))
+            >>> RuntimeClient("https://a.example", "agmhr_x", transport=t).reserve_delegation("s1", {"count": 2})
+            {'decision': 'deny'}
+        """
         path = f"/sessions/{_seg(hermes_session_id)}/delegations"
         return self.request(
             "POST", path, json_body=body, timeout_s=self.decision_s, decision_statuses=(403,)
         )[1]
 
-    def authorize(self, hermes_session_id: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        """``POST /sessions/:sid/actions/authorize``: 200, 202 and a 403 carrying a decision."""
+    def authorize(
+        self, hermes_session_id: str, body: Mapping[str, JsonValue]
+    ) -> tuple[int, dict[str, JsonValue]]:
+        """``POST /sessions/:sid/actions/authorize``: 200, 202 and a 403 carrying a decision.
+
+        Example:
+            >>> import httpx
+            >>> t = httpx.MockTransport(lambda r: httpx.Response(202, json={"decision": "require_approval"}))
+            >>> RuntimeClient("https://a.example", "agmhr_x", transport=t).authorize("s1", {"tool": "terminal"})
+            (202, {'decision': 'require_approval'})
+        """
         path = f"/sessions/{_seg(hermes_session_id)}/actions/authorize"
         return self.request(
             "POST",
@@ -193,26 +286,58 @@ class RuntimeClient(_ApiClient):
             decision_statuses=(202, 403),
         )
 
-    def report(self, hermes_session_id: str, body: dict[str, Any]) -> dict[str, Any]:
-        """``POST /sessions/:sid/actions/report`` with the permit."""
+    def report(self, hermes_session_id: str, body: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """``POST /sessions/:sid/actions/report`` with the permit.
+
+        Example:
+            >>> c = RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport())
+            >>> c.report("s1", {"logical_call_id": "c1", "is_error": False})["path"]
+            '/v1/hermes/runtime/sessions/s1/actions/report'
+        """
         path = f"/sessions/{_seg(hermes_session_id)}/actions/report"
         return self.request("POST", path, json_body=body)[1]
 
-    def approval(self, approval_id: str) -> dict[str, Any]:
-        """``GET /approvals/:id``."""
+    def approval(self, approval_id: str) -> dict[str, JsonValue]:
+        """``GET /approvals/:id``.
+
+        Example:
+            >>> c = RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport())
+            >>> c.approval("apr_1")["method"], c.approval("apr_1")["path"]
+            ('GET', '/v1/hermes/runtime/approvals/apr_1')
+        """
         return self.request("GET", f"/approvals/{_seg(approval_id)}", timeout_s=self.decision_s)[1]
 
-    def post_events(self, events: list[dict[str, Any]]) -> dict[str, Any]:
-        """``POST /events`` (at most 500 events, 1 MiB)."""
-        return self.request("POST", "/events", json_body={"events": events})[1]
+    def post_events(self, events: Sequence[Mapping[str, JsonValue]]) -> dict[str, JsonValue]:
+        """``POST /events`` (at most 500 events, 1 MiB).
 
-    def ack_command(self, command_id: str, status: str, detail: dict[str, Any]) -> dict[str, Any]:
-        """``POST /commands/:id/ack`` with ``received | applied | refused``."""
+        Example:
+            >>> c = RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport())
+            >>> c.post_events([{"event_id": "e1"}])["body"]
+            {'events': [{'event_id': 'e1'}]}
+        """
+        return self.request("POST", "/events", json_body={"events": cast(JsonValue, events)})[1]
+
+    def ack_command(
+        self, command_id: str, status: str, detail: Mapping[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        """``POST /commands/:id/ack`` with ``received | applied | refused``.
+
+        Example:
+            >>> c = RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport())
+            >>> c.ack_command("cmd_1", "received", {"executor": "plugin"})["body"]
+            {'status': 'received', 'detail': {'executor': 'plugin'}}
+        """
         path = f"/commands/{_seg(command_id)}/ack"
-        return self.request("POST", path, json_body={"status": status, "detail": detail})[1]
+        return self.request("POST", path, json_body={"status": status, "detail": dict(detail)})[1]
 
-    def propose(self, body: dict[str, Any]) -> dict[str, Any]:
-        """``POST /proposals``: a change proposal; the runtime never approves."""
+    def propose(self, body: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """``POST /proposals``: a change proposal; the runtime never approves.
+
+        Example:
+            >>> c = RuntimeClient("https://a.example", "agmhr_x", transport=_echo_transport())
+            >>> c.propose({"kind": "skill", "target": "skills/demo/SKILL.md"})["path"]
+            '/v1/hermes/runtime/proposals'
+        """
         return self.request("POST", "/proposals", json_body=body)[1]
 
 
@@ -226,18 +351,55 @@ class SupervisorClient(_ApiClient):
         {'skills': []}
     """
 
-    def __init__(self, endpoint: str, token: str, **kwargs: Any) -> None:
-        super().__init__(endpoint, token, SUPERVISOR_BASE, **kwargs)
+    def __init__(
+        self,
+        endpoint: str,
+        token: str,
+        *,
+        connect_s: float = 3.0,
+        decision_s: float = 5.0,
+        report_s: float = 10.0,
+        transport: Optional[httpx.BaseTransport] = None,
+    ) -> None:
+        super().__init__(
+            endpoint,
+            token,
+            SUPERVISOR_BASE,
+            connect_s=connect_s,
+            decision_s=decision_s,
+            report_s=report_s,
+            transport=transport,
+        )
 
-    def heartbeat(self, body: dict[str, Any]) -> dict[str, Any]:
-        """``POST /heartbeat`` with process state and isolation attestation."""
+    def heartbeat(self, body: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """``POST /heartbeat`` with process state and isolation attestation.
+
+        Example:
+            >>> c = SupervisorClient("https://a.example", "agmhs_x", transport=_echo_transport())
+            >>> c.heartbeat({"process": {"state": "running"}})["path"]
+            '/v1/hermes/supervisor/heartbeat'
+        """
         return self.request("POST", "/heartbeat", json_body=body, timeout_s=self.decision_s)[1]
 
-    def ack_command(self, command_id: str, status: str, detail: dict[str, Any]) -> dict[str, Any]:
-        """``POST /commands/:id/ack``."""
-        path = f"/commands/{_seg(command_id)}/ack"
-        return self.request("POST", path, json_body={"status": status, "detail": detail})[1]
+    def ack_command(
+        self, command_id: str, status: str, detail: Mapping[str, JsonValue]
+    ) -> dict[str, JsonValue]:
+        """``POST /commands/:id/ack``.
 
-    def approved_skills(self) -> dict[str, Any]:
-        """``GET /skills/approved``."""
+        Example:
+            >>> c = SupervisorClient("https://a.example", "agmhs_x", transport=_echo_transport())
+            >>> c.ack_command("cmd_1", "applied", {"restarted": True})["path"]
+            '/v1/hermes/supervisor/commands/cmd_1/ack'
+        """
+        path = f"/commands/{_seg(command_id)}/ack"
+        return self.request("POST", path, json_body={"status": status, "detail": dict(detail)})[1]
+
+    def approved_skills(self) -> dict[str, JsonValue]:
+        """``GET /skills/approved``.
+
+        Example:
+            >>> c = SupervisorClient("https://a.example", "agmhs_x", transport=_echo_transport())
+            >>> c.approved_skills()["path"]
+            '/v1/hermes/supervisor/skills/approved'
+        """
         return self.request("GET", "/skills/approved")[1]

@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 import ulid
+from pydantic import JsonValue
 
 from agenomic.integrations.hermes.canonical import CanonicalError, arguments_hash
 
@@ -212,8 +213,14 @@ class EventBuilder:
         content: Optional[Mapping[str, object]] = None,
         extra: Optional[Mapping[str, object]] = None,
         **fields: object,
-    ) -> dict[str, Any]:
-        """Return a redacted event; unknown ``fields`` are rejected to keep the schema closed."""
+    ) -> dict[str, JsonValue]:
+        """Return a redacted event; unknown ``fields`` are rejected to keep the schema closed.
+
+        Example:
+            >>> e = EventBuilder().build("session.started", hermes_session_id="s1", span_id="s1")
+            >>> e["schema_version"], e["type"], e["seq"], e["span_id"], e["extra"]
+            ('agenomic.hermes.event/v1', 'session.started', 1, 's1', {})
+        """
         with self._lock:
             seq = next(self._seq)
         event: dict[str, Any] = {
@@ -239,8 +246,13 @@ class EventBuilder:
         return event
 
 
-class ExporterStats(dict[str, Any]):
-    """``{"buffered", "dropped", "buffer_full", "last_flush_error"}`` for heartbeats."""
+class ExporterStats(dict[str, JsonValue]):
+    """``{"buffered", "dropped", "buffer_full", "last_flush_error"}`` for heartbeats.
+
+    Example:
+        >>> ExporterStats(buffered=0, dropped=0, buffer_full=False, last_flush_error=None)["dropped"]
+        0
+    """
 
 
 class _Spool:
@@ -313,7 +325,7 @@ class EventExporter:
 
     def __init__(
         self,
-        post: Callable[[list[dict[str, Any]]], Any],
+        post: Callable[[list[dict[str, JsonValue]]], object],
         *,
         max_events: int = 10_000,
         max_bytes: int = 16 * 1024 * 1024,
@@ -348,8 +360,16 @@ class EventExporter:
         self._thread.start()
 
     # -- producer side -------------------------------------------------
-    def submit(self, event: dict[str, Any]) -> bool:
-        """Queue one already redacted event; ``False`` when it was dropped or spooled."""
+    def submit(self, event: dict[str, JsonValue]) -> bool:
+        """Queue one already redacted event; ``False`` when it was dropped or spooled.
+
+        Example:
+            >>> ex = EventExporter(lambda events: None)
+            >>> ex.submit(EventBuilder().build("adapter.loaded")), ex.submit({"no": "event_id"})
+            (True, False)
+            >>> ex.close()
+            False
+        """
         event_id = event.get("event_id")
         if not isinstance(event_id, str):
             self._count_drop("event without event_id")
@@ -413,7 +433,15 @@ class EventExporter:
 
     # -- introspection -------------------------------------------------
     def stats(self) -> ExporterStats:
-        """Exporter counters for the runtime heartbeat."""
+        """Exporter counters for the runtime heartbeat.
+
+        Example:
+            >>> ex = EventExporter(lambda events: None)
+            >>> ex.stats()
+            {'buffered': 0, 'dropped': 0, 'buffer_full': False, 'last_flush_error': None}
+            >>> ex.close()
+            True
+        """
         with self._cond:
             buffered = len(self._buf) + self._in_flight
             return ExporterStats(
@@ -425,11 +453,27 @@ class EventExporter:
 
     @property
     def delivered(self) -> int:
-        """Events the server acknowledged."""
+        """Events the server acknowledged.
+
+        Example:
+            >>> ex = EventExporter(lambda events: None)
+            >>> ex.submit({"event_id": "e1"}), ex.flush(5.0), ex.delivered
+            (True, True, 1)
+            >>> ex.close()
+            True
+        """
         return self._delivered
 
     def flush(self, timeout: Optional[float] = None) -> bool:
-        """Wait until the buffer is empty; ``False`` on timeout or when anything was dropped."""
+        """Wait until the buffer is empty; ``False`` on timeout or when anything was dropped.
+
+        Example:
+            >>> ex = EventExporter(lambda events: None)
+            >>> ex.flush(timeout=5.0)
+            True
+            >>> ex.close()
+            True
+        """
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._cond:
             self._cond.notify_all()
@@ -441,7 +485,15 @@ class EventExporter:
             return self._dropped == 0
 
     def close(self, timeout: Optional[float] = 5.0) -> bool:
-        """Refuse new events, drain, stop the worker. Undelivered events go to the spool."""
+        """Refuse new events, drain, stop the worker. Undelivered events go to the spool.
+
+        Example:
+            >>> ex = EventExporter(lambda events: None)
+            >>> ex.close()
+            True
+            >>> ex.submit({"event_id": "e1"})
+            False
+        """
         drained = self.flush(timeout)
         with self._cond:
             self._closed = True

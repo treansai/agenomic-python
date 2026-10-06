@@ -41,9 +41,9 @@ from collections import OrderedDict, deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Literal, Optional, cast
 
-from pydantic import SecretStr
+from pydantic import JsonValue, SecretStr
 
 from agenomic.integrations.hermes import ADAPTER_VERSION, COMPATIBLE_HERMES
 from agenomic.integrations.hermes.canonical import CanonicalError, arguments_hash, schema_hash
@@ -263,6 +263,11 @@ class HermesAdapter:
     """State and behaviour of the Agenomic plugin inside one Hermes process.
 
     Built by :func:`register`; tests build it directly with a fake context.
+
+    Example:
+        >>> a = _demo_adapter()
+        >>> a.config.endpoint, a.hermes_compatible
+        ('https://a.example', True)
     """
 
     def __init__(
@@ -270,7 +275,7 @@ class HermesAdapter:
         config: AdapterConfig,
         token: SecretStr,
         *,
-        ctx: Any = None,
+        ctx: object = None,
         client: Optional[RuntimeClient] = None,
         exporter: Optional[EventExporter] = None,
         hermes_home: Optional[Path] = None,
@@ -342,18 +347,30 @@ class HermesAdapter:
     # ------------------------------------------------------------------
     # installation and lifecycle
     # ------------------------------------------------------------------
-    def install(self, ctx: Any) -> None:
-        """Register hooks and middleware on a Hermes ``PluginContext`` and probe them."""
+    def install(self, ctx: object) -> None:
+        """Register hooks and middleware on a Hermes ``PluginContext`` and probe them.
+
+        Example:
+            >>> import types
+            >>> seen = []
+            >>> ctx = types.SimpleNamespace(register_hook=lambda n, cb: seen.append(n),
+            ...     register_middleware=lambda k, cb: seen.append(k))
+            >>> _demo_adapter().install(ctx)
+            >>> seen[-3:]
+            ['pre_tool_call', 'tool_execution', 'llm_request']
+        """
         self.ctx = ctx
+        # Duck typed Hermes ``PluginContext``: a missing method is caught and reported below.
+        hermes_ctx = cast(Any, ctx)
         registered: list[str] = []
         for name in OBSERVER_HOOKS:
             try:
-                ctx.register_hook(name, getattr(self, name))
+                hermes_ctx.register_hook(name, getattr(self, name))
                 registered.append(name)
             except Exception as exc:  # report the missing contract instead of failing the load
                 logger.warning("hook %s not registered: %s", name, type(exc).__name__)
         try:
-            ctx.register_hook("pre_tool_call", self.pre_tool_call)
+            hermes_ctx.register_hook("pre_tool_call", self.pre_tool_call)
             self._contracts["pre_tool_call"] = True
         except Exception as exc:
             logger.error("pre_tool_call not registered: %s", type(exc).__name__)
@@ -362,7 +379,7 @@ class HermesAdapter:
             ("llm_request", self.llm_request),
         ):
             try:
-                ctx.register_middleware(kind, cb)
+                hermes_ctx.register_middleware(kind, cb)
                 self._contracts[kind] = True
             except Exception as exc:
                 logger.error("%s middleware not registered: %s", kind, type(exc).__name__)
@@ -411,6 +428,10 @@ class HermesAdapter:
         Other plugins' ``pre_tool_call`` callbacks (they may return ``modify``),
         any ``tool_request`` middleware and other ``tool_execution`` middleware.
         Our own guard shell hook is not counted.
+
+        Example:
+            >>> _demo_adapter().foreign_mutators()  # no Hermes plugin manager here
+            []
         """
         manager = self._manager()
         if manager is None:
@@ -451,7 +472,12 @@ class HermesAdapter:
 
     @property
     def hermes_compatible(self) -> bool:
-        """``hermes_cli.__version__`` is in ``COMPATIBLE_HERMES``."""
+        """``hermes_cli.__version__`` is in ``COMPATIBLE_HERMES``.
+
+        Example:
+            >>> _demo_adapter().hermes_compatible
+            True
+        """
         return self._identity.get("version") in COMPATIBLE_HERMES
 
     def _ensure_started(self, platform: str = "") -> None:
@@ -476,7 +502,14 @@ class HermesAdapter:
             atexit.register(self.shutdown)
 
     def shutdown(self) -> None:
-        """Stop the heartbeat and drain the exporter (bounded)."""
+        """Stop the heartbeat and drain the exporter (bounded).
+
+        Example:
+            >>> a = _demo_adapter()
+            >>> a.shutdown()
+            >>> a.exporter.submit({"event_id": "e1"})
+            False
+        """
         self._stop.set()
         try:
             self.exporter.close(2.0)
@@ -490,6 +523,14 @@ class HermesAdapter:
         """``observe`` / ``shadow`` / ``enforce`` from the last server answer.
 
         Unknown (no answer yet) and every enforce like state count as enforce.
+
+        Example:
+            >>> a = _demo_adapter()
+            >>> a.local_mode()  # no server answer yet
+            'enforce'
+            >>> a.tick()
+            >>> a.local_mode()
+            'observe'
         """
         if self._local_status in _BLOCKING_STATUS:
             return "enforce"
@@ -619,14 +660,19 @@ class HermesAdapter:
         self._set_state(resp.get("effective_state"))
         profile = resp.get("profile")
         if isinstance(profile, dict) and isinstance(profile.get("document"), dict):
-            self._profile = profile["document"]
+            self._profile = cast(dict[str, Any], profile["document"])
         interval = resp.get("heartbeat_interval_secs")
         if isinstance(interval, (int, float)) and 1 <= interval <= 3600:
             self._heartbeat_s = float(interval)
         return True
 
     def discover_tools(self) -> int:
-        """Send the Hermes tool registry with schema hashes. Returns the number sent."""
+        """Send the Hermes tool registry with schema hashes. Returns the number sent.
+
+        Example:
+            >>> _demo_adapter().discover_tools()  # Hermes' tool registry is not importable here
+            0
+        """
         try:
             from tools.registry import registry
         except ImportError:
@@ -691,7 +737,14 @@ class HermesAdapter:
                 logger.warning("heartbeat tick failed: %s", type(exc).__name__)
 
     def tick(self) -> None:
-        """One heartbeat: hello and tool discovery if pending, heartbeat, commands, retries."""
+        """One heartbeat: hello and tool discovery if pending, heartbeat, commands, retries.
+
+        Example:
+            >>> a = _demo_adapter()
+            >>> a.tick()
+            >>> json.loads(a.status_file.read_text())["effective_state"]
+            'observe'
+        """
         try:
             if not self._hello_ok or self.foreign_mutators() != self._foreign:
                 self._hello()
@@ -701,7 +754,9 @@ class HermesAdapter:
                 except HermesApiError as exc:
                     logger.warning("tool discovery failed (%s)", exc.code)
             with self._lock:
-                active = [s.hermes_session_id for s in self._sessions.values() if s.active]
+                active: list[JsonValue] = [
+                    s.hermes_session_id for s in self._sessions.values() if s.active
+                ]
             resp = self.client.heartbeat(
                 {"active_sessions": active, "exporter": dict(self.exporter.stats())}
             )
@@ -725,8 +780,15 @@ class HermesAdapter:
             return
         self._emit("command." + status, None, extra={"command_id": command_id, "detail": detail})
 
-    def handle_command(self, command: dict[str, Any]) -> None:
-        """Execute one plugin command. ``applied`` is only acknowledged once observed."""
+    def handle_command(self, command: Mapping[str, JsonValue]) -> None:
+        """Execute one plugin command. ``applied`` is only acknowledged once observed.
+
+        Example:
+            >>> a = _demo_adapter()
+            >>> a.handle_command({"id": "c1", "kind": "pause", "target_kind": "instance"})
+            >>> json.loads(a.status_file.read_text())["instance_status"]
+            'paused'
+        """
         command_id = _str(command.get("id"))
         if not command_id or command_id in self._commands_seen:
             return
@@ -885,11 +947,16 @@ class HermesAdapter:
         self._set_state(resp.get("effective_state"))
         info = resp.get("session")
         if isinstance(info, dict) and isinstance(info.get("id"), str):
-            session.agenomic_id = info["id"]
-            self._agenomic_sessions[info["id"]] = session.hermes_session_id
+            session.agenomic_id = cast(str, info["id"])
+            self._agenomic_sessions[cast(str, info["id"])] = session.hermes_session_id
 
-    def on_session_start(self, **kwargs: Any) -> None:
-        """Admit the session (idempotent server side) and emit ``session.started``."""
+    def on_session_start(self, **kwargs: object) -> None:
+        """Admit the session (idempotent server side) and emit ``session.started``.
+
+        Example:
+            >>> _demo_adapter().on_session_start(session_id="s1", platform="cli", model="demo-model") is None
+            True
+        """
         try:
             sid = _str(kwargs.get("session_id"))
             platform = _str(kwargs.get("platform"))
@@ -919,8 +986,13 @@ class HermesAdapter:
         except HermesApiError as exc:
             logger.warning("session end not reported (%s)", exc.code)
 
-    def on_session_end(self, **kwargs: Any) -> None:
-        """Per TURN end (not final). ``interrupted`` applies a pending cancel."""
+    def on_session_end(self, **kwargs: object) -> None:
+        """Per TURN end (not final). ``interrupted`` applies a pending cancel.
+
+        Example:
+            >>> _demo_adapter().on_session_end(session_id="s1", interrupted=False) is None
+            True
+        """
         try:
             sid = _str(kwargs.get("session_id"))
             if not sid:
@@ -949,8 +1021,13 @@ class HermesAdapter:
         except Exception as exc:
             logger.debug("on_session_end failed: %s", type(exc).__name__)
 
-    def on_session_finalize(self, **kwargs: Any) -> None:
-        """Final end of a session."""
+    def on_session_finalize(self, **kwargs: object) -> None:
+        """Final end of a session.
+
+        Example:
+            >>> _demo_adapter().on_session_finalize(session_id="s1", reason="exit") is None
+            True
+        """
         try:
             sid = _str(kwargs.get("session_id"))
             reason = _str(kwargs.get("reason"))
@@ -966,8 +1043,13 @@ class HermesAdapter:
         except Exception as exc:
             logger.debug("on_session_finalize failed: %s", type(exc).__name__)
 
-    def on_session_reset(self, **kwargs: Any) -> None:
-        """``/new`` or reset: observed only."""
+    def on_session_reset(self, **kwargs: object) -> None:
+        """``/new`` or reset: observed only.
+
+        Example:
+            >>> _demo_adapter().on_session_reset(session_id="s2", old_session_id="s1") is None
+            True
+        """
         sid = _str(kwargs.get("session_id"))
         self._emit(
             "session.reset",
@@ -976,8 +1058,13 @@ class HermesAdapter:
             extra={"old_session_id": _str(kwargs.get("old_session_id")) or None},
         )
 
-    def subagent_start(self, **kwargs: Any) -> None:
-        """Fires BEFORE the child's ``on_session_start``: record the parent link."""
+    def subagent_start(self, **kwargs: object) -> None:
+        """Fires BEFORE the child's ``on_session_start``: record the parent link.
+
+        Example:
+            >>> _demo_adapter().subagent_start(parent_session_id="s1", child_session_id="s1.1") is None
+            True
+        """
         try:
             child = _str(kwargs.get("child_session_id"))
             parent = _str(kwargs.get("parent_session_id"))
@@ -1001,8 +1088,13 @@ class HermesAdapter:
         except Exception as exc:
             logger.debug("subagent_start failed: %s", type(exc).__name__)
 
-    def subagent_stop(self, **kwargs: Any) -> None:
-        """Child finished: end its session and apply a pending cancel."""
+    def subagent_stop(self, **kwargs: object) -> None:
+        """Child finished: end its session and apply a pending cancel.
+
+        Example:
+            >>> _demo_adapter().subagent_stop(parent_session_id="s1", child_session_id="s1.1", child_status="completed") is None
+            True
+        """
         try:
             child = _str(kwargs.get("child_session_id"))
             parent = _str(kwargs.get("parent_session_id"))
@@ -1038,8 +1130,13 @@ class HermesAdapter:
     # ------------------------------------------------------------------
     # model calls (observed only)
     # ------------------------------------------------------------------
-    def pre_api_request(self, **kwargs: Any) -> None:
-        """Main loop model call started."""
+    def pre_api_request(self, **kwargs: object) -> None:
+        """Main loop model call started.
+
+        Example:
+            >>> _demo_adapter().pre_api_request(session_id="s1", api_request_id="r1", model="demo-model") is None
+            True
+        """
         sid = _str(kwargs.get("session_id"))
         self._ensure_started(_str(kwargs.get("platform")))
         self._emit(
@@ -1077,8 +1174,13 @@ class HermesAdapter:
             "known": True,
         }
 
-    def post_api_request(self, **kwargs: Any) -> None:
-        """Main loop model call completed."""
+    def post_api_request(self, **kwargs: object) -> None:
+        """Main loop model call completed.
+
+        Example:
+            >>> _demo_adapter().post_api_request(session_id="s1", api_request_id="r1", api_duration=0.4) is None
+            True
+        """
         duration = kwargs.get("api_duration")
         self._emit(
             "model.call.completed",
@@ -1096,8 +1198,13 @@ class HermesAdapter:
             },
         )
 
-    def api_request_error(self, **kwargs: Any) -> None:
-        """Main loop model call failed."""
+    def api_request_error(self, **kwargs: object) -> None:
+        """Main loop model call failed.
+
+        Example:
+            >>> _demo_adapter().api_request_error(session_id="s1", api_request_id="r1", status_code=429) is None
+            True
+        """
         raw_error = kwargs.get("error")
         error: dict[str, Any] = raw_error if isinstance(raw_error, dict) else {}
         self._emit(
@@ -1115,8 +1222,13 @@ class HermesAdapter:
             },
         )
 
-    def pre_auxiliary_call(self, **kwargs: Any) -> None:
-        """Auxiliary model call (titles, compression, ...): only controllable at the Model Gateway."""
+    def pre_auxiliary_call(self, **kwargs: object) -> None:
+        """Auxiliary model call (titles, compression, ...): only controllable at the Model Gateway.
+
+        Example:
+            >>> _demo_adapter().pre_auxiliary_call(session_id="s1", aux_task="title") is None
+            True
+        """
         self._emit(
             "model.aux.started",
             _str(kwargs.get("session_id")) or None,
@@ -1126,8 +1238,13 @@ class HermesAdapter:
             extra={"aux_task": _str(kwargs.get("aux_task")), "controlled": False},
         )
 
-    def post_auxiliary_call(self, **kwargs: Any) -> None:
-        """Auxiliary model call completed."""
+    def post_auxiliary_call(self, **kwargs: object) -> None:
+        """Auxiliary model call completed.
+
+        Example:
+            >>> _demo_adapter().post_auxiliary_call(session_id="s1", aux_task="title", api_duration=0.1) is None
+            True
+        """
         duration = kwargs.get("api_duration")
         self._emit(
             "model.aux.completed",
@@ -1140,8 +1257,13 @@ class HermesAdapter:
             extra={"aux_task": _str(kwargs.get("aux_task")), "controlled": False},
         )
 
-    def pre_approval_request(self, **kwargs: Any) -> None:
-        """Hermes approval requested. Observed only: the adapter never answers approvals."""
+    def pre_approval_request(self, **kwargs: object) -> None:
+        """Hermes approval requested. Observed only: the adapter never answers approvals.
+
+        Example:
+            >>> _demo_adapter().pre_approval_request(session_id="s1", tool_call_id="c1", command="rm -rf build") is None
+            True
+        """
         self._emit(
             "approval.requested",
             _str(kwargs.get("session_id")) or None,
@@ -1154,8 +1276,13 @@ class HermesAdapter:
             },
         )
 
-    def post_approval_response(self, **kwargs: Any) -> None:
-        """Hermes approval answered (by a human or Hermes smart approvals). Observed only."""
+    def post_approval_response(self, **kwargs: object) -> None:
+        """Hermes approval answered (by a human or Hermes smart approvals). Observed only.
+
+        Example:
+            >>> _demo_adapter().post_approval_response(session_id="s1", tool_call_id="c1", choice="once") is None
+            True
+        """
         self._emit(
             "approval.responded",
             _str(kwargs.get("session_id")) or None,
@@ -1168,8 +1295,13 @@ class HermesAdapter:
             },
         )
 
-    def agent_loop_stopped(self, **kwargs: Any) -> None:
-        """Hermes Messaging Gateway ``/stop``."""
+    def agent_loop_stopped(self, **kwargs: object) -> None:
+        """Hermes Messaging Gateway ``/stop``.
+
+        Example:
+            >>> _demo_adapter().agent_loop_stopped(reason="/stop", platform="telegram") is None
+            True
+        """
         self._emit(
             "agent.loop_stopped",
             None,
@@ -1177,8 +1309,15 @@ class HermesAdapter:
             extra={"platform": _str(kwargs.get("platform"))},
         )
 
-    def llm_request(self, **kwargs: Any) -> Optional[dict[str, Any]]:
-        """Add ``X-Agenomic-Hermes-Session`` on Model Gateway requests; nothing else changes."""
+    def llm_request(self, **kwargs: object) -> Optional[dict[str, object]]:
+        """Add ``X-Agenomic-Hermes-Session`` on Model Gateway requests; nothing else changes.
+
+        Example:
+            >>> a = _demo_adapter()
+            >>> out = a.llm_request(session_id="s1", base_url=a.config.endpoint + "/v1", request={"model": "m"})
+            >>> out["request"]
+            {'model': 'm', 'extra_headers': {'X-Agenomic-Hermes-Session': 's1'}}
+        """
         try:
             request = kwargs.get("request")
             sid = _str(kwargs.get("session_id"))
@@ -1215,8 +1354,15 @@ class HermesAdapter:
             roots += [Path(p).expanduser() for p in extra if isinstance(p, str) and p]
         return [os.path.realpath(r) for r in roots]
 
-    def protected_targets(self, tool: str, args: Mapping[str, Any]) -> list[str]:
-        """Paths a write tool would touch inside protected Hermes locations."""
+    def protected_targets(self, tool: str, args: Mapping[str, object]) -> list[str]:
+        """Paths a write tool would touch inside protected Hermes locations.
+
+        Example:
+            >>> a = _demo_adapter()
+            >>> config_file = str(a.home / "config.yaml")
+            >>> a.protected_targets("write_file", {"path": config_file}) == [config_file]
+            True
+        """
         if tool not in _WRITE_TOOLS:
             return []
         candidates: list[str] = []
@@ -1302,14 +1448,20 @@ class HermesAdapter:
         self,
         *,
         tool: str,
-        args: dict[str, Any],
+        args: dict[str, JsonValue],
         sid: str,
         tool_call_id: str,
         turn_id: str = "",
         api_request_id: str = "",
         local_hash: str,
     ) -> _Verdict:
-        """Ask the gateway; return a block message or the authorization. Raises on transport errors."""
+        """Ask the gateway; return a block message or the authorization. Raises on transport errors.
+
+        Example:
+            >>> a = _demo_adapter({"decision": "deny", "effective_mode": "enforce", "explanation": "not allowed"})
+            >>> a.authorize(tool="terminal", args={"command": "ls"}, sid="s1", tool_call_id="c1", local_hash="h").block
+            'Agenomic denied terminal: not allowed (decision unknown)'
+        """
         session = self._session(sid)
         if not session.admitted:
             self._admit(session)
@@ -1412,7 +1564,7 @@ class HermesAdapter:
             with self._lock:
                 self._pending[key] = _Pending(
                     _str(resp.get("logical_call_id")) or logical_call_id,
-                    int(resp.get("attempt") or attempt),
+                    int(cast(Any, resp.get("attempt")) or attempt),
                     approval_id,
                 )
             return _Verdict(block=APPROVAL_MESSAGE.format(approval_id=approval_id))
@@ -1425,7 +1577,7 @@ class HermesAdapter:
             session_id=sid,
             tool=tool,
             logical_call_id=_str(resp.get("logical_call_id")) or logical_call_id,
-            attempt=int(resp.get("attempt") or attempt),
+            attempt=int(cast(Any, resp.get("attempt")) or attempt),
             local_hash=local_hash,
             arguments=args,
             effective_mode=effective_mode,
@@ -1528,8 +1680,14 @@ class HermesAdapter:
             return "Agenomic cancelled this session; the action was not executed."
         return None
 
-    def pre_tool_call(self, **kwargs: Any) -> Optional[dict[str, str]]:
-        """Authorization gate. ``None`` lets Hermes proceed; a block directive vetoes the call."""
+    def pre_tool_call(self, **kwargs: object) -> Optional[dict[str, str]]:
+        """Authorization gate. ``None`` lets Hermes proceed; a block directive vetoes the call.
+
+        Example:
+            >>> a = _demo_adapter({"decision": "deny", "effective_mode": "enforce", "explanation": "not allowed"})
+            >>> a.pre_tool_call(tool_name="terminal", args={"command": "ls"}, session_id="s1", tool_call_id="c1")
+            {'action': 'block', 'message': 'Agenomic denied terminal: not allowed (decision unknown)'}
+        """
         tool = _str(kwargs.get("tool_name"))
         sid = _str(kwargs.get("session_id"))
         tool_call_id = _str(kwargs.get("tool_call_id"))
@@ -1678,9 +1836,15 @@ class HermesAdapter:
         )
         return _ExecutionPlan(True, auth=auth, meta=meta)
 
-    def tool_execution(self, **kwargs: Any) -> Any:
-        """Execution middleware. Never raises before ``next_call``; reports after it."""
-        next_call: Optional[Callable[..., Any]] = kwargs.get("next_call")
+    def tool_execution(self, **kwargs: object) -> object:
+        """Execution middleware. Never raises before ``next_call``; reports after it.
+
+        Example:
+            >>> a = _demo_adapter()  # the gateway answers observe: the call runs
+            >>> a.tool_execution(tool_name="terminal", args={}, session_id="s1", tool_call_id="c1", next_call=lambda: "ok")
+            'ok'
+        """
+        next_call = cast(Optional[Callable[..., object]], kwargs.get("next_call"))
         plan: _ExecutionPlan
         try:
             plan = self._execution_gate(kwargs)
@@ -1807,8 +1971,13 @@ class HermesAdapter:
                 return
             self._report(item)
 
-    def post_tool_call(self, **kwargs: Any) -> None:
-        """Compare executed arguments with the authorized ones; record the terminal status."""
+    def post_tool_call(self, **kwargs: object) -> None:
+        """Compare executed arguments with the authorized ones; record the terminal status.
+
+        Example:
+            >>> _demo_adapter().post_tool_call(tool_name="terminal", args={}, session_id="s1", tool_call_id="c1", status="ok") is None
+            True
+        """
         try:
             tool_call_id = _str(kwargs.get("tool_call_id"))
             status = _str(kwargs.get("status"))
@@ -1912,21 +2081,59 @@ class HermesAdapter:
         )
 
 
+def _demo_adapter(answer: Optional[Mapping[str, JsonValue]] = None) -> HermesAdapter:
+    """Offline adapter for the examples: a fake gateway answering ``answer`` to every call
+    (``observe`` by default), a temporary ``HERMES_HOME``, a compatible Hermes, no threads."""
+    import tempfile
+
+    import httpx
+
+    doc: dict[str, JsonValue] = (
+        dict(answer)
+        if answer is not None
+        else {"effective_state": "observe", "decision": "observe", "effective_mode": "observe"}
+    )
+    config = AdapterConfig.model_validate({"endpoint": "https://a.example"})
+    client = RuntimeClient(
+        config.endpoint,
+        "agmhr_x",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=doc)),
+    )
+    return HermesAdapter(
+        config,
+        SecretStr("agmhr_x"),
+        client=client,
+        hermes_home=Path(tempfile.mkdtemp()),
+        start_threads=False,
+        identity={"version": "0.21.5", "release_date": None, "commit": None},
+    )
+
+
 _ADAPTER: Optional[HermesAdapter] = None
 
 
 def current_adapter() -> Optional[HermesAdapter]:
-    """The adapter registered in this process, if any."""
+    """The adapter registered in this process, if any.
+
+    Example:
+        >>> current_adapter() is None or isinstance(current_adapter(), HermesAdapter)
+        True
+    """
     return _ADAPTER
 
 
-def register(ctx: Any) -> None:
+def register(ctx: object) -> None:
     """Hermes plugin entry point.
 
     Reads the adapter config, registers hooks and middleware and writes the
     guard status file. A configuration error marks the status file as not
     loaded (so the guard blocks) and is raised so Hermes reports the plugin as
     failed. No network call happens here; ``/hello`` is sent on first use.
+
+    Example:
+        >>> register(ctx)  # doctest: +SKIP
+        >>> current_adapter().local_mode()  # doctest: +SKIP
+        'enforce'
     """
     global _ADAPTER
     home = _hermes_home()

@@ -32,7 +32,15 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    SecretStr,
+    ValidationError,
+    field_validator,
+)
 
 from agenomic.exceptions import AgenomicError
 
@@ -151,7 +159,12 @@ class AdapterConfig(BaseModel):
 
     @property
     def token_env(self) -> str:
-        """Name of the environment variable holding the runtime token."""
+        """Name of the environment variable holding the runtime token.
+
+        Example:
+            >>> AdapterConfig.model_validate({"endpoint": "https://a.example"}).token_env
+            'AGENOMIC_HERMES_RUNTIME_TOKEN'
+        """
         match = _ENV_REF.match(self.runtime_token)
         assert match is not None
         return match.group(1)
@@ -253,7 +266,7 @@ def _format_errors(err: ValidationError) -> str:
 
 
 def build_config(
-    settings: Optional[Mapping[str, Any]] = None,
+    settings: Optional[Mapping[str, object]] = None,
     *,
     environ: Optional[Mapping[str, str]] = None,
     resolve_token: bool = True,
@@ -299,7 +312,7 @@ def build_config(
     return config, token
 
 
-def settings_from_context(ctx: Any) -> dict[str, Any]:
+def settings_from_context(ctx: object) -> dict[str, object]:
     """Read the adapter keys from a Hermes ``PluginContext`` (``ctx.get_config``).
 
     Example:
@@ -309,7 +322,7 @@ def settings_from_context(ctx: Any) -> dict[str, Any]:
         >>> settings_from_context(Ctx())
         {'endpoint': 'https://a.example'}
     """
-    out: dict[str, Any] = {}
+    out: dict[str, object] = {}
     getter = getattr(ctx, "get_config", None)
     if not callable(getter):
         return out
@@ -340,8 +353,8 @@ def render_hermes_config(
     model: Optional[str] = None,
     runtime_token_env: str = DEFAULT_TOKEN_ENV,
     guard_timeout_s: int = 10,
-    settings: Optional[Mapping[str, Any]] = None,
-) -> dict[str, Any]:
+    settings: Optional[Mapping[str, object]] = None,
+) -> dict[str, JsonValue]:
     """Hermes ``config.yaml`` fragment routing Hermes through Agenomic.
 
     Agenomic ``${env:VAR}`` references in ``settings`` are rewritten to the
@@ -405,7 +418,7 @@ def render_adapter_config(
     runtime_token_env: str = DEFAULT_TOKEN_ENV,
     capture: Literal["metadata", "redacted_preview"] = "metadata",
     spool_path: Optional[str] = None,
-) -> dict[str, Any]:
+) -> dict[str, JsonValue]:
     """Adapter config document for the ``AGENOMIC_HERMES_CONFIG`` file.
 
     Example:
@@ -413,10 +426,10 @@ def render_adapter_config(
         >>> doc["runtime_token"], doc["schema_version"]
         ('${env:MY_TOKEN}', 'agenomic.hermes.adapter_config/v1')
     """
-    buffer: dict[str, Any] = {}
+    buffer: dict[str, JsonValue] = {}
     if spool_path:
         buffer["spool_path"] = spool_path
-    doc: dict[str, Any] = {
+    doc: dict[str, JsonValue] = {
         "schema_version": CONFIG_SCHEMA,
         "endpoint": endpoint.rstrip("/"),
         "runtime_token": "${env:" + runtime_token_env + "}",

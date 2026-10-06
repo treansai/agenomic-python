@@ -28,7 +28,10 @@ import time
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import IO, Any, Optional
+from typing import IO, TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:  # the guard runs on every tool call; keep its imports minimal
+    from pydantic import JsonValue
 
 STATUS_SCHEMA = "agenomic.hermes.status/v1"
 DEFAULT_MAX_AGE_S = 120.0
@@ -60,7 +63,7 @@ def _parse_time(value: object) -> Optional[float]:
 
 
 def evaluate(
-    status: Optional[dict[str, Any]],
+    status: Optional[Mapping[str, JsonValue]],
     *,
     now: Optional[float] = None,
     max_age_s: float = DEFAULT_MAX_AGE_S,
@@ -118,7 +121,13 @@ def main(
     stdout: Optional[IO[str]] = None,
     environ: Optional[Mapping[str, str]] = None,
 ) -> int:
-    """Run the guard once. Returns the exit code (0 allow, 2 block)."""
+    """Run the guard once. Returns the exit code (0 allow, 2 block).
+
+    Example:
+        >>> import io, tempfile
+        >>> main(stdin=io.StringIO("[]"), stdout=io.StringIO(), environ={"HERMES_HOME": tempfile.mkdtemp()})
+        2
+    """
     out = sys.stdout if stdout is None else stdout
     try:
         env = os.environ if environ is None else environ
@@ -153,7 +162,13 @@ def main(
 
 
 def cli() -> None:
-    """Console script entry point."""
+    """Console script entry point.
+
+    Example:
+        >>> cli()  # doctest: +SKIP
+        Traceback (most recent call last):
+        SystemExit: 2
+    """
     try:
         code = main(sys.argv[1:])
     except BaseException:
