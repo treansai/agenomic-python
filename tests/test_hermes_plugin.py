@@ -1911,3 +1911,60 @@ def test_stop_command_between_the_gates_blocks_a_cached_authorization(
     recorded = _local_decisions(server, message)
     assert len(recorded) == 1
     assert recorded[0]["extra"]["reason_codes"] == ["instance_stopped"]
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_each_child_takes_the_reservation_of_the_invocation_that_built_it(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, order: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+
+    def reserve(sid: str, body: Any) -> Any:
+        return {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
+
+    monkeypatch.setattr(adapter.client, "reserve_delegation", reserve)
+    args = {"tasks": [{"goal": "x"}]}
+    kw = Runner(adapter)._kw
+
+    def start_child(child: str) -> Callable[..., str]:
+        def build(*_: Any) -> str:
+            # Hermes builds the children on the thread running delegate_task.
+            adapter.subagent_start(parent_session_id="p", child_session_id=child)
+            adapter.on_session_start(session_id=child, platform="subagent", model="m")
+            return json.dumps({"success": True})
+
+        return build
+
+    if order == "direct":
+        # Both calls are authorized (A first), then B builds its child before A.
+        assert adapter.pre_tool_call(args=args, **kw("delegate_task", "p", "d_a")) is None
+        assert adapter.pre_tool_call(args=args, **kw("delegate_task", "p", "d_b")) is None
+        adapter.tool_execution(
+            args=args, next_call=start_child("c_b"), **kw("delegate_task", "p", "d_b")
+        )
+        adapter.tool_execution(
+            args=args, next_call=start_child("c_a"), **kw("delegate_task", "p", "d_a")
+        )
+    else:
+        # A is authorized first; while A runs, B is authorized and builds its child, then A.
+        def run_a(*_: Any) -> str:
+            assert adapter.pre_tool_call(args=args, **kw("delegate_task", "p", "d_a")) is None
+            adapter.tool_execution(
+                args=args,
+                next_call=lambda *_: (
+                    adapter.pre_tool_call(args=args, **kw("delegate_task", "p", "d_b")),
+                    start_child("c_b")(),
+                )[1],
+                **kw("delegate_task", "p", "d_b"),
+            )
+            return start_child("c_a")()
+
+        adapter.tool_execution(args=args, next_call=run_a, **kw("delegate_task", "p", "d_a"))
+    admitted = {
+        r.body["hermes_session_id"]: r.body.get("delegation_id")
+        for r in server.calls("/v1/hermes/runtime/sessions")
+    }
+    assert admitted["c_a"] == "del-d_a"
+    assert admitted["c_b"] == "del-d_b"
+    assert not adapter._delegations.get("p"), "both reservations are used up"

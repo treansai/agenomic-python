@@ -403,6 +403,12 @@ class HermesAdapter:
         self._agenomic_sessions: dict[str, str] = {}
         self._children: dict[str, tuple[str, Optional[str]]] = {}
         self._delegations: dict[str, deque[list[Any]]] = {}
+        # Hermes builds a delegate_task's children on the thread running that tool, inside
+        # tool_execution: the reservation of the invocation running on this thread, and the
+        # one each started child was built under, so a child never takes the reservation of
+        # another invocation of the same parent.
+        self._invocation = threading.local()
+        self._child_delegations: dict[str, list[Any]] = {}
         # Reservations wait here, per (session, tool, arguments hash, approval id or ""),
         # until the action itself is allowed; a retry after an approval (of that approval)
         # or a transport error reuses them.
@@ -1070,7 +1076,9 @@ class HermesAdapter:
                 link = self._children.get(sid)
                 if link is not None:
                     session.parent, session.subagent_id = link
-                    session.delegation_id = self._take_delegation(link[0])
+                    session.delegation_id = self._take_delegation(
+                        link[0], self._child_delegations.pop(sid, None)
+                    )
                 self._sessions[sid] = session
             if platform and not session.platform:
                 session.platform = platform
@@ -1078,8 +1086,21 @@ class HermesAdapter:
                 session.model = model
             return session
 
-    def _take_delegation(self, parent: str) -> Optional[str]:
+    def _take_delegation(
+        self, parent: str, reservation: Optional[list[Any]] = None
+    ) -> Optional[str]:
+        """The delegation of the reservation the child was built under (``None`` once it
+        is used up or dropped: another invocation's reservation is never taken); without
+        one (no authorization on the delegating thread), the oldest one of the parent."""
         queue = self._delegations.get(parent)
+        if reservation is not None:
+            for i, queued in enumerate(queue or ()):
+                if queued is reservation and queued[1] > 0:
+                    queued[1] -= 1
+                    if queued[1] <= 0:
+                        del queue[i]  # type: ignore[union-attr]
+                    return str(queued[0])
+            return None
         while queue:
             head = queue[0]
             if head[1] <= 0:
@@ -1249,8 +1270,11 @@ class HermesAdapter:
             parent = _str(kwargs.get("parent_session_id"))
             subagent_id = _str(kwargs.get("child_subagent_id")) or None
             if child:
+                reservation = getattr(self._invocation, "delegation", None)
                 with self._lock:
                     self._children[child] = (parent, subagent_id)
+                    if reservation is not None:
+                        self._child_delegations[child] = reservation
             self._emit(
                 "subagent.started",
                 parent or None,
@@ -2530,11 +2554,15 @@ class HermesAdapter:
                     (_str(plan.meta.get("sid")), _str(plan.meta.get("tool")), meta_call), None
                 )
         started = time.monotonic()
+        outer = getattr(self._invocation, "delegation", None)
+        self._invocation.delegation = plan.auth.delegation if plan.auth is not None else None
         try:
             result = next_call()
         except BaseException:
+            self._invocation.delegation = outer
             self._after_execution(plan, None, started, raised=True)
             raise
+        self._invocation.delegation = outer
         self._after_execution(plan, result, started, raised=False)
         return result
 

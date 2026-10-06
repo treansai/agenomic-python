@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -226,6 +227,59 @@ def test_close_spools_the_batch_a_hung_post_still_holds(tmp_path: Path, then: st
         event_id = json.loads(lines[0])["event_id"]
         assert posted
         assert {e["event_id"] for b in posted for e in b} == {event_id}
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX only")
+@pytest.mark.parametrize("flags", ["read", "append"])
+def test_open_private_refuses_a_fifo_without_blocking(tmp_path: Path, flags: str) -> None:
+    from agenomic.integrations.hermes.exporter import open_private
+
+    fifo = tmp_path / "spool.jsonl"
+    os.mkfifo(fifo, 0o600)
+    mode = os.O_RDONLY if flags == "read" else os.O_WRONLY | os.O_CREAT | os.O_APPEND
+    outcome: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            os.close(open_private(fifo, mode))
+            outcome["opened"] = True
+        except OSError as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(5)
+    if worker.is_alive():  # release the blocked open before failing
+        peer = os.O_WRONLY if flags == "read" else os.O_RDONLY
+        with contextlib.suppress(OSError):
+            os.close(os.open(fifo, peer | os.O_NONBLOCK))
+        worker.join(5)
+        pytest.fail("open_private blocked on a FIFO")
+    assert "opened" not in outcome
+    assert isinstance(outcome["error"], OSError)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX only")
+def test_overflow_into_a_fifo_spool_never_blocks_submit(tmp_path: Path) -> None:
+    fifo = tmp_path / "spool.jsonl"
+    os.mkfifo(fifo, 0o600)
+    exporter = EventExporter(
+        lambda batch: None, max_events=1, flush_interval_s=30.0, spool_path=str(fifo)
+    )
+    done = threading.Event()
+
+    def run() -> None:
+        for i in range(5):
+            exporter.submit(EventBuilder().build(f"e{i}"))
+        done.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    if not done.wait(5):
+        with contextlib.suppress(OSError):
+            os.close(os.open(fifo, os.O_RDONLY | os.O_NONBLOCK))
+        pytest.fail("submit blocked on a FIFO spool")
+    assert exporter.stats()["dropped"] > 0, "events the spool refused are counted"
+    exporter.close(0.5)
 
 
 def test_oversized_and_invalid_events() -> None:

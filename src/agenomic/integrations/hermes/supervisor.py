@@ -769,15 +769,36 @@ def _unchanged_at(root_fd: int, parts: Sequence[str], data: bytes) -> bool:  # p
             raise UnsafeSkillsPathError(f"{'/'.join(parts)} is a symbolic link")
         if not stat.S_ISREG(mode):
             raise UnsafeSkillsPathError(f"{'/'.join(parts)} is not a regular file")
-        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+        fd = _open_regular_at(parts[-1], dir_fd)
         with os.fdopen(fd, "rb") as fh:
-            if fh.read() != data:
+            if fh.read(len(data) + 1) != data:
                 return False
             if stat.S_IMODE(os.fstat(fh.fileno()).st_mode) != 0o644:
                 os.fchmod(fh.fileno(), 0o644)  # a wider mode set since the last sync
         return True
     finally:
         os.close(dir_fd)
+
+
+#: A manifest larger than this is treated as malformed rather than read into memory.
+_MANIFEST_MAX_BYTES = 16 * 1024 * 1024
+
+
+def _open_regular_at(name: str, dir_fd: int) -> int:  # pragma: posix-only
+    """Open ``name`` read only in ``dir_fd``, never through a symbolic link and never
+    blocking: a FIFO or device planted there is opened nonblocking, then refused with
+    :class:`UnsafeSkillsPathError` because ``fstat`` does not report a regular file."""
+    if sys.platform == "win32":
+        raise NotImplementedError("directory descriptors are POSIX only")
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=dir_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise UnsafeSkillsPathError(f"{name} is not a regular file")
+        os.set_blocking(fd, True)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def _managed_files(root: Path) -> set[str]:
@@ -846,9 +867,12 @@ def _previous_files_at(root_fd: int) -> set[str]:  # pragma: posix-only
     if sys.platform == "win32":
         raise NotImplementedError("directory descriptors are POSIX only")
     try:
-        fd = os.open(_MANIFEST, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+        fd = _open_regular_at(_MANIFEST, root_fd)
         with os.fdopen(fd, "rb") as fh:
-            raw = fh.read().decode("utf-8")
+            data = fh.read(_MANIFEST_MAX_BYTES + 1)
+        if len(data) > _MANIFEST_MAX_BYTES:
+            raise ValueError("skills manifest too large")
+        raw = data.decode("utf-8")
     except FileNotFoundError:
         return set()
     except (OSError, ValueError) as exc:

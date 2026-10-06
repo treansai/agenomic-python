@@ -44,6 +44,7 @@ import logging
 import math
 import os
 import re
+import stat
 import sys
 import tempfile
 import threading
@@ -419,6 +420,8 @@ def open_private(path: Path, flags: int) -> int:
     narrowed to ``0600`` too; a file owned by another user, or a symbolic link, is refused
     with ``PermissionError`` before anything is read or written through the descriptor
     (``O_TRUNC`` is not refused this way: add it only for a file nobody else can plant).
+    The path is opened nonblocking, so a FIFO or device planted there cannot stall the
+    caller; anything but a regular file is refused with ``PermissionError`` too.
     Windows has no POSIX modes: the file is opened as is.
 
     Example:
@@ -434,7 +437,9 @@ def open_private(path: Path, flags: int) -> int:
         'x'
     """
     try:
-        fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        fd = os.open(
+            path, flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), 0o600
+        )
     except OSError as e:
         # O_NOFOLLOW on a symbolic link fails with ELOOP (EMLINK on some BSDs).
         if e.errno in (errno.ELOOP, errno.EMLINK) and path.is_symlink():
@@ -444,6 +449,9 @@ def open_private(path: Path, flags: int) -> int:
         return fd
     try:
         st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise PermissionError(f"spool file {path.name} is not a regular file")
+        os.set_blocking(fd, True)
         if st.st_uid != os.geteuid():
             raise PermissionError(f"spool file {path.name} is owned by another user")
         if st.st_mode & 0o777 != 0o600:

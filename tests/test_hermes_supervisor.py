@@ -931,6 +931,48 @@ def test_corrupt_manifest_still_removes_unapproved_skills(tmp_path: Path, corrup
     assert json.loads((out / ".agenomic_manifest.json").read_text()) == {"files": ["a/SKILL.md"]}
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX only")
+def test_manifest_replaced_by_a_fifo_never_blocks_the_sync(tmp_path: Path) -> None:
+    import threading
+
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A"), _skill("b", "B")], out)
+    manifest = out / ".agenomic_manifest.json"
+    manifest.unlink()
+    os.mkfifo(manifest)
+    result: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            result["counts"] = sync_skills([_skill("a", "A")], out)
+        except Exception as exc:  # reported below
+            result["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(5)
+    if worker.is_alive():  # release the blocked reader before failing
+        with contextlib.suppress(OSError):
+            os.close(os.open(manifest, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(5)
+        pytest.fail("a FIFO in place of the manifest blocked the sync")
+    assert "error" not in result, result.get("error")
+    # Unreadable manifest: the whole directory is reconciled, b is no longer approved.
+    assert result["counts"]["removed"] == 1
+    assert not (out / "b" / "SKILL.md").exists()
+    assert json.loads(manifest.read_text()) == {"files": ["a/SKILL.md"]}
+
+
+def test_oversized_manifest_reconciles_the_whole_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A"), _skill("b", "B")], out)
+    monkeypatch.setattr(sup, "_MANIFEST_MAX_BYTES", 8)
+    assert sync_skills([_skill("a", "A")], out)["removed"] == 1
+    assert not (out / "b" / "SKILL.md").exists()
+
+
 def test_skill_named_like_the_manifest_is_rejected(tmp_path: Path) -> None:
     body = '{"files": []}'
     skill = {
