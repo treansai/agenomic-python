@@ -791,6 +791,42 @@ def test_cancel_subagent_applied_only_after_stop(
     assert server.acks[-1][1]["detail"]["observed"] == "subagent_stop"
 
 
+def test_cancel_subagent_applied_when_only_finalize_reports_the_end(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    monkeypatch.setattr(adapter, "_interrupt_subagent", lambda sid: True)
+    adapter.subagent_start(parent_session_id="p", child_session_id="c", child_subagent_id="sa-2")
+    adapter.on_session_start(session_id="c", platform="subagent")
+    adapter.handle_command(
+        {
+            "id": "k4",
+            "kind": "cancel",
+            "target_kind": "subagent",
+            "target_ref": "sa-2",
+            "status": "requested",
+        }
+    )
+    assert [b["status"] for _, b in server.acks] == ["received"]
+    # No subagent_stop and no interrupted turn end: only the final end reaches the plugin.
+    adapter.on_session_finalize(session_id="c", reason="exit")
+    assert [b["status"] for _, b in server.acks] == ["received", "applied"]
+    assert server.acks[-1][1]["detail"]["observed"] == "on_session_finalize"
+    ends = [(c.body["final"], c.body["status"]) for c in server.calls("/end")]
+    assert ends == [(True, "cancelled")], "the gateway sees a terminal cancelled session"
+    assert not adapter._cancel_subagents
+
+
+def test_finalize_without_a_pending_cancel_is_completed(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="s", platform="cli")
+    adapter.on_session_finalize(session_id="s", reason="exit")
+    assert [c.body["status"] for c in server.calls("/end")] == ["completed"]
+    assert server.acks == []
+
+
 def test_cancel_subagent_not_running_is_refused(
     server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1062,6 +1098,45 @@ def test_delegation_reservation_is_queued_only_after_the_action_is_allowed(
     runner.agent_loop("delegate_task", {"tasks": [{"goal": "b"}]}, sid="p", tcid="d2")
     assert len(server.calls("/delegations")) == 2
     assert len(adapter._delegations["p"]) == 1, "the allowed action queues its reservation"
+
+
+def test_concurrent_identical_delegations_each_reserve_for_their_own_children(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="p", platform="cli", model="m")
+    runner = Runner(adapter)
+    args: dict[str, Any] = {"tasks": [{"goal": "same"}]}
+    original = adapter.client.authorize
+    interleaved: list[str] = []
+
+    def authorize_then_interleave(sid: str, body: Any) -> Any:
+        answer = original(sid, body)
+        if body["tool_call_id"] == "d1" and not interleaved:
+            interleaved.append("d2")
+            # A second identical delegate_task (another tool_call_id) is decided and
+            # allowed while the first one has not settled yet.
+            runner.agent_loop("delegate_task", args, sid="p", tcid="d2")
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", authorize_then_interleave)
+    runner.agent_loop("delegate_task", args, sid="p", tcid="d1")
+    assert runner.executions == 2, "both invocations were allowed"
+    reserved = server.calls("/delegations")
+    assert [r.body["tool_call_id"] for r in reserved] == ["d1", "d2"], "one reservation each"
+    assert len(adapter._delegations["p"]) == 2
+    assert not adapter._provisional_delegations
+
+    for child in ("c1", "c2"):
+        adapter.subagent_start(parent_session_id="p", child_session_id=child)
+        adapter.on_session_start(session_id=child, platform="subagent", model="m")
+    admitted = {
+        r.body["hermes_session_id"]: r.body.get("delegation_id")
+        for r in server.calls("/v1/hermes/runtime/sessions")
+    }
+    assert admitted["c1"]
+    assert admitted["c2"]
+    assert admitted["c1"] != admitted["c2"], "each child consumes its own reservation"
 
 
 def test_cached_authorization_never_serves_another_session(

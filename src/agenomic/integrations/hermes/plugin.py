@@ -149,6 +149,22 @@ class _Pending:
 
 
 @dataclass
+class _Provisional:
+    """A delegation reservation waiting for its action to be allowed.
+
+    It belongs to one logical invocation at a time: ``claimed_by`` is the invocation
+    deciding it now. An identical invocation arriving meanwhile reserves its own instead
+    of sharing it, so every allowed ``delegate_task`` queues exactly one reservation.
+    Unclaimed, it waits for a retry of the same action (after an approval or a transport
+    error), which reuses it.
+    """
+
+    reservation: list[Any]
+    claimed_by: Optional[str] = None
+    settled: bool = False
+
+
+@dataclass
 class _Session:
     hermes_session_id: str
     platform: str = ""
@@ -367,7 +383,8 @@ class HermesAdapter:
         self._delegations: dict[str, deque[list[Any]]] = {}
         # Reservations wait here, per (session, tool, arguments hash), until the action
         # itself is allowed; a retry after an approval or a transport error reuses them.
-        self._provisional_delegations: dict[tuple[str, str, str], list[Any]] = {}
+        # One invocation at a time claims an entry (see ``_Provisional``).
+        self._provisional_delegations: dict[tuple[str, str, str], _Provisional] = {}
         # Keyed by (session, tool, tool_call_id): providers reuse call ids across sessions,
         # and an authorization must never serve another session's or tool's call.
         self._auth: OrderedDict[tuple[str, str, str], _Authorization] = OrderedDict()
@@ -955,7 +972,9 @@ class HermesAdapter:
     def _cancel_pending(self, sid: str) -> bool:
         with self._lock:
             session = self._sessions.get(sid)
-        subagent_id = session.subagent_id if session else None
+            subagent_id = (
+                session.subagent_id if session else self._children.get(sid, (None, None))[1]
+            )
         return sid in self._cancel_sessions or bool(
             subagent_id and subagent_id in self._cancel_subagents
         )
@@ -1148,12 +1167,21 @@ class HermesAdapter:
             self._emit("session.finalized", sid or None, reason=reason[:200] or None)
             if not sid:
                 return
-            self._end(sid, True, "completed", reason)
             with self._lock:
                 session = self._sessions.get(sid)
+                subagent_id = (
+                    session.subagent_id
+                    if session is not None
+                    else self._children.get(sid, (None, None))[1]
+                )
+            # A pending cancel (of the session or of its subagent) ends here: report it as
+            # cancelled, the terminal state the gateway checks before applying the command.
+            status = "cancelled" if self._cancel_pending(sid) else "completed"
+            self._end(sid, True, status, reason)
+            with self._lock:
                 if session is not None:
                     session.active = False
-            self._observe_terminal(sid, None, "on_session_finalize")
+            self._observe_terminal(sid, subagent_id, "on_session_finalize")
         except Exception as exc:
             logger.debug("on_session_finalize failed: %s", type(exc).__name__)
 
@@ -1528,13 +1556,84 @@ class HermesAdapter:
             return f"Agenomic denied delegate_task: {explanation or 'delegation limit'}", None
         raise HermesApiError("invalid_response", "delegation answer without a valid decision", 200)
 
-    def _settle_delegation(self, key: tuple[str, str, str], commit: bool) -> Optional[list[Any]]:
-        """Queue the provisional reservation for the child once the action is allowed."""
+    def _claim_delegation(
+        self,
+        *,
+        key: tuple[str, str, str],
+        claim: str,
+        sid: str,
+        tool: str,
+        args: Mapping[str, Any],
+        tool_call_id: str,
+        local_hash: str,
+        mode: LocalMode,
+    ) -> tuple[Optional[str], Optional[_Provisional]]:
+        """``(block, provisional)`` for this invocation of ``delegate_task``.
+
+        An unclaimed provisional entry (a retry of the same action) is claimed and reused;
+        otherwise this invocation reserves its own, so two concurrent identical
+        invocations never share one reservation.
+        """
         with self._lock:
-            reservation = self._provisional_delegations.pop(key, None)
-            if commit and reservation is not None:
-                self._delegations.setdefault(key[0], deque()).append(reservation)
-                return reservation
+            entry = self._provisional_delegations.get(key)
+            if entry is not None and entry.claimed_by in (None, claim):
+                entry.claimed_by = claim
+                return None, entry
+        denied, reservation = self._reserve_delegation(sid, args, tool_call_id)
+        if denied and mode == "shadow":
+            # Shadow never changes execution: the refused reservation is recorded.
+            self._emit_decision(
+                sid,
+                tool,
+                tool_call_id,
+                "deny",
+                denied,
+                local_hash,
+                extra={"local": True, "shadow": True},
+            )
+        elif denied:
+            self._emit_decision(sid, tool, tool_call_id, "deny", denied, local_hash)
+            return denied, None
+        if reservation is None:
+            return None, None
+        provisional = _Provisional(reservation, claimed_by=claim)
+        with self._lock:
+            # Published only when free: a retry of this action then finds and reuses it.
+            self._provisional_delegations.setdefault(key, provisional)
+        return None, provisional
+
+    def _release_delegation(
+        self, key: tuple[str, str, str], provisional: Optional[_Provisional]
+    ) -> None:
+        """This invocation stops deciding: an unsettled reservation waits for a retry."""
+        if provisional is None:
+            return
+        with self._lock:
+            if provisional.settled:
+                return
+            current = self._provisional_delegations.get(key)
+            if current is None:
+                self._provisional_delegations[key] = provisional
+            elif current is not provisional:
+                # Another invocation's reservation already waits for this action.
+                provisional.settled = True
+                return
+            provisional.claimed_by = None
+
+    def _settle_delegation(
+        self, key: tuple[str, str, str], provisional: Optional[_Provisional], commit: bool
+    ) -> Optional[list[Any]]:
+        """Queue this invocation's reservation for the child once the action is allowed,
+        or forget it; another invocation's reservation is never touched."""
+        if provisional is None:
+            return None
+        with self._lock:
+            provisional.settled = True
+            if self._provisional_delegations.get(key) is provisional:
+                del self._provisional_delegations[key]
+            if commit:
+                self._delegations.setdefault(key[0], deque()).append(provisional.reservation)
+                return provisional.reservation
             return None
 
     def _drop_delegation(self, auth: _Authorization) -> None:
@@ -1606,28 +1705,6 @@ class HermesAdapter:
         if unconfirmed is not None:
             return _Verdict(block=unconfirmed)
         key = (sid, tool, local_hash)
-        if tool == _DELEGATE_TOOL:
-            with self._lock:
-                reserved = key in self._provisional_delegations
-            if not reserved:
-                denied, reservation = self._reserve_delegation(sid, args, tool_call_id)
-                if denied and mode == "shadow":
-                    # Shadow never changes execution: the refused reservation is recorded.
-                    self._emit_decision(
-                        sid,
-                        tool,
-                        tool_call_id,
-                        "deny",
-                        denied,
-                        local_hash,
-                        extra={"local": True, "shadow": True},
-                    )
-                elif denied:
-                    self._emit_decision(sid, tool, tool_call_id, "deny", denied, local_hash)
-                    return _Verdict(block=denied)
-                if reservation is not None:
-                    with self._lock:
-                        self._provisional_delegations[key] = reservation
         claim = tool_call_id or f"hermes-{uuid.uuid4().hex}"
         with self._lock:
             # An approval required while enforcing stays for a later enforce; in shadow the
@@ -1651,7 +1728,23 @@ class HermesAdapter:
                 extra={"local": True, "approval_id": pending.approval_id},
             )
             return _Verdict(block=message)
+        provisional: Optional[_Provisional] = None
         try:
+            if tool == _DELEGATE_TOOL:
+                # After the approval claim: the invocation retrying under an approval is the
+                # one that reuses the reservation associated with it.
+                denied, provisional = self._claim_delegation(
+                    key=key,
+                    claim=claim,
+                    sid=sid,
+                    tool=tool,
+                    args=args,
+                    tool_call_id=tool_call_id,
+                    local_hash=local_hash,
+                    mode=mode,
+                )
+                if denied is not None:
+                    return _Verdict(block=denied)
             return self._authorize_claimed(
                 tool=tool,
                 args=args,
@@ -1663,8 +1756,10 @@ class HermesAdapter:
                 key=key,
                 pending=pending,
                 previous=previous,
+                provisional=provisional,
             )
         finally:
+            self._release_delegation(key, provisional)
             if pending is not None:
                 with self._lock:
                     # Still waiting (pending approval, transport error, observe): the next
@@ -1685,13 +1780,14 @@ class HermesAdapter:
         key: tuple[str, str, str],
         pending: Optional[_Pending],
         previous: Optional[_Authorization],
+        provisional: Optional[_Provisional],
     ) -> _Verdict:
         if pending is not None:
             gate, keep = self._approval_gate(pending)
             if gate is not None:
                 if not keep:
                     self._drop_pending(key, pending)
-                    self._settle_delegation(key, commit=False)
+                    self._settle_delegation(key, provisional, commit=False)
                 return _Verdict(block=gate)
             logical_call_id, attempt = pending.logical_call_id, pending.attempt
         else:
@@ -1726,7 +1822,7 @@ class HermesAdapter:
             )
         if decision == "observe" or effective_mode == "observe":
             self._effective_state = "observe"
-            self._settle_delegation(key, commit=False)
+            self._settle_delegation(key, provisional, commit=False)
             return _Verdict()
         if effective_mode == "shadow" and self._effective_state not in _ENFORCE_LIKE - {"enforce"}:
             self._effective_state = "shadow"
@@ -1755,7 +1851,7 @@ class HermesAdapter:
         shadow = effective_mode == "shadow"
         if decision == "deny" and not shadow:
             self._drop_pending(key, pending)
-            self._settle_delegation(key, commit=False)
+            self._settle_delegation(key, provisional, commit=False)
             return _Verdict(
                 block=f"Agenomic denied {tool}: {explanation or 'policy'} (decision {decision_id or 'unknown'})"
             )
@@ -1801,7 +1897,7 @@ class HermesAdapter:
                 self._emit_decision(
                     sid, tool, tool_call_id, "deny", local_block, local_hash, extra={"local": True}
                 )
-                self._settle_delegation(key, commit=False)
+                self._settle_delegation(key, provisional, commit=False)
                 return _Verdict(block=local_block)
         else:
             local_block = self._local_checks(tool, args)
@@ -1815,7 +1911,7 @@ class HermesAdapter:
                     local_hash,
                     extra={"local": True, "shadow": True},
                 )
-        auth.delegation = self._settle_delegation(key, commit=True)
+        auth.delegation = self._settle_delegation(key, provisional, commit=True)
         with self._lock:
             auth_key = (auth.session_id, auth.tool, auth.tool_call_id)
             self._auth[auth_key] = auth

@@ -203,7 +203,10 @@ skip the frame and execute: fail open); it returns
   the child's `on_session_start`), which is admitted with
   `parent_hermes_session_id`, `subagent_id` and `delegation_id`. A
   reservation is queued for children only once the action is allowed, and
-  dropped when Hermes blocks the call afterwards or it fails.
+  dropped when Hermes blocks the call afterwards or it fails. A reservation
+  belongs to one invocation: a retry of the same action (after an approval or
+  a transport error) reuses it, while a concurrent identical `delegate_task`
+  reserves its own, so every allowed call queues exactly one reservation.
 - Writes by `write_file`/`patch` into `$HERMES_HOME/skills`, `plugins`,
   `config.yaml`, `.env`, `/etc/hermes` or the profile's `protected_paths` are
   decided by the server and, in enforce, also denied locally.
@@ -271,13 +274,14 @@ side when they are made, so dropped events never change a decision.
 | --- | --- | --- |
 | `pause`, `revoke` (instance) | local status set, guard blocks; the server already denies | immediately (local state changed) |
 | `resume` | local status cleared | immediately |
-| `cancel` subagent | `tools.delegate_tool_registry.interrupt_subagent(id)` (cooperative) | `subagent_stop` is observed |
+| `cancel` subagent | `tools.delegate_tool_registry.interrupt_subagent(id)` (cooperative) | `subagent_stop`, `on_session_end` with `interrupted` or `on_session_finalize` of the child session is observed |
 | `cancel` session | further tool calls in that session are blocked; a subagent session is interrupted | `on_session_end` with `interrupted`, `subagent_stop` or `on_session_finalize` is observed |
 | `quarantine` | local status set; the process stop is the supervisor's | by the supervisor |
 
 A root session exposes no interrupt handle to plugins, so a cancel of a root
 session blocks its tools and waits for Hermes to end the session. An interrupted
-turn of a session with a pending cancel is reported to Agenomic as `cancelled`, a
+turn, or the final end (`on_session_finalize`), of a session with a pending
+cancel (of the session or of its subagent) is reported to Agenomic as `cancelled`, a
 terminal state: the gateway applies a cancel only once its session has ended in the
 control plane, never on the adapter's word alone. `refused` is
 sent for unknown commands, missing targets and subagents that are not running.
