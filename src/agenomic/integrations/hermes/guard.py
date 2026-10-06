@@ -36,6 +36,10 @@ if TYPE_CHECKING:  # the guard runs on every tool call; keep its imports minimal
 
 STATUS_SCHEMA = "agenomic.hermes.status/v1"
 DEFAULT_MAX_AGE_S = 120.0
+#: Smallest staleness deadline the guard accepts. The adapter refreshes the status file at
+#: least every ``max_age / 3`` seconds and never more often than every second, so a deadline
+#: below three seconds could not be honoured and would block healthy tool calls at random.
+MIN_MAX_AGE_S = 3.0
 BLOCK_EXIT = 2
 _MAX_STDIN = 4 * 1024 * 1024
 _BLOCKING_STATES = {"paused", "quarantined", "revoked"}
@@ -162,6 +166,12 @@ def main(
                 out,
                 "AGENOMIC_HERMES_GUARD_MAX_AGE_S is not a positive finite number; "
                 "the action was not executed.",
+            )
+        if max_age < MIN_MAX_AGE_S:
+            return _block(
+                out,
+                f"AGENOMIC_HERMES_GUARD_MAX_AGE_S is below the {MIN_MAX_AGE_S:g} s minimum "
+                "the adapter can keep fresh; the action was not executed.",
             )
         try:
             status = _read_status(status_path(env))

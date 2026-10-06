@@ -734,7 +734,8 @@ class Supervisor:
 
     def run(self) -> int:
         """Start Hermes and supervise until SIGTERM/SIGINT, or until the child ended when
-        restarts are disabled. Returns the child's exit code.
+        restarts are disabled. Returns the child's exit code, or 1 when supervision itself
+        failed; the child is stopped whenever the supervisor leaves this loop.
 
         Example:
             >>> _demo_supervisor(["true"]).run()  # doctest: +SKIP
@@ -744,15 +745,29 @@ class Supervisor:
         signal.signal(signal.SIGINT, self.request_stop)
         self.sync_skills()
         self.start_child()
-        while not self._stopping.is_set():
-            self.tick()
-            if not self.settings.restart and self.state in ("exited", "stopped"):
-                break
-            if self.gave_up:
-                break
-            self._stopping.wait(self.settings.interval_s)
-        code = self.stop_child()
-        self.heartbeat()
+        failed = False
+        try:
+            while not self._stopping.is_set():
+                self.tick()
+                if not self.settings.restart and self.state in ("exited", "stopped"):
+                    break
+                if self.gave_up:
+                    break
+                self._stopping.wait(self.settings.interval_s)
+        except Exception:
+            # The child runs in its own session, so nothing else would stop it: a supervisor
+            # that cannot supervise stops Hermes and exits with a failure.
+            logger.exception("supervision failed; stopping Hermes")
+            failed = True
+        finally:
+            code = self.stop_child()
+        try:
+            self.heartbeat()
+        except Exception:
+            logger.exception("final supervisor heartbeat failed")
+            failed = True
+        if failed:
+            return 1
         if code is None:
             return 1 if self.gave_up or self._launch_failed else 0
         return code

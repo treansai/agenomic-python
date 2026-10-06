@@ -272,8 +272,14 @@ exits) the plugin writes `loaded: false`, so the guard blocks at once instead
 of when the file goes stale. Upstream allows a `fail_closed` hook that exits
 non zero with an empty stdout, so every failure path, including internal
 errors, prints `{"action": "block", "message": ...}` and exits 2. Allowing
-prints nothing and exits 0. Shell hooks are registered by the Hermes CLI,
-gateway and TUI; a bare programmatic `AIAgent` does not register them.
+prints nothing and exits 0. `AGENOMIC_HERMES_GUARD_MAX_AGE_S` must be a
+finite number of at least 3 s (`MIN_MAX_AGE_S`): the plugin refreshes the
+status file every `min(heartbeat interval, max age / 3)` seconds and never
+more often than once a second, so a shorter deadline is refused and every tool
+call is blocked with a message naming the variable. Set the same value in the
+Hermes process so the plugin paces its refreshes to it. Shell hooks are
+registered by the Hermes CLI, gateway and TUI; a bare programmatic `AIAgent`
+does not register them.
 
 ## What is not covered
 

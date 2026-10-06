@@ -69,6 +69,7 @@ from agenomic.integrations.hermes.guard import (
     _SHARING_BACKOFF_S,
     _SHARING_RETRIES,
     DEFAULT_MAX_AGE_S,
+    MIN_MAX_AGE_S,
     STATUS_SCHEMA,
     status_path,
 )
@@ -334,7 +335,9 @@ class HermesAdapter:
         self._local_status: Optional[str] = None
         self._instance_id: Optional[str] = None
         self._profile: dict[str, Any] = {}
-        self._heartbeat_s = _DEFAULT_HEARTBEAT_S
+        # The heartbeat refreshes the guard status file, so even before the server sets an
+        # interval it runs within a third of the guard's staleness deadline.
+        self._heartbeat_s = min(_DEFAULT_HEARTBEAT_S, _guard_max_age_s() / 3)
         self._platform = ""
         self._identity = identity if identity is not None else _hermes_identity()
         self._contracts: dict[str, Any] = {
@@ -2231,7 +2234,9 @@ def _guard_max_age_s() -> float:
         value = DEFAULT_MAX_AGE_S
     if not math.isfinite(value) or value <= 0:
         value = DEFAULT_MAX_AGE_S
-    return max(value, 3.0)
+    # The guard refuses deadlines below MIN_MAX_AGE_S, so max_age / 3 never drops below the
+    # one second floor of the heartbeat interval.
+    return max(value, MIN_MAX_AGE_S)
 
 
 _ADAPTER: Optional[HermesAdapter] = None

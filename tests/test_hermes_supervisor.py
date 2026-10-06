@@ -472,3 +472,33 @@ def test_failed_supervisor_ack_is_retried(tmp_path: Path) -> None:
     api.commands = []
     s.tick()
     assert [(c, st) for c, st, _ in api.acks][-1] == ("q9", "applied")
+
+
+@posix_only
+def test_failed_tick_still_stops_the_child(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    settings = SupervisorSettings(
+        argv=[sys.executable, "-c", "import time; time.sleep(60)"],
+        hermes_home=tmp_path,
+        interval_s=0.01,
+    )
+    s = Supervisor(settings, FakeApi(), environ=PROCESS_ENV, connect=refuse)
+    monkeypatch.setattr(s, "sync_skills", lambda: None)
+    monkeypatch.setattr(sup.signal, "signal", lambda *_a: None)
+
+    def broken_tick() -> None:
+        raise OSError("skill write failed")
+
+    monkeypatch.setattr(s, "tick", broken_tick)
+    try:
+        code = s.run()
+    except OSError:
+        code = None
+    proc = s.proc
+    assert proc is not None
+    try:
+        assert proc.poll() is not None, "the child is stopped when supervision fails"
+        assert code == 1
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(10)

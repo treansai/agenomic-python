@@ -217,3 +217,23 @@ def test_free_form_fields_are_redacted_in_metadata_mode() -> None:
     text = json.dumps(event)
     for secret in ("sk-abcdefghijklmnop", "agmhr_abc123", '"plain"'):
         assert secret not in text
+
+
+def test_every_json_container_is_redacted() -> None:
+    from types import MappingProxyType
+
+    event = EventBuilder("redacted_preview").build(
+        "tool.call.requested",
+        extra={
+            "headers": ({"Authorization": "plainsecret"},),
+            "view": MappingProxyType({"api_key": "plainsecret"}),
+            "tags": frozenset({"sk-abcdefghijklmnop"}),
+        },
+        content={"input": ({"api_key": "plainsecret"},)},
+    )
+    assert event["extra"]["headers"] == [{"Authorization": "***"}]
+    assert event["extra"]["view"] == {"api_key": "***"}
+    assert event["extra"]["tags"] == ["***"]
+    text = json.dumps(event, default=str)
+    for secret in ("plainsecret", "sk-abcdefghijklmnop"):
+        assert secret not in text

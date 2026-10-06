@@ -995,6 +995,18 @@ def test_heartbeat_stays_within_the_guard_deadline(server: FakeAgenomic, tmp_pat
     assert adapter._heartbeat_s <= plugin_mod.DEFAULT_MAX_AGE_S / 3
 
 
+def test_heartbeat_before_hello_stays_within_a_short_guard_deadline(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Until the server sets an interval the default one must still refresh the status file
+    # within a third of the guard's deadline.
+    monkeypatch.setenv("AGENOMIC_HERMES_GUARD_MAX_AGE_S", "9")
+    adapter = make_adapter(server.url, tmp_path)
+    assert adapter._heartbeat_s <= 3.0
+    monkeypatch.setenv("AGENOMIC_HERMES_GUARD_MAX_AGE_S", "0.5")
+    assert plugin_mod._guard_max_age_s() / 3 >= 1.0, "the clamp matches the guard minimum"
+
+
 def test_failed_command_ack_is_retried(
     server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

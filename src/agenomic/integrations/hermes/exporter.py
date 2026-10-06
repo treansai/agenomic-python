@@ -39,10 +39,10 @@ import re
 import threading
 import time
 from collections import OrderedDict, deque
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence, Set
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Literal, Optional, cast
 
 import ulid
 from pydantic import JsonValue
@@ -99,29 +99,36 @@ def is_secret_key(key: str) -> bool:
     return normalized.endswith("token") or any(part in normalized for part in _SECRET_KEY_PARTS)
 
 
-def _redact_field(value: object) -> object:
-    """Mask credential-named keys and credential-shaped text in any event field."""
-    if isinstance(value, str):
-        return mask_text(value)
-    if isinstance(value, dict):
+def _is_container(value: object) -> bool:
+    """Whether ``json.dumps`` (with ``default=str``) would expand ``value`` into members."""
+    return isinstance(value, (Mapping, Set)) or (
+        isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+    )
+
+
+def _walk(value: object, leaf: Callable[[object], object]) -> object:
+    """Mask credential-named keys in every mapping, sequence or set; ``leaf`` maps the rest.
+
+    Every container becomes a ``dict`` or ``list``, so no tuple, custom mapping or set
+    reaches ``json.dumps`` with its members unredacted.
+    """
+    if isinstance(value, Mapping):
         return {
-            k: _MASK if isinstance(k, str) and is_secret_key(k) else _redact_field(v)
+            k: _MASK if isinstance(k, str) and is_secret_key(k) else _walk(v, leaf)
             for k, v in value.items()
         }
-    if isinstance(value, list):
-        return [_redact_field(item) for item in value]
-    return value
+    if _is_container(value):
+        return [_walk(item, leaf) for item in cast(Iterable[object], value)]
+    return leaf(value)
+
+
+def _redact_field(value: object) -> object:
+    """Mask credential-named keys and credential-shaped text in any event field."""
+    return _walk(value, lambda leaf: mask_text(leaf) if isinstance(leaf, str) else leaf)
 
 
 def _mask_secret_keys(value: object) -> object:
-    if isinstance(value, dict):
-        return {
-            k: _MASK if isinstance(k, str) and is_secret_key(k) else _mask_secret_keys(v)
-            for k, v in value.items()
-        }
-    if isinstance(value, list):
-        return [_mask_secret_keys(item) for item in value]
-    return value
+    return _walk(value, lambda leaf: leaf)
 
 
 CaptureMode = Literal["metadata", "redacted_preview"]
@@ -167,7 +174,7 @@ def redacted_preview(value: object, limit: int) -> str:
         >>> redacted_preview({"path": "/tmp/a", "api_key": "k"}, 200)
         '{"api_key":"***","path":"/tmp/a"}'
     """
-    if isinstance(value, (dict, list)):
+    if _is_container(value):
         try:
             redacted = _mask_secret_keys(value)
             text = json.dumps(redacted, sort_keys=True, separators=(",", ":"), default=str)

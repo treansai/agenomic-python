@@ -181,3 +181,12 @@ def test_status_read_gives_up_on_a_persistent_permission_error(
     monkeypatch.setattr(guard, "_SHARING_BACKOFF_S", 0.0)
     with pytest.raises(PermissionError):
         guard._read_status(tmp_path / "status.json")
+
+
+@pytest.mark.parametrize("value", ["0.5", "2.99"])
+def test_deadline_below_the_minimum_blocks(tmp_path: Path, value: str) -> None:
+    # The adapter refreshes at most once a second and within a third of the deadline, so a
+    # deadline below MIN_MAX_AGE_S would make a healthy adapter look stale between updates.
+    fresh = {"loaded": True, "instance_status": "active", "updated_at": iso()}
+    assert_block(*run(tmp_path, fresh, AGENOMIC_HERMES_GUARD_MAX_AGE_S=value), "minimum")
+    assert run(tmp_path, fresh, AGENOMIC_HERMES_GUARD_MAX_AGE_S="3")[0] == 0
