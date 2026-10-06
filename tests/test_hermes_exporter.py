@@ -566,3 +566,20 @@ def test_acknowledged_replay_is_removed_and_concurrent_appends_survive(tmp_path:
     remaining = [json.loads(line) for line in spool.read_text().splitlines()]
     assert [e["event_id"] for e in remaining] == [late["event_id"]]
     exporter.close(0.2)
+
+
+@posix_only
+def test_spool_rewrite_ignores_a_link_planted_at_the_old_temporary_name(tmp_path: Path) -> None:
+    from agenomic.integrations.hermes.exporter import _Spool
+
+    spool = _Spool(tmp_path / "spool.jsonl", 1 << 20)
+    spool.append([EventBuilder().build("a"), EventBuilder().build("b")])
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious")
+    (tmp_path / "spool.jsonl.tmp").symlink_to(victim)
+    lines, _ = spool.head(1)
+    spool.remove(lines)
+    assert not spool.refused
+    assert victim.read_text() == "precious"
+    assert len(spool.path.read_text().splitlines()) == 1
+    assert oct(spool.path.stat().st_mode & 0o777) == "0o600"

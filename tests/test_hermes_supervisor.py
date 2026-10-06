@@ -739,3 +739,77 @@ def test_unchanged_skill_with_a_wider_mode_is_narrowed(tmp_path: Path) -> None:
     os.chmod(path, 0o666)
     assert sync_skills([_skill("a", "A")], tmp_path)["unchanged"] == 1
     assert oct(path.stat().st_mode & 0o777) == "0o644"
+
+
+# ---------------------------------------------------------------- planted links
+
+
+@posix_only
+@pytest.mark.parametrize("name", ["SKILL.md", ".agenomic_manifest.json"])
+def test_link_planted_at_the_old_temporary_name_is_never_followed(
+    tmp_path: Path, name: str
+) -> None:
+    out = tmp_path / "skills"
+    (out / "a").mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious")
+    folder = out / "a" if name == "SKILL.md" else out
+    # The temporary name the supervisor used to derive from its pid alone.
+    (folder / f".{name}.{os.getpid()}.tmp").symlink_to(victim)
+    assert sync_skills([_skill("a", "A")], out)["written"] == 1
+    assert victim.read_text() == "precious", "the planted link's target is untouched"
+    assert (out / "a" / "SKILL.md").read_text() == "A"
+    assert json.loads((out / ".agenomic_manifest.json").read_text()) == {"files": ["a/SKILL.md"]}
+
+
+@posix_only
+@pytest.mark.parametrize("link", ["file", "directory"])
+def test_skill_destination_through_a_symlink_is_not_followed(tmp_path: Path, link: str) -> None:
+    out = tmp_path / "skills"
+    out.mkdir()
+    victim_dir = out / "other"
+    victim_dir.mkdir()
+    victim = victim_dir / "SKILL.md"
+    victim.write_text("precious")
+    if link == "file":
+        (out / "a").mkdir()
+        (out / "a" / "SKILL.md").symlink_to(victim)
+    else:
+        (out / "a").symlink_to(victim_dir)
+    counts = sync_skills([_skill("a", "A")], out)
+    assert counts["written"] == 0
+    assert counts["rejected"] == 1
+    assert victim.read_text() == "precious"
+    assert (out / "a" / "SKILL.md").is_symlink() or (out / "a").is_symlink()
+
+
+@posix_only
+def test_symlinked_skills_dir_is_refused_and_reported(tmp_path: Path) -> None:
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    api = FakeApi()
+    api.skills = [_skill("a", "A")]
+    s = make_supervisor(tmp_path, api, SLEEPER)
+    assert s.settings.skills_dir is not None
+    s.settings.skills_dir.symlink_to(real)
+    assert s.sync_skills() == {"written": 0, "unchanged": 0, "removed": 0, "rejected": 1}
+    assert list(real.iterdir()) == []
+    assert s.isolation()["skills_readonly"] is False
+
+
+@posix_only
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() != 0, reason="needs chown")
+def test_skills_dir_owned_by_another_user_is_refused(tmp_path: Path) -> None:
+    out = tmp_path / "skills"
+    out.mkdir()
+    os.chown(out, 65534, 65534)
+    assert sync_skills([_skill("a", "A")], out)["rejected"] == 1
+    assert list(out.iterdir()) == []
+    # A subdirectory planted by another user is refused too, file by file.
+    os.chown(out, 0, 0)
+    (out / "a").mkdir()
+    os.chown(out / "a", 65534, 65534)
+    counts = sync_skills([_skill("a", "A"), _skill("b", "B")], out)
+    assert counts == {"written": 1, "unchanged": 0, "removed": 0, "rejected": 1}
+    assert not (out / "a" / "SKILL.md").exists()
+    assert (out / "b" / "SKILL.md").read_text() == "B"

@@ -62,8 +62,8 @@ from agenomic.integrations.hermes.exporter import (
     EventBuilder,
     EventExporter,
     content_hash,
+    create_private_temp,
     now_iso,
-    open_private,
     redacted_preview,
 )
 from agenomic.integrations.hermes.guard import (
@@ -115,6 +115,8 @@ APPROVAL_IN_USE_MESSAGE = (
 NO_AUTH_MESSAGE = "Agenomic: no valid authorization for this action"
 #: Reason recorded when a call's arguments have no canonical form (``agenomic.canon/v1``).
 NOT_CANONICAL_REASON = "arguments_not_canonical"
+#: Reason recorded when a tool call is blocked because a cancel of its session or subagent is pending.
+CANCEL_PENDING_REASON = "cancel_pending"
 
 
 @dataclass
@@ -162,6 +164,10 @@ class _Provisional:
     reservation: list[Any]
     claimed_by: Optional[str] = None
     settled: bool = False
+    # Where it waits: (session, tool, arguments hash, approval id or ""). A reservation made
+    # by an invocation that then required approval follows that approval, so the retry
+    # resumed under it (and no other identical invocation) reuses it.
+    slot: tuple[str, str, str, str] = ("", "", "", "")
 
 
 @dataclass
@@ -289,11 +295,16 @@ def write_status(
     if error:
         doc["error"] = error
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    # A temporary file left by an earlier crash keeps its mode on reopen; it is narrowed.
-    fd = open_private(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(doc, fh)
+    # Unpredictable name, created exclusively with mode 0600: a file or link planted in
+    # the directory is never truncated or followed.
+    tmp, fd = create_private_temp(path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
     # On Windows the replace fails while a reader (the guard) has the file open; retry
     # briefly so a concurrent read never costs a heartbeat's status update.
     for attempt in range(_SHARING_RETRIES):
@@ -381,14 +392,17 @@ class HermesAdapter:
         self._agenomic_sessions: dict[str, str] = {}
         self._children: dict[str, tuple[str, Optional[str]]] = {}
         self._delegations: dict[str, deque[list[Any]]] = {}
-        # Reservations wait here, per (session, tool, arguments hash), until the action
-        # itself is allowed; a retry after an approval or a transport error reuses them.
+        # Reservations wait here, per (session, tool, arguments hash, approval id or ""),
+        # until the action itself is allowed; a retry after an approval (of that approval)
+        # or a transport error reuses them.
         # One invocation at a time claims an entry (see ``_Provisional``).
-        self._provisional_delegations: dict[tuple[str, str, str], _Provisional] = {}
+        self._provisional_delegations: dict[tuple[str, str, str, str], _Provisional] = {}
         # Keyed by (session, tool, tool_call_id): providers reuse call ids across sessions,
         # and an authorization must never serve another session's or tool's call.
         self._auth: OrderedDict[tuple[str, str, str], _Authorization] = OrderedDict()
-        self._pending: dict[tuple[str, str, str], _Pending] = {}
+        # Every approval issued for an identical action, in issue order: concurrent identical
+        # calls can each get their own approval, and each keeps its own identity.
+        self._pending: dict[tuple[str, str, str], list[_Pending]] = {}
         self._post_status: OrderedDict[tuple[str, str, str], str] = OrderedDict()
         # Calls whose arguments had no canonical form and were already recorded, so the
         # second gate of the same call does not record it again.
@@ -970,14 +984,23 @@ class HermesAdapter:
         # the command is applied once Hermes reports the session's end.
 
     def _cancel_pending(self, sid: str) -> bool:
+        return self._cancel_kind(sid) is not None
+
+    def _cancel_kind(self, sid: str) -> Optional[str]:
+        """``"session"`` or ``"subagent"`` when a cancel of this session (or of the subagent
+        it runs as) is waiting for Hermes to report its end; ``None`` otherwise."""
+        if not sid:
+            return None
         with self._lock:
             session = self._sessions.get(sid)
             subagent_id = (
                 session.subagent_id if session else self._children.get(sid, (None, None))[1]
             )
-        return sid in self._cancel_sessions or bool(
-            subagent_id and subagent_id in self._cancel_subagents
-        )
+        if sid in self._cancel_sessions:
+            return "session"
+        if subagent_id and subagent_id in self._cancel_subagents:
+            return "subagent"
+        return None
 
     def _observe_terminal(self, sid: str, subagent_id: Optional[str], how: str) -> None:
         command_id = self._cancel_sessions.pop(sid, None) if sid else None
@@ -1559,7 +1582,7 @@ class HermesAdapter:
     def _claim_delegation(
         self,
         *,
-        key: tuple[str, str, str],
+        slot: tuple[str, str, str, str],
         claim: str,
         sid: str,
         tool: str,
@@ -1570,12 +1593,12 @@ class HermesAdapter:
     ) -> tuple[Optional[str], Optional[_Provisional]]:
         """``(block, provisional)`` for this invocation of ``delegate_task``.
 
-        An unclaimed provisional entry (a retry of the same action) is claimed and reused;
-        otherwise this invocation reserves its own, so two concurrent identical
-        invocations never share one reservation.
+        An unclaimed provisional entry waiting in ``slot`` (a retry of the same action, or
+        of the same approval) is claimed and reused; otherwise this invocation reserves its
+        own, so two concurrent identical invocations never share one reservation.
         """
         with self._lock:
-            entry = self._provisional_delegations.get(key)
+            entry = self._provisional_delegations.get(slot)
             if entry is not None and entry.claimed_by in (None, claim):
                 entry.claimed_by = claim
                 return None, entry
@@ -1596,21 +1619,35 @@ class HermesAdapter:
             return denied, None
         if reservation is None:
             return None, None
-        provisional = _Provisional(reservation, claimed_by=claim)
+        provisional = _Provisional(reservation, claimed_by=claim, slot=slot)
         with self._lock:
             # Published only when free: a retry of this action then finds and reuses it.
-            self._provisional_delegations.setdefault(key, provisional)
+            self._provisional_delegations.setdefault(slot, provisional)
         return None, provisional
 
-    def _release_delegation(
-        self, key: tuple[str, str, str], provisional: Optional[_Provisional]
-    ) -> None:
+    def _rebind_delegation(self, provisional: Optional[_Provisional], approval_id: str) -> None:
+        """The action of this reservation now waits for ``approval_id``: the reservation
+        moves with it, so the retry resumed under that approval is the one reusing it."""
+        if provisional is None or provisional.settled:
+            return
+        sid, tool, local_hash, _ = provisional.slot
+        target = (sid, tool, local_hash, approval_id)
+        with self._lock:
+            if self._provisional_delegations.get(provisional.slot) is provisional:
+                del self._provisional_delegations[provisional.slot]
+            provisional.slot = target
+            if self._provisional_delegations.setdefault(target, provisional) is not provisional:
+                # That approval already has its reservation: this one is forgotten.
+                provisional.settled = True
+
+    def _release_delegation(self, provisional: Optional[_Provisional]) -> None:
         """This invocation stops deciding: an unsettled reservation waits for a retry."""
         if provisional is None:
             return
         with self._lock:
             if provisional.settled:
                 return
+            key = provisional.slot
             current = self._provisional_delegations.get(key)
             if current is None:
                 self._provisional_delegations[key] = provisional
@@ -1621,7 +1658,7 @@ class HermesAdapter:
             provisional.claimed_by = None
 
     def _settle_delegation(
-        self, key: tuple[str, str, str], provisional: Optional[_Provisional], commit: bool
+        self, provisional: Optional[_Provisional], commit: bool
     ) -> Optional[list[Any]]:
         """Queue this invocation's reservation for the child once the action is allowed,
         or forget it; another invocation's reservation is never touched."""
@@ -1629,6 +1666,7 @@ class HermesAdapter:
             return None
         with self._lock:
             provisional.settled = True
+            key = provisional.slot
             if self._provisional_delegations.get(key) is provisional:
                 del self._provisional_delegations[key]
             if commit:
@@ -1653,8 +1691,100 @@ class HermesAdapter:
         if pending is None:
             return
         with self._lock:
-            if self._pending.get(key) is pending:
+            entries = self._pending.get(key)
+            if entries is None:
+                return
+            for i, entry in enumerate(entries):
+                if entry is pending:
+                    del entries[i]
+                    break
+            if not entries:
                 del self._pending[key]
+
+    def _forget_approval(self, key: tuple[str, str, str], pending: _Pending) -> None:
+        """A rejected or expired approval: its identity and the reservation waiting for it
+        are both forgotten."""
+        self._drop_pending(key, pending)
+        with self._lock:
+            provisional = self._provisional_delegations.get((*key, pending.approval_id))
+            if provisional is None or provisional.claimed_by is not None:
+                return
+        self._settle_delegation(provisional, commit=False)
+
+    def _unclaim(self, pending: _Pending, claim: str) -> None:
+        with self._lock:
+            if pending.claimed_by == claim:
+                pending.claimed_by = None
+
+    def _select_pending(
+        self,
+        *,
+        key: tuple[str, str, str],
+        claim: str,
+        sid: str,
+        tool: str,
+        tool_call_id: str,
+        local_hash: str,
+    ) -> tuple[Optional[_Pending], Optional[str]]:
+        """``(pending, block)``: the approval this invocation retries under, if any.
+
+        Every unclaimed approval issued for this action is tried in issue order: the first
+        one granted (or whose status cannot be read; the gateway then decides) is claimed
+        and returned. A still pending one is released and the next one tried; a rejected or
+        expired one is forgotten. Identities are never merged: the invocation resumes the
+        identity of the one approval it claimed. With no approval at all the action is
+        asked afresh; when none can be used the call is blocked, preferring the message of
+        an approval still pending, then that of one refused, then "in use".
+        """
+        tried: set[int] = set()
+        waiting: Optional[str] = None
+        refused: Optional[str] = None
+        in_use: Optional[_Pending] = None
+        while True:
+            candidate: Optional[_Pending] = None
+            with self._lock:
+                for entry in self._pending.get(key, ()):
+                    if id(entry) in tried:
+                        continue
+                    if entry.claimed_by in (None, claim):
+                        entry.claimed_by = claim
+                        candidate = entry
+                        break
+                    if in_use is None:
+                        in_use = entry
+            if candidate is None:
+                break
+            tried.add(id(candidate))
+            try:
+                gate, keep = self._approval_gate(candidate)
+            except BaseException:
+                self._unclaim(candidate, claim)
+                raise
+            if gate is None:
+                return candidate, None
+            self._unclaim(candidate, claim)
+            if keep:
+                waiting = waiting or gate
+            else:
+                self._forget_approval(key, candidate)
+                refused = refused or gate
+        if waiting or refused:
+            return None, waiting or refused
+        if in_use is not None:
+            # Another invocation is retrying under this approval right now; it is the one
+            # the approval authorizes. This one is not resumed under the same identity.
+            message = APPROVAL_IN_USE_MESSAGE.format(approval_id=in_use.approval_id)
+            self._emit_decision(
+                sid,
+                tool,
+                tool_call_id,
+                "require_approval",
+                message,
+                local_hash,
+                extra={"local": True, "approval_id": in_use.approval_id},
+            )
+            return None, message
+        return None, None
 
     def _approval_gate(self, pending: _Pending) -> tuple[Optional[str], bool]:
         """Before a controlled retry: ``(block, keep_identity)``.
@@ -1707,34 +1837,28 @@ class HermesAdapter:
         key = (sid, tool, local_hash)
         claim = tool_call_id or f"hermes-{uuid.uuid4().hex}"
         with self._lock:
+            previous = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None
+        pending: Optional[_Pending] = None
+        if mode != "shadow":
             # An approval required while enforcing stays for a later enforce; in shadow the
             # call is asked afresh, so a pending or refused approval never blocks it.
-            pending = self._pending.get(key) if mode != "shadow" else None
-            previous = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None
-            in_use = pending is not None and pending.claimed_by not in (None, claim)
-            if pending is not None and not in_use:
-                pending.claimed_by = claim
-        if pending is not None and in_use:
-            # Another invocation is retrying under this approval right now; it is the one
-            # the approval authorizes. This one is not resumed under the same identity.
-            message = APPROVAL_IN_USE_MESSAGE.format(approval_id=pending.approval_id)
-            self._emit_decision(
-                sid,
-                tool,
-                tool_call_id,
-                "require_approval",
-                message,
-                local_hash,
-                extra={"local": True, "approval_id": pending.approval_id},
+            pending, block = self._select_pending(
+                key=key,
+                claim=claim,
+                sid=sid,
+                tool=tool,
+                tool_call_id=tool_call_id,
+                local_hash=local_hash,
             )
-            return _Verdict(block=message)
+            if block is not None:
+                return _Verdict(block=block)
         provisional: Optional[_Provisional] = None
         try:
             if tool == _DELEGATE_TOOL:
                 # After the approval claim: the invocation retrying under an approval is the
-                # one that reuses the reservation associated with it.
+                # one that reuses the reservation associated with that approval.
                 denied, provisional = self._claim_delegation(
-                    key=key,
+                    slot=(*key, pending.approval_id if pending is not None else ""),
                     claim=claim,
                     sid=sid,
                     tool=tool,
@@ -1759,13 +1883,11 @@ class HermesAdapter:
                 provisional=provisional,
             )
         finally:
-            self._release_delegation(key, provisional)
+            self._release_delegation(provisional)
             if pending is not None:
-                with self._lock:
-                    # Still waiting (pending approval, transport error, observe): the next
-                    # retry may claim it. An allowed or denied call already removed it.
-                    if pending.claimed_by == claim:
-                        pending.claimed_by = None
+                # Still waiting (pending approval, transport error, observe): the next
+                # retry may claim it. An allowed or denied call already removed it.
+                self._unclaim(pending, claim)
 
     def _authorize_claimed(
         self,
@@ -1783,12 +1905,7 @@ class HermesAdapter:
         provisional: Optional[_Provisional],
     ) -> _Verdict:
         if pending is not None:
-            gate, keep = self._approval_gate(pending)
-            if gate is not None:
-                if not keep:
-                    self._drop_pending(key, pending)
-                    self._settle_delegation(key, provisional, commit=False)
-                return _Verdict(block=gate)
+            # Granted (checked by ``_select_pending``): resume that approval's identity.
             logical_call_id, attempt = pending.logical_call_id, pending.attempt
         else:
             logical_call_id = tool_call_id or f"hermes-{uuid.uuid4().hex}"
@@ -1822,7 +1939,7 @@ class HermesAdapter:
             )
         if decision == "observe" or effective_mode == "observe":
             self._effective_state = "observe"
-            self._settle_delegation(key, provisional, commit=False)
+            self._settle_delegation(provisional, commit=False)
             return _Verdict()
         if effective_mode == "shadow" and self._effective_state not in _ENFORCE_LIKE - {"enforce"}:
             self._effective_state = "shadow"
@@ -1851,7 +1968,7 @@ class HermesAdapter:
         shadow = effective_mode == "shadow"
         if decision == "deny" and not shadow:
             self._drop_pending(key, pending)
-            self._settle_delegation(key, provisional, commit=False)
+            self._settle_delegation(provisional, commit=False)
             return _Verdict(
                 block=f"Agenomic denied {tool}: {explanation or 'policy'} (decision {decision_id or 'unknown'})"
             )
@@ -1861,15 +1978,21 @@ class HermesAdapter:
                 raise HermesApiError(
                     "invalid_response", "require_approval without approval_id", status
                 )
+            issued = _Pending(
+                _str(resp.get("logical_call_id")) or logical_call_id,
+                int(cast(Any, resp.get("attempt")) or attempt),
+                approval_id,
+            )
             with self._lock:
-                current = self._pending.get(key)
-                # Never replace an approval another invocation is bound to.
-                if current is None or current is pending:
-                    self._pending[key] = _Pending(
-                        _str(resp.get("logical_call_id")) or logical_call_id,
-                        int(cast(Any, resp.get("attempt")) or attempt),
-                        approval_id,
-                    )
+                entries = self._pending.setdefault(key, [])
+                # Every concurrently issued approval keeps its own identity; the entry this
+                # invocation retried under is replaced in place, never another one.
+                if pending is not None and any(e is pending for e in entries):
+                    entries[next(i for i, e in enumerate(entries) if e is pending)] = issued
+                elif not any(e.approval_id == approval_id for e in entries):
+                    entries.append(issued)
+            # A reservation of this action waits for this approval's retry.
+            self._rebind_delegation(provisional, approval_id)
             return _Verdict(block=APPROVAL_MESSAGE.format(approval_id=approval_id))
         permit = resp.get("permit")
         record_id = _str(resp.get("record_id")) or None
@@ -1897,7 +2020,7 @@ class HermesAdapter:
                 self._emit_decision(
                     sid, tool, tool_call_id, "deny", local_block, local_hash, extra={"local": True}
                 )
-                self._settle_delegation(key, provisional, commit=False)
+                self._settle_delegation(provisional, commit=False)
                 return _Verdict(block=local_block)
         else:
             local_block = self._local_checks(tool, args)
@@ -1911,7 +2034,7 @@ class HermesAdapter:
                     local_hash,
                     extra={"local": True, "shadow": True},
                 )
-        auth.delegation = self._settle_delegation(key, provisional, commit=True)
+        auth.delegation = self._settle_delegation(provisional, commit=True)
         with self._lock:
             auth_key = (auth.session_id, auth.tool, auth.tool_call_id)
             self._auth[auth_key] = auth
@@ -2039,10 +2162,30 @@ class HermesAdapter:
             return None
         return f"Agenomic: arguments of {tool} have no canonical form; the action was not executed."
 
-    def _blocked_session(self, sid: str) -> Optional[str]:
-        if sid and sid in self._cancel_sessions:
-            return "Agenomic cancelled this session; the action was not executed."
-        return None
+    def _blocked_session(
+        self, sid: str, tool: str, tool_call_id: str, args: Mapping[str, object]
+    ) -> Optional[str]:
+        """A pending cancel of this session or of its subagent blocks in every mode (the
+        interrupt is asynchronous: a tool call racing with it must not run). The block is
+        recorded as a local ``tool.call.decision``."""
+        kind = self._cancel_kind(sid)
+        if kind is None:
+            return None
+        message = f"Agenomic cancelled this {kind}; the action was not executed."
+        self._emit_decision(
+            sid,
+            tool,
+            tool_call_id,
+            "deny",
+            message,
+            content_hash(args),
+            extra={
+                "local": True,
+                "local_mode": self.local_mode(),
+                "reason_codes": [CANCEL_PENDING_REASON],
+            },
+        )
+        return message
 
     def pre_tool_call(self, **kwargs: object) -> Optional[dict[str, str]]:
         """Authorization gate. ``None`` lets Hermes proceed; a block directive vetoes the call.
@@ -2059,7 +2202,7 @@ class HermesAdapter:
             self._ensure_started()
             raw_args = kwargs.get("args")
             args: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
-            cancelled = self._blocked_session(sid)
+            cancelled = self._blocked_session(sid, tool, tool_call_id, args)
             if cancelled:
                 return _block(cancelled)
             try:
@@ -2135,7 +2278,7 @@ class HermesAdapter:
         args: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
         self._ensure_started()
         meta = {"tool": tool, "sid": sid, "tool_call_id": tool_call_id, "args": args}
-        cancelled = self._blocked_session(sid)
+        cancelled = self._blocked_session(sid, tool, tool_call_id, args)
         if cancelled:
             return _ExecutionPlan(False, error=cancelled, meta=meta)
         if self.local_mode() == "observe":

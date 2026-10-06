@@ -140,9 +140,11 @@ The server computes the effective state on every admission and returns it in
 | unknown (no answer yet) | treated as enforce: no valid decision, no execution |
 
 Two local reasons block in every mode, shadow and observe included, because
-they are operator commands rather than policy decisions: a `cancel` of the
-session, and a local `pause`, `quarantine` or `revoke` status (it makes the
-adapter treat the instance as enforce until `resume`).
+they are operator commands rather than policy decisions: a pending `cancel` of
+the session or of the subagent it runs as, and a local `pause`, `quarantine` or
+`revoke` status (it makes the adapter treat the instance as enforce until
+`resume`). A call blocked by a pending cancel is recorded as a local
+`tool.call.decision` (`deny`, reason code `cancel_pending`).
 
 ## How a tool call is controlled
 
@@ -173,6 +175,14 @@ skip the frame and execute: fail open); it returns
   `GET /approvals/:id`: still pending blocks again, rejected or expired blocks
   and forgets the identity, approved retries `authorize` with the original
   identity so the gateway resumes and consumes the approval.
+- Identical calls that reach the gateway concurrently can each be issued their
+  own approval. Every one is kept with its own identity, in issue order; a
+  retry tries the unclaimed ones in that order, skips those still pending
+  (and forgets rejected or expired ones), and resumes the identity of the
+  first one granted, never a merge of two. Using or refusing one approval
+  removes only that one; the others keep waiting for their own retry. When
+  none is granted the call is blocked with the `still pending` message of the
+  first one still waiting.
 - A retry always arrives with a new `tool_call_id` (the model emits a new tool
   call; Hermes v2026.9.24 never reissues the blocked one), so a retry cannot be
   told apart from another identical call: every call with the same session,
@@ -206,7 +216,10 @@ skip the frame and execute: fail open); it returns
   dropped when Hermes blocks the call afterwards or it fails. A reservation
   belongs to one invocation: a retry of the same action (after an approval or
   a transport error) reuses it, while a concurrent identical `delegate_task`
-  reserves its own, so every allowed call queues exactly one reservation.
+  reserves its own, so every allowed call queues exactly one reservation. A
+  reservation made by a call that then required approval follows that
+  approval: the retry resumed under it reuses it, and a rejected or expired
+  approval drops it.
 - Writes by `write_file`/`patch` into `$HERMES_HOME/skills`, `plugins`,
   `config.yaml`, `.env`, `/etc/hermes` or the profile's `protected_paths` are
   decided by the server and, in enforce, also denied locally.
@@ -251,7 +264,9 @@ creates for it is `0700`. Every open of the spool, reads included, uses
 `O_NOFOLLOW` and an owner check: a spool that is a symbolic link or belongs to
 another user is never read, written, truncated or replaced; the exporter logs
 an error and stops spooling for its lifetime (overflow is then dropped and
-counted). The spool is
+counted). The spool (like the status file below) is rewritten through a new
+temporary file with an unpredictable name, created exclusively with mode
+`0600`, so nothing planted next to it is opened or followed. The spool is
 replayed one batch at a time when the buffer is idle and, under continuous
 load, after every 10 live batches or once per `flush_interval_s`. A replayed
 record must have the `agenomic.hermes.event/v1` shape (schema, string
@@ -274,7 +289,7 @@ side when they are made, so dropped events never change a decision.
 | --- | --- | --- |
 | `pause`, `revoke` (instance) | local status set, guard blocks; the server already denies | immediately (local state changed) |
 | `resume` | local status cleared | immediately |
-| `cancel` subagent | `tools.delegate_tool_registry.interrupt_subagent(id)` (cooperative) | `subagent_stop`, `on_session_end` with `interrupted` or `on_session_finalize` of the child session is observed |
+| `cancel` subagent | `tools.delegate_tool_registry.interrupt_subagent(id)` (cooperative); until the end is observed, further tool calls of the child session are blocked in every mode (the interrupt is asynchronous) | `subagent_stop`, `on_session_end` with `interrupted` or `on_session_finalize` of the child session is observed |
 | `cancel` session | further tool calls in that session are blocked; a subagent session is interrupted | `on_session_end` with `interrupted`, `subagent_stop` or `on_session_finalize` is observed |
 | `quarantine` | local status set; the process stop is the supervisor's | by the supervisor |
 
@@ -313,8 +328,9 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   isolation self check: `provider_secrets_absent` (child environment),
   `egress_restricted` (true only if a TCP connect to every `--forbidden-host`
   fails), `config_readonly` and `skills_readonly` (mode bits and ownership of
-  the files and their directories for the child uid, read only mounts),
-  `docker_socket_absent`, `runs_as_non_root`. The checks run from the
+  the files and their directories for the child uid, read only mounts;
+  `skills_readonly` is also false when the supervisor refuses `--skills-dir`,
+  see below), `docker_socket_absent`, `runs_as_non_root`. The checks run from the
   supervisor's own network namespace and filesystem view, which is the
   child's when both run in the same container.
 - `quarantine` and `revoke`: SIGTERM to the child's process group, SIGKILL
@@ -326,7 +342,15 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   approved are removed. Skill files and the manifest of written files
   (`.agenomic_manifest.json`) are replaced atomically (temporary file, `fsync`,
   rename), and new files are added to the manifest before they are written,
-  so an interrupted sync never forgets a file. When the manifest is
+  so an interrupted sync never forgets a file. The temporary file has an
+  unpredictable name and is created exclusively (`O_EXCL`, `O_NOFOLLOW`, mode
+  `0600` until complete); on POSIX every step is relative to a descriptor of
+  the parent directory opened without following a link, which must belong to
+  the supervisor's uid. Symbolic links are never followed: a skills directory
+  that is a link or belongs to another user is refused as a whole (logged as
+  an error, nothing written, `skills_readonly` false), a skill whose path
+  goes through a link (the file or a directory) is rejected, and a stale file
+  behind a link is left alone. When the manifest is
   unreadable or malformed anyway, the sync logs an error and removes every
   regular file of the directory that is not approved now: the directory
   belongs to the supervisor, and only approved skills may stay there. Mount

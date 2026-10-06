@@ -1525,3 +1525,171 @@ def test_status_file_is_owner_only_even_over_a_leftover_temporary(tmp_path: Path
     os.chmod(leftover, 0o666)
     plugin_mod.write_status(path, loaded=True, instance_status="active", effective_state="observe")
     assert oct(path.stat().st_mode & 0o777) == "0o600"
+
+
+# ---------------------------------------------------------------- subagent cancel races
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+@pytest.mark.parametrize("state", ["observe", "shadow", "enforce"])
+@pytest.mark.parametrize("known", ["session", "link_only"])
+def test_pending_subagent_cancel_blocks_child_calls_in_every_mode(
+    server: FakeAgenomic,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    order: str,
+    state: str,
+    known: str,
+) -> None:
+    server.effective_state = state
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == state
+    monkeypatch.setattr(adapter, "_interrupt_subagent", lambda sid: True)
+    adapter.subagent_start(parent_session_id="p", child_session_id="c", child_subagent_id="sa-1")
+    if known == "session":
+        adapter.on_session_start(session_id="c", platform="subagent")
+    adapter.handle_command(
+        {
+            "id": "k9",
+            "kind": "cancel",
+            "target_kind": "subagent",
+            "target_ref": "sa-1",
+            "status": "requested",
+        }
+    )
+    runner = Runner(adapter)
+    target = tmp_path / "raced.txt"
+    # The interrupt is asynchronous: the child's next tool call races with it.
+    out = json.loads(
+        getattr(runner, order)(
+            "write_file",
+            {"path": str(target), "content": "x"},
+            sid="c",
+            effect=write_effect(target),
+        )
+    )
+    assert runner.executions == 0, f"a pending subagent cancel blocks in {state}"
+    assert not target.exists()
+    assert out["error"] == "Agenomic cancelled this subagent; the action was not executed."
+    assert server.authorize_calls() == []
+    adapter.exporter.flush(3.0)
+    recorded = _local_decisions(server, out["error"])
+    assert len(recorded) == 1
+    assert recorded[0]["extra"]["local"] is True
+    assert recorded[0]["extra"]["reason_codes"] == ["cancel_pending"]
+    assert [b["status"] for _, b in server.acks] == ["received"], "not applied before the end"
+    # Another session is not affected.
+    getattr(runner, order)("read_file", {"path": "/tmp/a"}, sid="p", tcid="call_2")
+    assert runner.executions == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symbolic links")
+def test_status_write_ignores_a_link_planted_at_the_old_temporary_name(tmp_path: Path) -> None:
+    import os
+    import threading
+
+    path = tmp_path / "agenomic" / "status.json"
+    path.parent.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious")
+    planted = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    planted.symlink_to(victim)
+    plugin_mod.write_status(path, loaded=True, instance_status="active", effective_state="observe")
+    assert victim.read_text() == "precious"
+    assert json.loads(path.read_text())["loaded"] is True
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+
+
+# ---------------------------------------------------------------- concurrent approvals
+
+
+def test_every_concurrently_issued_approval_keeps_its_identity(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    target = tmp_path / "approved.txt"
+    args = {"path": str(target), "content": "x"}
+    original = adapter.client.authorize
+    inner: list[str] = []
+
+    def answer_then_interleave(sid: str, body: Any) -> Any:
+        answer = original(sid, body)
+        if body["tool_call_id"] == "call_a" and not inner:
+            # Both identical calls reached the gateway before either answer was stored:
+            # call_b's approval is stored first, then call_a's answer arrives.
+            inner.append(runner.agent_loop("write_file", args, tcid="call_b"))
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", answer_then_interleave)
+    outer = json.loads(runner.agent_loop("write_file", args, tcid="call_a"))
+    monkeypatch.undo()
+    a1 = server.pending_by_call["call_b"]  # stored first
+    a2 = server.pending_by_call["call_a"]
+    assert a1 != a2
+    assert json.loads(inner[0])["error"] == APPROVAL_MESSAGE.format(approval_id=a1)
+    assert outer["error"] == APPROVAL_MESSAGE.format(approval_id=a2)
+    server.approve(a2)  # only the approval whose message named a2 is granted
+    runner.agent_loop("write_file", args, tcid="call_c", effect=write_effect(target))
+    assert runner.executions == 1
+    assert target.read_text() == "x"
+    retry = server.authorize_calls()[-1].body
+    assert retry["tool_call_id"] == "call_a", "resumed under a2's identity, not a1's"
+    assert server.approvals[a2]["status"] == "consumed"
+    assert server.approvals[a1]["status"] == "pending"
+    assert server.reports()[0].body["logical_call_id"] == "call_a"
+    remaining = adapter._pending[("s1", "write_file", arguments_hash(args))]
+    assert [p.approval_id for p in remaining] == [a1], "a1 still waits for its own retry"
+
+    still = json.loads(runner.agent_loop("write_file", args, tcid="call_d"))
+    assert "still pending" in still["error"]
+    assert a1 in still["error"]
+    assert runner.executions == 1
+    server.approve(a1)
+    runner.agent_loop("write_file", args, tcid="call_e", effect=write_effect(target))
+    assert runner.executions == 2
+    assert server.authorize_calls()[-1].body["tool_call_id"] == "call_b"
+    assert not adapter._pending
+
+
+def test_concurrent_approvals_each_keep_their_delegation_reservation(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    args: dict[str, Any] = {"tasks": [{"goal": "same"}]}
+    original = adapter.client.authorize
+    inner: list[str] = []
+
+    def answer_then_interleave(sid: str, body: Any) -> Any:
+        answer = original(sid, body)
+        if body["tool_call_id"] == "d_a" and not inner:
+            inner.append(runner.agent_loop("delegate_task", args, sid="p", tcid="d_b"))
+        return answer
+
+    reserved: list[str] = []
+
+    def reserve(sid: str, body: Any) -> Any:
+        reserved.append(body["tool_call_id"])
+        return {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
+
+    monkeypatch.setattr(adapter.client, "reserve_delegation", reserve)
+    monkeypatch.setattr(adapter.client, "authorize", answer_then_interleave)
+    runner.agent_loop("delegate_task", args, sid="p", tcid="d_a")
+    monkeypatch.setattr(adapter.client, "authorize", original)
+    assert sorted(reserved) == ["d_a", "d_b"]
+    a2 = server.pending_by_call["d_a"]
+    server.decide = lambda body: "allow"
+    server.approve(a2)
+    runner.agent_loop("delegate_task", args, sid="p", tcid="d_c")
+    assert runner.executions == 1
+    assert sorted(reserved) == ["d_a", "d_b"], "the retry reuses a reservation"
+    assert server.authorize_calls()[-1].body["tool_call_id"] == "d_a"
+    queued = adapter._delegations["p"]
+    assert [r[0] for r in queued] == ["del-d_a"], "the reservation made under a2 follows a2"
+    (slot,) = adapter._provisional_delegations
+    assert slot[3] == server.pending_by_call["d_b"]
+    assert adapter._provisional_delegations[slot].reservation[0] == "del-d_b"

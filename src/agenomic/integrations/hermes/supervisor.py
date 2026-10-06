@@ -26,16 +26,19 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import json
 import logging
 import os
 import re
+import secrets
 import signal
 import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -433,9 +436,45 @@ def _digest_matches(content: bytes, digest: str) -> bool:
 _MANIFEST = ".agenomic_manifest.json"
 
 
+class UnsafeSkillsPathError(OSError):
+    """A skills path the supervisor refuses to write through: the directory is a symbolic
+    link or belongs to another user, or the destination is a symbolic link."""
+
+
+def skills_dir_problem(path: Path) -> Optional[str]:
+    """Why the supervisor must not write into ``path``, or ``None``.
+
+    On POSIX the directory must not be a symbolic link and must belong to the
+    supervisor's effective uid; Windows has no such ownership check. A missing
+    directory has no problem (the supervisor creates it).
+
+    Example:
+        >>> import tempfile
+        >>> skills_dir_problem(Path(tempfile.mkdtemp())) is None
+        True
+    """
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        return "is a symbolic link"
+    if not stat.S_ISDIR(st.st_mode):
+        return "is not a directory"
+    if sys.platform != "win32" and st.st_uid != os.geteuid():
+        return "belongs to another user"
+    return None
+
+
 def _write_atomic(path: Path, data: bytes, mode: int) -> None:
     """Replace ``path`` with ``data`` so a reader (or the next sync after a crash or a full
     disk) sees the old content or the new one, never a truncated file.
+
+    The temporary file has an unpredictable name and is created exclusively, never
+    through a symbolic link, with mode ``0600`` until it is complete. On POSIX every
+    step is relative to the parent directory, opened without following a link and
+    required to belong to the supervisor; a destination that is a symbolic link is
+    refused (:class:`UnsafeSkillsPathError`) rather than replaced or followed.
 
     Example:
         >>> import tempfile
@@ -444,27 +483,66 @@ def _write_atomic(path: Path, data: bytes, mode: int) -> None:
         >>> p.read_bytes()
         b'{}'
     """
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    if sys.platform == "win32":
+        _write_atomic_portable(path, data, mode)
+        return
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR) and path.parent.is_symlink():
+            raise UnsafeSkillsPathError(f"{path.parent} is a symbolic link") from e
+        raise
+    try:
+        if os.fstat(dir_fd).st_uid != os.geteuid():
+            raise UnsafeSkillsPathError(f"{path.parent} belongs to another user")
+        name = path.name
+        try:
+            if stat.S_ISLNK(os.lstat(name, dir_fd=dir_fd).st_mode):
+                raise UnsafeSkillsPathError(f"{path} is a symbolic link")
+        except FileNotFoundError:
+            pass
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+        while True:
+            tmp = f".{name}.{secrets.token_hex(8)}.tmp"
+            try:
+                fd = os.open(tmp, flags, 0o600, dir_fd=dir_fd)
+                break
+            except FileExistsError:
+                continue
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+                fh.flush()
+                os.fchmod(fh.fileno(), mode)
+                os.fsync(fh.fileno())
+            os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp, dir_fd=dir_fd)
+            raise
+        # Make the rename itself durable; a directory that cannot be synced only loses that.
+        with contextlib.suppress(OSError):
+            os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _write_atomic_portable(path: Path, data: bytes, mode: int) -> None:
+    """:func:`_write_atomic` without directory descriptors (Windows)."""
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
+        os.chmod(name, mode)
+        if path.is_symlink():
+            raise UnsafeSkillsPathError(f"{path} is a symbolic link")
+        os.replace(name, path)
     except BaseException:
         with contextlib.suppress(OSError):
-            os.unlink(tmp)
+            os.unlink(name)
         raise
-    if sys.platform != "win32":
-        # Make the rename itself durable; a directory that cannot be opened only loses that.
-        with contextlib.suppress(OSError):
-            dir_fd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
 
 
 def _managed_files(root: Path) -> set[str]:
@@ -518,11 +596,16 @@ def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> 
         >>> sync_skills([{"target": "skills/demo/SKILL.md", "digest": sha, "content": body}], d)
         {'written': 1, 'unchanged': 0, 'removed': 0, 'rejected': 0}
     """
+    counts = {"written": 0, "unchanged": 0, "removed": 0, "rejected": 0}
+    problem = skills_dir_problem(skills_dir)
+    if problem is not None:
+        logger.error("skills directory %s %s; approved skills not written", skills_dir, problem)
+        counts["rejected"] = len(skills)
+        return counts
     skills_dir.mkdir(parents=True, exist_ok=True)
     root = skills_dir.resolve()
     manifest_path = root / _MANIFEST
     previous = _previous_files(root, manifest_path)
-    counts = {"written": 0, "unchanged": 0, "removed": 0, "rejected": 0}
     current: set[str] = set()
     writes: list[tuple[Path, bytes]] = []
     for skill in skills:
@@ -538,6 +621,11 @@ def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> 
             or not str(dest).startswith(str(root) + os.sep)
             or dest == manifest_path
         ):
+            counts["rejected"] += 1
+            continue
+        if dest != Path(os.path.normpath(root / rel)):
+            # A symbolic link on the way (the file itself or a directory): never followed.
+            logger.warning("approved skill %s skipped: its path goes through a symbolic link", rel)
             counts["rejected"] += 1
             continue
         data = content.encode("utf-8")
@@ -561,10 +649,19 @@ def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> 
         )
     for dest, data in writes:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        _write_atomic(dest, data, 0o644)
+        try:
+            _write_atomic(dest, data, 0o644)
+        except UnsafeSkillsPathError as e:
+            logger.error("approved skill %s not written: %s", dest.relative_to(root).as_posix(), e)
+            counts["rejected"] += 1
+            continue
         counts["written"] += 1
     for stale in sorted(previous - current):
-        path = (root / stale).resolve()
+        lexical = Path(os.path.normpath(root / stale))
+        path = lexical.resolve()
+        if path != lexical:
+            logger.warning("stale skill %s kept: its path goes through a symbolic link", stale)
+            continue
         if str(path).startswith(str(root) + os.sep) and path.is_file():
             path.unlink()
             counts["removed"] += 1
@@ -746,7 +843,7 @@ class Supervisor:
             p for p in (self.settings.skills_dir, home / "skills", home / "plugins") if p
         ]
         skills_paths += self.settings.readonly_paths
-        return isolation_report(
+        report = isolation_report(
             self.child_env,
             child_uid=_current_uid()
             if self.settings.child_uid is None
@@ -758,6 +855,11 @@ class Supervisor:
             runtime_token_env=self.settings.runtime_token_env,
             connect=self._connect,
         )
+        skills_dir = self.settings.skills_dir
+        if skills_dir is not None and skills_dir_problem(skills_dir) is not None:
+            # The supervisor refuses to sync into it: approved skills are not attested.
+            report["skills_readonly"] = False
+        return report
 
     def heartbeat(self, *, execute: bool = True) -> None:
         """Report process state and isolation; execute returned commands unless ``execute``
@@ -868,7 +970,11 @@ class Supervisor:
         skills = resp.get("skills")
         if not isinstance(skills, list):
             return None
-        return sync_skills([s for s in skills if isinstance(s, dict)], self.settings.skills_dir)
+        try:
+            return sync_skills([s for s in skills if isinstance(s, dict)], self.settings.skills_dir)
+        except UnsafeSkillsPathError as e:
+            logger.error("approved skills not synced: %s", e)
+            return None
 
     def tick(self) -> None:
         """One supervision step.

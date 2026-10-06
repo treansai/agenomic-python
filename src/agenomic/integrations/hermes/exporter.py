@@ -35,6 +35,7 @@ Example:
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import itertools
 import json
@@ -43,6 +44,7 @@ import math
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter, OrderedDict, deque
@@ -421,6 +423,25 @@ def open_private(path: Path, flags: int) -> int:
     return fd
 
 
+def create_private_temp(path: Path) -> tuple[Path, int]:
+    """Create a new temporary file next to ``path`` and return it with a write descriptor.
+
+    The name is unpredictable and the file is created exclusively (``O_EXCL``, never
+    through a symbolic link) with mode ``0600``, so nothing planted beforehand in the
+    directory can be truncated, followed or reused. Replace ``path`` with it, or unlink it.
+
+    Example:
+        >>> import tempfile
+        >>> target = Path(tempfile.mkdtemp()) / "status.json"
+        >>> tmp, fd = create_private_temp(target)
+        >>> os.close(fd)
+        >>> tmp.parent == target.parent, tmp.name.startswith(".status.json."), tmp.name != create_private_temp(target)[0].name
+        (True, True, True)
+    """
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    return Path(name), fd
+
+
 #: Top-level keys an ``agenomic.hermes.event/v1`` document may carry.
 _EVENT_KEYS = frozenset(
     {"schema_version", "event_id", "type", "seq", "occurred_at", "extra", *EventBuilder._FIELDS}
@@ -553,18 +574,19 @@ class _Spool:
                         pending[line] -= 1
                     else:
                         rest.append(line)
-            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+            # A new, unpredictably named file created exclusively: nothing planted in the
+            # directory is opened, truncated or followed.
+            tmp, fd = create_private_temp(self.path)
             try:
-                fd = open_private(tmp, os.O_WRONLY | os.O_CREAT)
-            except PermissionError as e:
-                self._refuse(e)
-                return
-            os.ftruncate(fd, 0)  # only once the temporary file is known to be ours
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.writelines(line + "\n" for line in rest)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, self.path)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.writelines(line + "\n" for line in rest)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp, self.path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+                raise
 
 
 class EventExporter:
