@@ -169,6 +169,9 @@ class _Authorization:
     delegation: Optional[list[Any]] = None
     # authorized -> executing -> done
     state: str = "authorized"
+    # Set when observe or shadow let the call run with other arguments than the ones
+    # authorized: the permit no longer describes the execution and is never reported.
+    detached: bool = False
 
 
 @dataclass
@@ -2829,6 +2832,21 @@ class HermesAdapter:
                     # here either, since it would be owned by no plan; shadow never blocks.
                     return None
             if observe_now:
+                if (
+                    admitted is not None
+                    and admitted[0] == (sid, tool, tool_call_id)
+                    and admitted[2]
+                ):
+                    # The middleware runs this call under an authorization: arguments
+                    # changed since are recorded and detach it (observe never blocks).
+                    with self._lock:
+                        running = self._auth.get((sid, tool, tool_call_id))
+                    if (
+                        running is not None
+                        and running.state == "executing"
+                        and running.local_hash != local_hash
+                    ):
+                        self._mismatch(running, local_hash, "pre_tool_call")
                 return None
             with self._lock:
                 existing = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None
@@ -2893,7 +2911,11 @@ class HermesAdapter:
         )
         if auth.effective_mode == "shadow" or self.local_mode() in ("shadow", "observe"):
             # Shadow and observe never change execution, also when they became active
-            # after enforce authorized the call: the mismatch is recorded only.
+            # after enforce authorized the call: the mismatch is recorded, and the
+            # authorization is detached so no permit-backed report describes a call
+            # that ran with other arguments.
+            with self._lock:
+                auth.detached = True
             return None
         return _block(
             f"Agenomic: arguments of {auth.tool} changed after authorization; the action was not executed."
@@ -3277,6 +3299,10 @@ class HermesAdapter:
                 content=None if raised else {"output": result},
             )
             if auth is None or auth.record_id is None:
+                return
+            with self._lock:
+                detached = auth.detached
+            if detached:
                 return
             body: dict[str, Any] = {
                 "logical_call_id": auth.logical_call_id,

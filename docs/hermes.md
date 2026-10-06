@@ -71,7 +71,9 @@ from agenomic.integrations.hermes.config import render_hermes_config
 print(yaml.safe_dump(render_hermes_config("https://agenomic.example", model="demo-model")))
 ```
 
-which produces:
+The endpoint is validated first (absolute http(s) URL, no query or fragment),
+as the adapter does, so a configuration Hermes could not load is never
+rendered. It produces:
 
 ```yaml
 model:
@@ -520,7 +522,9 @@ does not register them.
 - `codex_app_server` and ACP providers run turns in external processes.
 - Arguments changed by another plugin after the decision are detected after
   execution (`authorization.argument_mismatch`), not prevented; enforce is
-  refused while such callbacks exist.
+  refused while such callbacks exist. When observe or shadow lets such a call
+  run, its authorization is detached: no permit-backed action report is sent
+  for arguments that did not run.
 - A missing Python interpreter for the guard falls into the upstream gap
   (non zero exit, empty stdout is allowed). The guard and its status file live
   in the agent's environment and can be forged by code the agent runs.

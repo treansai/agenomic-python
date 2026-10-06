@@ -118,6 +118,32 @@ class CaptureConfig(BaseModel):
     preview_chars: int = Field(default=200, ge=1, le=4000)
 
 
+def check_endpoint(value: str) -> str:
+    """Validate an Agenomic endpoint (absolute http(s) URL, no query or fragment) and
+    return it without a trailing slash.
+
+    Example:
+        >>> check_endpoint("https://agenomic.example/")
+        'https://agenomic.example'
+        >>> check_endpoint("ftp://gateway")
+        Traceback (most recent call last):
+        ...
+        ValueError: endpoint must be an absolute http(s) URL
+    """
+    try:
+        parts = urlsplit(value)
+        port_ok = parts.port is None or 0 < parts.port < 65536
+    except ValueError:
+        raise ValueError("endpoint must be an absolute http(s) URL") from None
+    if parts.scheme not in ("https", "http") or not parts.hostname or not port_ok:
+        raise ValueError("endpoint must be an absolute http(s) URL")
+    if parts.query or parts.fragment:
+        raise ValueError("endpoint must not carry a query or fragment")
+    if parts.scheme == "http" and parts.hostname not in _LOOPBACK:
+        logger.warning("Agenomic endpoint uses plain http outside loopback (%s)", parts.hostname)
+    return value.rstrip("/")
+
+
 class AdapterConfig(BaseModel):
     """``agenomic.hermes.adapter_config/v1``.
 
@@ -146,16 +172,7 @@ class AdapterConfig(BaseModel):
     @field_validator("endpoint")
     @classmethod
     def _check_endpoint(cls, value: str) -> str:
-        parts = urlsplit(value)
-        if parts.scheme not in ("https", "http") or not parts.hostname:
-            raise ValueError("endpoint must be an absolute http(s) URL")
-        if parts.query or parts.fragment:
-            raise ValueError("endpoint must not carry a query or fragment")
-        if parts.scheme == "http" and parts.hostname not in _LOOPBACK:
-            logger.warning(
-                "Agenomic endpoint uses plain http outside loopback (%s)", parts.hostname
-            )
-        return value.rstrip("/")
+        return check_endpoint(value)
 
     @field_validator("runtime_token")
     @classmethod
@@ -433,7 +450,9 @@ def render_hermes_config(
         >>> cfg["hooks"]["pre_tool_call"][0]["fail_closed"]
         True
     """
-    base = endpoint.rstrip("/")
+    # Validated before either block is built: an endpoint the adapter would refuse also
+    # gives Hermes an unusable model base_url.
+    base = check_endpoint(endpoint)
     _check_runtime_token_env(runtime_token_env)
     if guard_timeout_s < 1 or guard_timeout_s > 300:
         raise ValueError("guard_timeout_s must be within [1, 300] (the Hermes clamp)")

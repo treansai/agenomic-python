@@ -258,3 +258,20 @@ def test_renderers_refuse_credential_names_for_the_runtime_token(name: str) -> N
         ]
         == "${AGENOMIC_RT}"
     )
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "ftp://gateway",
+        "gateway.example",
+        "http://[::1",
+        "https://a.example:0",
+        "https://a.example/?q=1",
+    ],
+)
+def test_render_hermes_config_refuses_an_endpoint_the_adapter_would_refuse(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="endpoint"):
+        render_hermes_config(endpoint)
+    with pytest.raises(ValueError, match="endpoint"):
+        render_adapter_config(endpoint)

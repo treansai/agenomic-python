@@ -3447,3 +3447,31 @@ def test_session_cancel_for_an_unknown_id_is_refused_once_admissions_settle(
     monkeypatch.setattr(adapter.client, "create_session", cancel_for_another_id)
     adapter.on_session_start(session_id="s1", platform="cli")
     assert ("k2", "refused") in [(c, b["status"]) for c, b in server.acks]
+
+
+@pytest.mark.parametrize("mode", ["observe", "shadow"])
+def test_observe_after_enforce_with_changed_arguments_reports_no_stale_permit(
+    server: FakeAgenomic, tmp_path: Path, mode: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    ran: list[dict[str, Any]] = []
+
+    def inner() -> str:
+        # The mode changes between the gates and a foreign middleware mutates the
+        # arguments before the inner pre_tool_call.
+        server.effective_state = mode
+        adapter._set_state(mode, adapter._state_request())
+        mutated = {"path": "/etc/passwd"}
+        assert adapter.pre_tool_call(args=mutated, **kw) is None, f"{mode} never blocks"
+        ran.append(mutated)
+        return json.dumps({"success": True})
+
+    adapter.tool_execution(args={"path": "/tmp/a"}, next_call=inner, **kw)
+    assert ran, "the call ran"
+    assert server.reports() == [], "no permit-backed report for arguments that did not run"
+    adapter.exporter.flush(3.0)
+    assert "authorization.argument_mismatch" in server.event_types()
