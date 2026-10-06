@@ -106,8 +106,14 @@ _SECRET_PATTERNS = re.compile(
     r"|sk-[A-Za-z0-9_\-]{8,}"
     r"|gh[pousr]_[A-Za-z0-9]{16,}"
     r"|AKIA[0-9A-Z]{16}"
-    r"|xox[abprs]-[A-Za-z0-9\-]+"
-    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
+    r"|xox[abprs]-[A-Za-z0-9\-]+)"
+)
+#: A PEM private key block, masked whole: the base64 body and the ``END`` line go with
+#: the ``BEGIN`` line. A block without its ``END`` line (cut short upstream) is masked up
+#: to the end of the text.
+_PEM_PRIVATE_KEY = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:.*?-----END [A-Z0-9 ]*PRIVATE KEY-----|.*)",
+    re.DOTALL,
 )
 #: HTTP authorization schemes kept readable in front of a masked credential.
 _AUTH_SCHEMES = (
@@ -285,6 +291,7 @@ def mask_text(text: str) -> str:
         >>> mask_text("password=hunter2 max_tokens=512 https://u:pw@db.example/x")
         'password=*** max_tokens=512 https://u:***@db.example/x'
     """
+    text = _PEM_PRIVATE_KEY.sub(_MASK, text)
     text = _mask_headers(text)
     text = _BEARER_SECRET.sub(lambda m: m.group(1) + _MASK, text)
     text = _KEY_VALUE_SECRET.sub(lambda m: m.group(1) + m.group(2) + _mask_quoted(m.group(3)), text)

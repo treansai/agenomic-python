@@ -1444,7 +1444,11 @@ def _local_decisions(server: FakeAgenomic, reason: str) -> list[dict[str, Any]]:
 
 @pytest.mark.parametrize("order", ["agent_loop", "direct"])
 @pytest.mark.parametrize("state", ["observe", "shadow", "enforce"])
-@pytest.mark.parametrize("bad", [float("nan"), {"a", "b"}, object()], ids=["nan", "set", "object"])
+@pytest.mark.parametrize(
+    "bad",
+    [float("nan"), 10**400, {"a", "b"}, object()],
+    ids=["nan", "huge_int", "set", "object"],
+)
 def test_arguments_without_canonical_form_block_only_in_enforce(
     server: FakeAgenomic, tmp_path: Path, order: str, state: str, bad: object
 ) -> None:

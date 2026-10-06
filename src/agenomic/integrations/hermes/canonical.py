@@ -93,7 +93,15 @@ def _write(value: object, out: list[str]) -> None:
         out.append("false")
     elif isinstance(value, int):
         # Integers outside i64/u64 are parsed as f64 by serde_json.
-        out.append(str(value) if _I64_MIN <= value <= _U64_MAX else _format_float(float(value)))
+        if _I64_MIN <= value <= _U64_MAX:
+            out.append(str(value))
+        else:
+            try:
+                as_float = float(value)
+            except OverflowError as e:
+                # serde_json refuses a number outside the f64 range.
+                raise CanonicalError("integer is outside the f64 range") from e
+            out.append(_format_float(as_float))
     elif isinstance(value, float):
         out.append(_format_float(value))
     elif isinstance(value, str):

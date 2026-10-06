@@ -299,6 +299,35 @@ def test_exact_credential_key_aliases_are_masked_in_text(text: str) -> None:
     assert "plainsecret" not in mask_text(text)
 
 
+_PEM_BODY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7plainkeymaterial"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"key:\n-----BEGIN PRIVATE KEY-----\n{_PEM_BODY}\n-----END PRIVATE KEY-----\nafter",
+        f"-----BEGIN RSA PRIVATE KEY-----\\n{_PEM_BODY}\\n-----END RSA PRIVATE KEY-----",
+        f"cut short: -----BEGIN OPENSSH PRIVATE KEY-----\n{_PEM_BODY}",
+    ],
+    ids=["newlines", "json_escaped", "no_end_line"],
+)
+def test_pem_private_key_blocks_are_masked_whole(text: str) -> None:
+    masked = mask_text(text)
+    assert "plainkeymaterial" not in masked
+    assert "END" not in masked
+    assert "PRIVATE KEY" not in masked
+
+
+def test_text_after_a_pem_block_stays_readable() -> None:
+    text = f"-----BEGIN EC PRIVATE KEY-----\n{_PEM_BODY}\n-----END EC PRIVATE KEY----- then ok"
+    assert mask_text(text) == "*** then ok"
+
+
+def test_pem_private_key_in_a_preview_is_masked_whole() -> None:
+    pem = f"-----BEGIN PRIVATE KEY-----\n{_PEM_BODY}\n-----END PRIVATE KEY-----"
+    assert "plainkeymaterial" not in redacted_preview({"note": pem}, 5000)
+
+
 @pytest.mark.parametrize(
     "text",
     ["author=plainvalue", "bypass=plainvalue", "passed=plainvalue", "auth_method=plainvalue"],

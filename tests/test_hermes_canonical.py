@@ -47,6 +47,8 @@ def test_key_order_does_not_matter_and_types_do() -> None:
         float("nan"),
         float("inf"),
         {"k": float("-inf")},
+        10**400,
+        {"k": -(10**400)},
         "\ud800",
         {"\udc00": 1},
         {1: "x"},
