@@ -556,6 +556,29 @@ def test_main_argument_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     assert sup.main(["--endpoint", "https://a.example", "--", "hermes"], environ={}) == 2
 
 
+def test_main_refuses_a_supervisor_token_without_the_agmhs_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    clients: list[tuple[object, ...]] = []
+
+    def no_client(*args: object, **kwargs: object) -> None:
+        clients.append(args)
+        raise AssertionError("SupervisorClient must not be built for a foreign credential")
+
+    monkeypatch.setattr(sup, "SupervisorClient", no_client)
+    monkeypatch.setattr(sup.sys, "platform", "linux")
+    secret = "sk-proj-notasupervisortoken123"
+    with caplog.at_level("DEBUG"):
+        code = sup.main(
+            ["--endpoint", "https://a.example", "--hermes-home", str(tmp_path), "--", "hermes"],
+            environ={"AGENOMIC_HERMES_SUPERVISOR_TOKEN": secret, "PATH": "/bin"},
+        )
+    assert code == 2
+    assert clients == []
+    assert "AGENOMIC_HERMES_SUPERVISOR_TOKEN" in caplog.text
+    assert secret not in caplog.text
+
+
 @posix_only
 def test_main_runs_child_until_exit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hermes_fakes import FakeAgenomic

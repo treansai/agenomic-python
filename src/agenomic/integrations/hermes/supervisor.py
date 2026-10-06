@@ -55,6 +55,7 @@ from agenomic.integrations.hermes.config import (
     DEFAULT_TOKEN_ENV,
     RUNTIME_TOKEN_PREFIX,
     SUPERVISOR_TOKEN_ENV,
+    SUPERVISOR_TOKEN_PREFIX,
     runtime_token_env_problem,
 )
 from agenomic.integrations.hermes.exporter import now_iso
@@ -1656,6 +1657,14 @@ def main(
         return 2
     if not token:
         logger.error("supervisor credential missing: set %s", SUPERVISOR_TOKEN_ENV)
+        return 2
+    if not token.startswith(SUPERVISOR_TOKEN_PREFIX):
+        # Another credential (a provider key...) is never sent to the endpoint as a bearer.
+        logger.error(
+            "%s does not hold an Agenomic supervisor token (%s...)",
+            SUPERVISOR_TOKEN_ENV,
+            SUPERVISOR_TOKEN_PREFIX,
+        )
         return 2
     home = Path(
         args.hermes_home or env.get("HERMES_HOME") or str(Path.home() / ".hermes")

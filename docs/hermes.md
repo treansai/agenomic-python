@@ -133,7 +133,7 @@ The server computes the effective state on every admission and returns it in
 
 | Effective state | Adapter behaviour |
 | --- | --- |
-| `observe` | events only, `authorize` is never called (also when a `/hello` sent during an authorization switches to observe: the call proceeds without asking, and an authorization outage never blocks); local checks (protected paths, incompatible Hermes, argument mutators the gateway has not confirmed) emit one local `tool.call.decision` per call (`deny`, `local_mode: observe`, with a counterfactual) and the call proceeds; delegations are not reserved and pending approvals are not consulted |
+| `observe` | events only, `authorize` is never called (also when a `/hello` sent during an authorization switches to observe: the call proceeds without asking, and an authorization outage never blocks); local checks (protected paths, incompatible Hermes, argument mutators the gateway has not confirmed) emit one local `tool.call.decision` per call (`deny`, `local_mode: observe`, with a counterfactual) and the call proceeds; an approval required in enforce for the same action (session, tool, arguments hash) and still held locally is recorded the same way as `require_approval` (reason `approval_pending`, its `approval_id` in `extra`), without claiming, consuming or dropping it and without asking its status, so a later enforce retry still resumes under it; delegations are not reserved (a delegation refusal is only known by asking the gateway, so nothing is recorded for it) |
 | `shadow` | `authorize` is called and recorded as counterfactual, nothing is blocked; an authorization outage emits `authorization.unavailable` and the call proceeds; local checks (protected paths, incompatible Hermes, unconfirmed mutators, refused delegation, arguments without a canonical form) emit a local `tool.call.decision` and the call proceeds; an approval still pending from an earlier enforce is not consulted (the call is asked afresh) |
 | `enforce` | `allow` executes; `deny` and `require_approval` block; any error, timeout or invalid answer blocks |
 | `enforce_blocked`, `paused`, `quarantined`, `revoked` | treated as enforce; the server denies |
@@ -247,7 +247,13 @@ values for every scheme (`Bearer`, `Basic`, `Digest`, `Token`, `ApiKey`,
 `AWS4-HMAC-SHA256`, ...), cookie headers, `key=value` and `key: value` pairs
 whose key names a credential (`api_key`, `x-api-key`, `password`, `token`,
 `client_secret`, `Credential`, `Signature`, ...) and the password of URL user
-info (`scheme://user:***@host`). The scheme, header and key names stay
+info (`scheme://user:***@host`). A mapping key is a credential when, case and
+separators removed, it ends in `token`, contains `password`, `passwd`,
+`passphrase`, `secret`, `apikey`, `authorization`, `privatekey`, `cookie` or
+`credential`, or is exactly `auth`, `pass`, `pwd`, `bearer`, `jwt`, `otp`,
+`totp`, `csrf` or `xsrf`. Those short names only match whole, so `author`,
+`authority`, `bypass`, `session_id`, `max_tokens` or `jwt_issuer` stay readable;
+`password_policy` is masked (masking a non-secret is the safe failure). The scheme, header and key names stay
 readable; prose such as "token budget" or `max_tokens=512` is not masked. In every capture
 mode the event fields and the whole `extra` mapping, its top-level keys
 included, get the same key and pattern masking. A value that is not a JSON
@@ -329,6 +335,10 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD` is removed even when
   allowlisted, except the runtime token variable. The supervisor token is
   never passed.
+- `AGENOMIC_HERMES_SUPERVISOR_TOKEN` must hold a supervisor token
+  (`agmhs_...`); any other value (a provider key, a runtime token...) is
+  refused with exit 2 before any request, so it is never sent to the endpoint.
+  The error names the variable, never its value.
 - `--runtime-token-env` must not name the supervisor token, a provider key
   (`*_API_KEY`, `AWS_SECRET_ACCESS_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`) or
   another credential shaped variable (`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, ...)

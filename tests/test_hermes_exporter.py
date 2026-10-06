@@ -15,6 +15,7 @@ from agenomic.integrations.hermes.exporter import (
     EVENT_SCHEMA,
     EventBuilder,
     EventExporter,
+    is_secret_key,
     mask_text,
     redacted_preview,
 )
@@ -218,6 +219,68 @@ def test_preview_masks_credential_keys_whatever_their_case() -> None:
     for value in ('"v"', '"p"', '"t"'):
         assert value not in text
     assert '"max_tokens":5' in text
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "auth",
+        "AUTH",
+        "Auth",
+        "pass",
+        "PWD",
+        "passphrase",
+        "ssh_passphrase",
+        "Bearer",
+        "jwt",
+        "JWT",
+        "otp",
+        "totp",
+        "csrf",
+        "X-CSRF-Token",
+        "xsrf",
+        "csrf_token",
+        "X-XSRF-TOKEN",
+    ],
+)
+def test_exact_credential_key_aliases_are_masked(key: str) -> None:
+    assert is_secret_key(key)
+    text = redacted_preview({key: "plainsecret"}, 500)
+    assert "plainsecret" not in text
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "author",
+        "authority",
+        "authenticated",
+        "auth_method",
+        "oauth_provider",
+        "bypass",
+        "passed",
+        "pass_count",
+        "session",
+        "session_id",
+        "sessionId",
+        "tokens",
+        "max_tokens",
+        "input_tokens",
+        "jwt_issuer",
+        "otp_length",
+        "path",
+        "output",
+    ],
+)
+def test_ordinary_keys_near_credential_aliases_are_kept(key: str) -> None:
+    assert not is_secret_key(key)
+    assert "plainvalue" in redacted_preview({key: "plainvalue"}, 500)
+
+
+def test_password_named_policy_keys_stay_masked() -> None:
+    # Any key containing ``password`` is masked, ``password_policy`` included: masking a
+    # non-secret is a safe failure, a substring exemption could leak ``password_old``.
+    assert is_secret_key("password_policy")
 
 
 def test_free_form_fields_are_redacted_in_metadata_mode() -> None:

@@ -1766,6 +1766,51 @@ def test_observe_records_local_checks_as_counterfactuals(
 
 
 @pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_observe_records_an_outstanding_enforce_approval_without_touching_it(
+    server: FakeAgenomic, tmp_path: Path, order: str
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    target = tmp_path / "out.txt"
+    args = {"path": str(target), "content": "x"}
+    first = json.loads(
+        getattr(runner, order)("write_file", args, tcid="call_1", effect=write_effect(target))
+    )
+    approval_id = next(iter(server.approvals))
+    assert first["error"] == APPROVAL_MESSAGE.format(approval_id=approval_id)
+    assert runner.executions == 0
+    (key,) = adapter._pending
+    (entry,) = adapter._pending[key]
+    before = (entry.logical_call_id, entry.attempt, entry.approval_id, entry.claimed_by)
+    authorizations = len(server.authorize_calls())
+    approval_reads = len(server.calls(f"/approvals/{approval_id}", "GET"))
+
+    adapter._effective_state = "observe"
+    getattr(runner, order)("write_file", args, tcid="call_2", effect=write_effect(target))
+    assert runner.executions == 1, "observe never changes execution"
+    assert target.read_text() == "x"
+    assert len(server.authorize_calls()) == authorizations
+    assert len(server.calls(f"/approvals/{approval_id}", "GET")) == approval_reads
+    assert server.calls("/delegations") == []
+    assert adapter._pending[key] == [entry], "the approval stays for a later enforce retry"
+    assert (entry.logical_call_id, entry.attempt, entry.approval_id, entry.claimed_by) == before
+    assert server.approvals[approval_id]["status"] == "pending"
+    adapter.exporter.flush(3.0)
+    recorded = _observe_decisions(server)
+    assert len(recorded) == 1, "recorded once, whichever gate sees the call first"
+    event = recorded[0]
+    assert event["decision"] == "require_approval"
+    assert event["span_id"] == "call_2"
+    assert event["extra"]["approval_id"] == approval_id
+    assert event["extra"]["reason_codes"] == ["approval_pending"]
+    assert event["extra"]["counterfactual"] == {
+        "outcome": "require_approval",
+        "reason_codes": ["approval_pending"],
+    }
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
 def test_observe_without_a_local_finding_records_no_decision(
     server: FakeAgenomic, tmp_path: Path, order: str
 ) -> None:

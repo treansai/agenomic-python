@@ -122,6 +122,9 @@ CANCEL_PENDING_REASON = "cancel_pending"
 PROTECTED_PATH_REASON = "protected_path"
 HERMES_INCOMPATIBLE_REASON = "hermes_incompatible"
 FOREIGN_MUTATORS_REASON = "foreign_mutators_unconfirmed"
+#: Reason recorded in observe when an approval required in enforce for the same action is
+#: still outstanding locally: enforce would have retried under it instead of running.
+APPROVAL_PENDING_REASON = "approval_pending"
 
 
 @dataclass
@@ -2126,6 +2129,20 @@ class HermesAdapter:
                 store.popitem(last=False)
         return True
 
+    def _outstanding_approval(
+        self, sid: str, tool: str, args: Mapping[str, object]
+    ) -> Optional[str]:
+        """The id of the first approval held for this action, read without claiming it."""
+        if not self._pending:
+            return None
+        try:
+            local_hash = arguments_hash(args)
+        except CanonicalError:
+            return None
+        with self._lock:
+            entries = self._pending.get((sid, tool, local_hash))
+            return entries[0].approval_id if entries else None
+
     def _observe_local_checks(
         self,
         sid: str,
@@ -2137,31 +2154,53 @@ class HermesAdapter:
         """Observe never blocks and never asks the gateway, but the local checks enforce
         would apply (Hermes compatibility, protected paths, argument mutators the gateway
         has not confirmed) are recorded as local ``tool.call.decision`` events with the
-        counterfactual deny, once per invocation. Delegations and pending approvals are
-        gateway state and are not touched."""
+        counterfactual deny, once per invocation.
+
+        An approval required in enforce for the same action (session, tool, arguments
+        hash) and still held locally is recorded as a counterfactual ``require_approval``
+        naming it: enforce would have retried under it rather than run. The entry is only
+        read, never claimed, released or dropped, and its status is not asked, so it stays
+        for a later enforce retry. Delegation reservations are gateway state: observe
+        neither reserves nor records one, since a refusal is only known by asking."""
         try:
-            findings: list[tuple[str, str]] = []
+            findings: list[tuple[str, str, str, dict[str, object]]] = []
             if self.foreign_mutators() != self._foreign:
-                findings.append((self._mutators_message(tool), FOREIGN_MUTATORS_REASON))
+                findings.append(
+                    (
+                        self._mutators_message(tool),
+                        FOREIGN_MUTATORS_REASON,
+                        "deny",
+                        {"foreign_mutators_unconfirmed": True},
+                    )
+                )
             local = self._local_finding(tool, args)
             if local is not None:
-                findings.append(local)
+                findings.append((local[0], local[1], "deny", {}))
+            approval_id = self._outstanding_approval(sid, tool, args)
+            if approval_id is not None:
+                findings.append(
+                    (
+                        APPROVAL_MESSAGE.format(approval_id=approval_id),
+                        APPROVAL_PENDING_REASON,
+                        "require_approval",
+                        {"approval_id": approval_id},
+                    )
+                )
             if not findings or not self._first_gate(
                 self._observed_local, (sid, tool, tool_call_id), gate
             ):
                 return
             input_hash = content_hash(args)
-            for message, code in findings:
+            for message, code, outcome, details in findings:
                 extra: dict[str, object] = {
                     "local": True,
                     "local_mode": "observe",
                     "reason_codes": [code],
-                    "counterfactual": {"outcome": "deny", "reason_codes": [code]},
+                    "counterfactual": {"outcome": outcome, "reason_codes": [code]},
+                    **details,
                 }
-                if code == FOREIGN_MUTATORS_REASON:
-                    extra["foreign_mutators_unconfirmed"] = True
                 self._emit_decision(
-                    sid, tool, tool_call_id, "deny", message, input_hash, extra=extra
+                    sid, tool, tool_call_id, outcome, message, input_hash, extra=extra
                 )
         except Exception as exc:
             # Recording only: observe never changes execution.

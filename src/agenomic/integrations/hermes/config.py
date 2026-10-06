@@ -52,6 +52,8 @@ DEFAULT_TOKEN_ENV = "AGENOMIC_HERMES_RUNTIME_TOKEN"
 SUPERVISOR_TOKEN_ENV = "AGENOMIC_HERMES_SUPERVISOR_TOKEN"
 #: Prefix of every Agenomic runtime token (the credential the Hermes plugin presents).
 RUNTIME_TOKEN_PREFIX = "agmhr_"
+#: Prefix of every Agenomic supervisor token (the credential the supervisor presents).
+SUPERVISOR_TOKEN_PREFIX = "agmhs_"
 _SECRET_NAME = re.compile(
     r"(_API_KEY|_TOKEN|_SECRET|_PASSWORD|_ACCESS_KEY|_PRIVATE_KEY)$|^API_KEY$", re.I
 )

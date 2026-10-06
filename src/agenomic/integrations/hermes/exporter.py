@@ -90,6 +90,15 @@ SECRET_KEYS = (
     "private_key",
     "client_secret",
     "cookie",
+    "passphrase",
+)
+#: Short credential names masked only as the whole normalized key, since as substrings they
+#: would hit ordinary keys (``author``, ``authority``, ``bypass``, ``output``, ``jwt_issuer``):
+#: ``auth``, ``pass``, ``pwd``, ``bearer``, ``jwt``, ``otp``/``totp``, ``csrf``/``xsrf``.
+#: ``session``/``session_id`` are deliberately absent (Hermes session ids are not secrets);
+#: ``csrf_token``/``xsrf_token`` are already covered by the ``token`` suffix.
+SECRET_KEY_ALIASES = frozenset(
+    {"auth", "pass", "pwd", "bearer", "jwt", "otp", "totp", "csrf", "xsrf"}
 )
 #: Credential shaped tokens, masked whole wherever they appear.
 _SECRET_PATTERNS = re.compile(
@@ -139,9 +148,15 @@ def is_secret_key(key: str) -> bool:
     Example:
         >>> [is_secret_key(k) for k in ("API_KEY", "X-Api-Key", "auth_token", "max_tokens", "path")]
         [True, True, True, False, False]
+        >>> [is_secret_key(k) for k in ("auth", "PWD", "author", "session_id")]
+        [True, True, False, False]
     """
     normalized = re.sub(r"[^a-z0-9]", "", key.lower())
-    return normalized.endswith("token") or any(part in normalized for part in _SECRET_KEY_PARTS)
+    return (
+        normalized in SECRET_KEY_ALIASES
+        or normalized.endswith("token")
+        or any(part in normalized for part in _SECRET_KEY_PARTS)
+    )
 
 
 def _is_container(value: object) -> bool:
