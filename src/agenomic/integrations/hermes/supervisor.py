@@ -430,10 +430,84 @@ def _digest_matches(content: bytes, digest: str) -> bool:
     return False
 
 
+_MANIFEST = ".agenomic_manifest.json"
+
+
+def _write_atomic(path: Path, data: bytes, mode: int) -> None:
+    """Replace ``path`` with ``data`` so a reader (or the next sync after a crash or a full
+    disk) sees the old content or the new one, never a truncated file.
+
+    Example:
+        >>> import tempfile
+        >>> p = Path(tempfile.mkdtemp()) / "m.json"
+        >>> _write_atomic(p, b"{}", 0o644)
+        >>> p.read_bytes()
+        b'{}'
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    if sys.platform != "win32":
+        # Make the rename itself durable; a directory that cannot be opened only loses that.
+        with contextlib.suppress(OSError):
+            dir_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
+
+def _managed_files(root: Path) -> set[str]:
+    """Every regular file under ``root`` (symbolic links and the manifest excluded), relative."""
+    found: set[str] = set()
+    for dirpath, _dirs, files in os.walk(root):
+        for name in files:
+            full = Path(dirpath) / name
+            if name == _MANIFEST or full.is_symlink() or not full.is_file():
+                continue
+            found.add(str(full.relative_to(root)))
+    return found
+
+
+def _previous_files(root: Path, manifest_path: Path) -> set[str]:
+    """Files the previous sync wrote. Without a manifest (first sync) nothing; with an
+    unreadable or malformed one, every regular file in the directory, so a skill that is no
+    longer approved is removed rather than kept forever."""
+    try:
+        raw = manifest_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError) as exc:
+        logger.error(
+            "skills manifest unreadable (%s); reconciling the whole directory", type(exc).__name__
+        )
+        return _managed_files(root)
+    try:
+        files = json.loads(raw).get("files")
+        if isinstance(files, list) and all(isinstance(f, str) for f in files):
+            return set(files)
+    except (ValueError, AttributeError):
+        pass
+    logger.error("skills manifest malformed; reconciling the whole directory")
+    return _managed_files(root)
+
+
 def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> dict[str, int]:
     """Write approved skills into ``skills_dir``; remove files a previous sync wrote and
     that are no longer approved. Targets escaping the directory or failing their digest
-    are skipped.
+    are skipped. Files and the manifest are replaced atomically; when the manifest is
+    unreadable or malformed, every regular file of the directory that is not approved now
+    is removed (the directory belongs to the supervisor) and the fact is logged as an error.
 
     Example:
         >>> import tempfile, hashlib
@@ -445,13 +519,11 @@ def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> 
     """
     skills_dir.mkdir(parents=True, exist_ok=True)
     root = skills_dir.resolve()
-    manifest_path = root / ".agenomic_manifest.json"
-    try:
-        previous = set(json.loads(manifest_path.read_text(encoding="utf-8")).get("files", []))
-    except (OSError, ValueError, AttributeError):
-        previous = set()
+    manifest_path = root / _MANIFEST
+    previous = _previous_files(root, manifest_path)
     counts = {"written": 0, "unchanged": 0, "removed": 0, "rejected": 0}
     current: set[str] = set()
+    writes: list[tuple[Path, bytes]] = []
     for skill in skills:
         target = str(skill.get("target") or "")
         content = skill.get("content")
@@ -463,6 +535,7 @@ def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> 
             or os.path.isabs(rel)
             or not isinstance(content, str)
             or not str(dest).startswith(str(root) + os.sep)
+            or dest == manifest_path
         ):
             counts["rejected"] += 1
             continue
@@ -474,20 +547,27 @@ def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> 
         relative = str(dest.relative_to(root))
         current.add(relative)
         if dest.exists() and dest.read_bytes() == data:
+            if sys.platform != "win32" and stat.S_IMODE(dest.stat().st_mode) != 0o644:
+                os.chmod(dest, 0o644)  # a wider mode set since the last sync is narrowed
             counts["unchanged"] += 1
             continue
+        writes.append((dest, data))
+    if any(str(dest.relative_to(root)) not in previous for dest, _ in writes):
+        # Record the new files before writing them: a sync interrupted after a write still
+        # leaves a manifest that names it, so a later sync removes it once unapproved.
+        _write_atomic(
+            manifest_path, json.dumps({"files": sorted(previous | current)}).encode("utf-8"), 0o644
+        )
+    for dest, data in writes:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_name(f".{dest.name}.tmp")
-        tmp.write_bytes(data)
-        os.chmod(tmp, 0o644)
-        os.replace(tmp, dest)
+        _write_atomic(dest, data, 0o644)
         counts["written"] += 1
     for stale in sorted(previous - current):
         path = (root / stale).resolve()
         if str(path).startswith(str(root) + os.sep) and path.is_file():
             path.unlink()
             counts["removed"] += 1
-    manifest_path.write_text(json.dumps({"files": sorted(current)}), encoding="utf-8")
+    _write_atomic(manifest_path, json.dumps({"files": sorted(current)}).encode("utf-8"), 0o644)
     return counts
 
 

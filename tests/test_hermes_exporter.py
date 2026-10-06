@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -16,6 +17,8 @@ from agenomic.integrations.hermes.exporter import (
     mask_text,
     redacted_preview,
 )
+
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 
 SECRETS = ("sk-livesecretvalue123", "agmhr_runtimesecret", "hunter2-password")
 
@@ -364,3 +367,76 @@ def test_credential_schemes_are_masked_but_stay_readable(text: str, kept: str, s
 )
 def test_ordinary_prose_is_not_masked(prose: str) -> None:
     assert mask_text(prose) == prose
+
+
+class _Opaque:
+    def __str__(self) -> str:
+        return "client with x-api-key: plainsecret"
+
+
+def test_object_leaves_are_masked_before_serialization(tmp_path: Path) -> None:
+    error = RuntimeError("upstream said Authorization: Basic cGxhaW5zZWNyZXQ=")
+    event = EventBuilder("metadata").build(
+        "api.request.failed",
+        reason=error,
+        extra={"error": error, "client": _Opaque(), "nested": [error], "latency": float("nan")},
+        usage={"ratio": float("inf"), "input_tokens": 3, "ok": True},
+    )
+    assert event["reason"] == "upstream said Authorization: Basic ***"
+    assert event["extra"]["client"] == "client with x-api-key: ***"
+    assert event["extra"]["nested"] == ["upstream said Authorization: Basic ***"]
+    assert event["extra"]["latency"] is None
+    assert event["usage"] == {"ratio": None, "input_tokens": 3, "ok": True}
+    # Strict JSON (no NaN) and no credential, in the exporter's own serialization too.
+    text = json.dumps(event, allow_nan=False)
+    assert "cGxhaW5zZWNyZXQ=" not in text
+    assert "plainsecret" not in text
+    spool = tmp_path / "spool.jsonl"
+
+    def failing(batch: list[dict[str, Any]]) -> None:
+        raise ConnectionError("down")
+
+    exporter = EventExporter(failing, max_retries=0, flush_interval_s=10, spool_path=str(spool))
+    exporter.submit(event)
+    exporter.close(0.2)
+    spooled = spool.read_text()
+    assert "Basic ***" in spooled
+    assert "cGxhaW5zZWNyZXQ=" not in spooled
+    assert "plainsecret" not in spooled
+
+
+@posix_only
+def test_existing_spool_is_narrowed_to_owner_only(tmp_path: Path) -> None:
+    spool = tmp_path / "spool.jsonl"
+    spool.write_text("")
+    os.chmod(spool, 0o644)
+
+    def failing(batch: list[dict[str, Any]]) -> None:
+        raise ConnectionError("down")
+
+    exporter = EventExporter(failing, max_retries=0, flush_interval_s=10, spool_path=str(spool))
+    exporter.submit(EventBuilder().build("x"))
+    exporter.close(0.2)
+    assert len(spool.read_text().splitlines()) == 1
+    assert oct(spool.stat().st_mode & 0o777) == "0o600"
+
+
+@posix_only
+def test_spool_directory_it_creates_is_owner_only(tmp_path: Path) -> None:
+    spool = tmp_path / "fresh" / "spool.jsonl"
+    exporter = EventExporter(lambda batch: None, spool_path=str(spool))
+    exporter.close(0.2)
+    assert oct(spool.parent.stat().st_mode & 0o777) == "0o700"
+
+
+@posix_only
+def test_spool_rewrite_never_reuses_a_wide_temporary_file(tmp_path: Path) -> None:
+    from agenomic.integrations.hermes.exporter import _Spool
+
+    spool = _Spool(tmp_path / "spool.jsonl", 1 << 20)
+    spool.append([EventBuilder().build("a"), EventBuilder().build("b")])
+    leftover = tmp_path / "spool.jsonl.tmp"
+    leftover.write_text("stale")
+    os.chmod(leftover, 0o666)
+    assert len(spool.drain(1)) == 1
+    assert oct(spool.path.stat().st_mode & 0o777) == "0o600"

@@ -918,6 +918,12 @@ rule of the engineering rules above.
   instead.
 - No server answer yet means enforce semantics. `mode_hint` is never used to
   decide; only server answers set the mode.
+- Shadow and observe never change execution. The only local reasons that block
+  in every mode are a session `cancel` and a local `pause`/`quarantine`/`revoke`
+  status (which makes `local_mode()` enforce). Every other local check
+  (canonicalization, protected paths, compatibility, mutators, delegation,
+  pending approvals) blocks only in enforce and is recorded as a local
+  `tool.call.decision` otherwise.
 - Hermes expands `${...}` in plugin settings, so `runtime_token` is refused
   there and only accepted as an `${env:VAR}` reference from the
   `AGENOMIC_HERMES_CONFIG` file or the default variable.

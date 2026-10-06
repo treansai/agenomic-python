@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import socket
 import sys
@@ -197,6 +198,41 @@ def test_sync_skills(tmp_path: Path) -> None:
     assert sync_skills(skills[:1], out)["unchanged"] == 1
     assert sync_skills([], out)["removed"] == 1
     assert not (out / "demo" / "SKILL.md").exists()
+
+
+def _skill(name: str, body: str) -> dict[str, Any]:
+    return {
+        "target": f"skills/{name}/SKILL.md",
+        "version": 1,
+        "digest": "sha256:" + hashlib.sha256(body.encode()).hexdigest(),
+        "content": body,
+    }
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc/self/fd")
+def test_failed_manifest_write_keeps_the_previous_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A"), _skill("b", "B")], out)
+    manifest = out / ".agenomic_manifest.json"
+    before = manifest.read_bytes()
+    real_fsync = os.fsync
+
+    def full_disk(fd: int) -> None:
+        if "agenomic_manifest.json" in os.readlink(f"/proc/self/fd/{fd}"):
+            raise OSError(28, "No space left on device")
+        real_fsync(fd)
+
+    monkeypatch.setattr(sup.os, "fsync", full_disk)
+    with pytest.raises(OSError):
+        sync_skills([_skill("a", "A")], out)
+    monkeypatch.undo()
+    assert manifest.read_bytes() == before, "the previous manifest is intact"
+    assert not [p for p in out.iterdir() if p.name.endswith(".tmp")]
+    sync_skills([_skill("a", "A")], out)
+    assert not (out / "b" / "SKILL.md").exists()
+    assert json.loads(manifest.read_text()) == {"files": ["a/SKILL.md"]}
 
 
 def make_supervisor(tmp_path: Path, api: FakeApi, argv: list[str]) -> Supervisor:
@@ -619,3 +655,87 @@ def test_main_refuses_a_provider_credential_as_runtime_token(
         assert not [r for r in server.requests if r.path == "/v1/hermes/supervisor/heartbeat"]
     finally:
         server.close()
+
+
+def test_manifest_encoding_failure_keeps_the_previous_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A"), _skill("b", "B")], out)
+    manifest = out / ".agenomic_manifest.json"
+    before = manifest.read_bytes()
+
+    class _Json:
+        loads = staticmethod(json.loads)
+
+        @staticmethod
+        def dumps(value: object) -> str:
+            return "\ud800"  # cannot be encoded: the write fails part way
+
+    monkeypatch.setattr(sup, "json", _Json)
+    with pytest.raises(UnicodeEncodeError):
+        sync_skills([_skill("a", "A")], out)
+    monkeypatch.undo()
+    assert manifest.read_bytes() == before
+    sync_skills([_skill("a", "A")], out)
+    assert not (out / "b" / "SKILL.md").exists()
+    assert json.loads(manifest.read_text()) == {"files": ["a/SKILL.md"]}
+
+
+@pytest.mark.parametrize("corrupt", ["", '{"files": ["a/SKI', '{"files": [1]}', "[]"])
+def test_corrupt_manifest_still_removes_unapproved_skills(tmp_path: Path, corrupt: str) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A"), _skill("b", "B")], out)
+    (out / ".agenomic_manifest.json").write_text(corrupt)
+    counts = sync_skills([_skill("a", "A")], out)
+    assert counts["removed"] == 1
+    assert (out / "a" / "SKILL.md").read_text() == "A"
+    assert not (out / "b" / "SKILL.md").exists()
+    assert json.loads((out / ".agenomic_manifest.json").read_text()) == {"files": ["a/SKILL.md"]}
+
+
+def test_skill_named_like_the_manifest_is_rejected(tmp_path: Path) -> None:
+    body = '{"files": []}'
+    skill = {
+        "target": "skills/.agenomic_manifest.json",
+        "digest": "sha256:" + hashlib.sha256(body.encode()).hexdigest(),
+        "content": body,
+    }
+    assert sync_skills([skill, _skill("a", "A")], tmp_path)["rejected"] == 1
+    assert json.loads((tmp_path / ".agenomic_manifest.json").read_text()) == {
+        "files": ["a/SKILL.md"]
+    }
+
+
+def test_interrupted_sync_still_names_the_files_it_wrote(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A")], out)
+    real = sup._write_atomic
+    written: list[str] = []
+
+    def crash_after_one_skill(path: Path, data: bytes, mode: int) -> None:
+        if path.name == "SKILL.md" and written:
+            raise OSError(28, "No space left on device")
+        real(path, data, mode)
+        if path.name == "SKILL.md":
+            written.append(str(path))
+
+    monkeypatch.setattr(sup, "_write_atomic", crash_after_one_skill)
+    with pytest.raises(OSError):
+        sync_skills([_skill("a", "A"), _skill("b", "B"), _skill("c", "C")], out)
+    monkeypatch.undo()
+    assert (out / "b" / "SKILL.md").exists()
+    # b is no longer approved: the manifest written before it named it, so it goes.
+    sync_skills([_skill("a", "A")], out)
+    assert not (out / "b" / "SKILL.md").exists()
+
+
+@posix_only
+def test_unchanged_skill_with_a_wider_mode_is_narrowed(tmp_path: Path) -> None:
+    sync_skills([_skill("a", "A")], tmp_path)
+    path = tmp_path / "a" / "SKILL.md"
+    os.chmod(path, 0o666)
+    assert sync_skills([_skill("a", "A")], tmp_path)["unchanged"] == 1
+    assert oct(path.stat().st_mode & 0o777) == "0o644"

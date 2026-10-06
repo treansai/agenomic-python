@@ -63,6 +63,7 @@ from agenomic.integrations.hermes.exporter import (
     EventExporter,
     content_hash,
     now_iso,
+    open_private,
     redacted_preview,
 )
 from agenomic.integrations.hermes.guard import (
@@ -112,6 +113,8 @@ APPROVAL_IN_USE_MESSAGE = (
     "using it; the action was not executed."
 )
 NO_AUTH_MESSAGE = "Agenomic: no valid authorization for this action"
+#: Reason recorded when a call's arguments have no canonical form (``agenomic.canon/v1``).
+NOT_CANONICAL_REASON = "arguments_not_canonical"
 
 
 @dataclass
@@ -271,7 +274,8 @@ def write_status(
         doc["error"] = error
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # A temporary file left by an earlier crash keeps its mode on reopen; it is narrowed.
+    fd = open_private(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(doc, fh)
     # On Windows the replace fails while a reader (the guard) has the file open; retry
@@ -369,6 +373,9 @@ class HermesAdapter:
         self._auth: OrderedDict[tuple[str, str, str], _Authorization] = OrderedDict()
         self._pending: dict[tuple[str, str, str], _Pending] = {}
         self._post_status: OrderedDict[tuple[str, str, str], str] = OrderedDict()
+        # Calls whose arguments had no canonical form and were already recorded, so the
+        # second gate of the same call does not record it again.
+        self._not_canonical: OrderedDict[tuple[str, str, str], None] = OrderedDict()
         self._report_retries: deque[_ReportRetry] = deque(maxlen=1000)
         self._commands_seen: set[str] = set()
         # Acknowledgements that failed in transport; retried on every tick until accepted.
@@ -1604,7 +1611,18 @@ class HermesAdapter:
                 reserved = key in self._provisional_delegations
             if not reserved:
                 denied, reservation = self._reserve_delegation(sid, args, tool_call_id)
-                if denied and mode != "shadow":
+                if denied and mode == "shadow":
+                    # Shadow never changes execution: the refused reservation is recorded.
+                    self._emit_decision(
+                        sid,
+                        tool,
+                        tool_call_id,
+                        "deny",
+                        denied,
+                        local_hash,
+                        extra={"local": True, "shadow": True},
+                    )
+                elif denied:
                     self._emit_decision(sid, tool, tool_call_id, "deny", denied, local_hash)
                     return _Verdict(block=denied)
                 if reservation is not None:
@@ -1612,7 +1630,9 @@ class HermesAdapter:
                         self._provisional_delegations[key] = reservation
         claim = tool_call_id or f"hermes-{uuid.uuid4().hex}"
         with self._lock:
-            pending = self._pending.get(key)
+            # An approval required while enforcing stays for a later enforce; in shadow the
+            # call is asked afresh, so a pending or refused approval never blocks it.
+            pending = self._pending.get(key) if mode != "shadow" else None
             previous = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None
             in_use = pending is not None and pending.claimed_by not in (None, claim)
             if pending is not None and not in_use:
@@ -1884,6 +1904,45 @@ class HermesAdapter:
             return None
         return f"Agenomic authorization unavailable ({code}); the action was not executed."
 
+    def _arguments_not_canonical(
+        self, sid: str, tool: str, tool_call_id: str, args: Mapping[str, object]
+    ) -> Optional[str]:
+        """Arguments without a canonical form (NaN, a set, an object another plugin put
+        there) cannot be authorized: blocked in enforce; in shadow and observe the call
+        proceeds and a local ``tool.call.decision`` records the counterfactual deny.
+        Recorded once per call, whichever gate sees it first."""
+        mode = self.local_mode()
+        key = (sid, tool, tool_call_id)
+        with self._lock:
+            recorded = bool(tool_call_id) and key in self._not_canonical
+            if tool_call_id and not recorded:
+                self._not_canonical[key] = None
+                while len(self._not_canonical) > _MAX_AUTH:
+                    self._not_canonical.popitem(last=False)
+        if not recorded:
+            extra: dict[str, object] = {
+                "local": True,
+                "local_mode": mode,
+                "reason_codes": [NOT_CANONICAL_REASON],
+            }
+            if mode != "enforce":
+                extra["counterfactual"] = {
+                    "outcome": "deny",
+                    "reason_codes": [NOT_CANONICAL_REASON],
+                }
+            self._emit_decision(
+                sid,
+                tool,
+                tool_call_id,
+                "deny",
+                NOT_CANONICAL_REASON,
+                content_hash(args),
+                extra=extra,
+            )
+        if mode != "enforce":
+            return None
+        return f"Agenomic: arguments of {tool} have no canonical form; the action was not executed."
+
     def _blocked_session(self, sid: str) -> Optional[str]:
         if sid and sid in self._cancel_sessions:
             return "Agenomic cancelled this session; the action was not executed."
@@ -1910,11 +1969,8 @@ class HermesAdapter:
             try:
                 local_hash = arguments_hash(args)
             except CanonicalError:
-                if self.local_mode() == "observe":
-                    return None
-                return _block(
-                    f"Agenomic: arguments of {tool} have no canonical form; the action was not executed."
-                )
+                message = self._arguments_not_canonical(sid, tool, tool_call_id, args)
+                return _block(message) if message else None
             self._emit(
                 "tool.call.requested",
                 sid or None,
@@ -1991,7 +2047,10 @@ class HermesAdapter:
         try:
             local_hash = arguments_hash(args)
         except CanonicalError:
-            return _ExecutionPlan(False, error=NO_AUTH_MESSAGE, meta=meta)
+            message = self._arguments_not_canonical(sid, tool, tool_call_id, args)
+            if message:
+                return _ExecutionPlan(False, error=message, meta=meta)
+            return _ExecutionPlan(True, meta=meta)
         meta["local_hash"] = local_hash
         with self._lock:
             auth = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None

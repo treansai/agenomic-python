@@ -36,8 +36,10 @@ from __future__ import annotations
 import itertools
 import json
 import logging
+import math
 import os
 import re
+import sys
 import threading
 import time
 from collections import OrderedDict, deque
@@ -154,9 +156,34 @@ def _walk(value: object, leaf: Callable[[object], object]) -> object:
     return leaf(value)
 
 
+def _redact_leaf(value: object) -> object:
+    """A JSON scalar for any leaf, with credential-shaped text masked.
+
+    Strings are masked; ``None``, booleans, integers and finite floats stay; a non-finite
+    float (``json.dumps`` would write ``NaN``, which is not JSON) becomes ``None``; anything
+    else (an exception, bytes, a custom object) becomes its masked ``str``, so no ``str()``
+    taken later by ``json.dumps(default=str)`` can carry an unmasked credential.
+
+    Example:
+        >>> _redact_leaf(ValueError("Authorization: Basic cGxhaW4=")), _redact_leaf(float("nan"))
+        ('Authorization: Basic ***', None)
+    """
+    if isinstance(value, str):
+        return mask_text(value)
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    try:
+        text = str(value)
+    except Exception:  # a broken __str__ must not drop the event
+        text = f"<{type(value).__name__}>"
+    return mask_text(text)
+
+
 def _redact_field(value: object) -> object:
     """Mask credential-named keys and credential-shaped text in any event field."""
-    return _walk(value, lambda leaf: mask_text(leaf) if isinstance(leaf, str) else leaf)
+    return _walk(value, _redact_leaf)
 
 
 def _mask_secret_keys(value: object) -> object:
@@ -349,14 +376,49 @@ class ExporterStats(dict[str, JsonValue]):
     """
 
 
+def open_private(path: Path, flags: int) -> int:
+    """Open ``path`` for writing as a file only its owner can read.
+
+    ``os.open``'s mode applies only when the file is created, so an existing file is
+    narrowed to ``0600`` too; a file owned by another user, or a symbolic link, is refused
+    (``OSError``). Windows has no POSIX modes: the file is opened as is.
+
+    Example:
+        >>> import tempfile
+        >>> p = Path(tempfile.mkdtemp()) / "f"
+        >>> p.write_text("x") and None
+        >>> os.chmod(p, 0o644)
+        >>> os.close(open_private(p, os.O_WRONLY | os.O_APPEND))
+        >>> oct(p.stat().st_mode & 0o777) if sys.platform != "win32" else "0o600"
+        '0o600'
+    """
+    fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    if sys.platform == "win32":
+        return fd
+    try:
+        st = os.fstat(fd)
+        if st.st_uid != os.geteuid():
+            raise PermissionError(f"spool file {path.name} is owned by another user")
+        if st.st_mode & 0o777 != 0o600:
+            os.fchmod(fd, 0o600)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 class _Spool:
-    """Append only JSONL file capped at ``max_bytes``; lines are already redacted events."""
+    """Append only JSONL file capped at ``max_bytes``; lines are already redacted events.
+
+    The file (and its temporary copy) is ``0600`` even when it existed with a wider mode;
+    a directory the spool creates is ``0700``.
+    """
 
     def __init__(self, path: Path, max_bytes: int) -> None:
         self.path = path
         self.max_bytes = max_bytes
         self._lock = threading.Lock()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def size(self) -> int:
         try:
@@ -371,7 +433,9 @@ class _Spool:
             lines: list[str] = []
             rejected: list[dict[str, Any]] = []
             for event in events:
-                line = json.dumps(event, separators=(",", ":"), ensure_ascii=False) + "\n"
+                line = (
+                    json.dumps(event, separators=(",", ":"), ensure_ascii=False, default=str) + "\n"
+                )
                 cost = len(line.encode("utf-8"))
                 if size + cost > self.max_bytes:
                     rejected.append(event)
@@ -379,7 +443,7 @@ class _Spool:
                 size += cost
                 lines.append(line)
             if lines:
-                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                fd = open_private(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
                 with os.fdopen(fd, "a", encoding="utf-8") as fh:
                     fh.writelines(lines)
             return rejected
@@ -401,9 +465,11 @@ class _Spool:
                     taken.append(item)
             rest = raw[limit:]
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            fd = open_private(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.writelines(line + "\n" for line in rest)
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, self.path)
             return taken
 
@@ -519,7 +585,7 @@ class EventExporter:
         if self._spool is not None:
             try:
                 rejected = self._spool.append(events)
-            except OSError as e:
+            except (OSError, TypeError, ValueError) as e:
                 logger.warning("event spool write failed: %s", type(e).__name__)
                 rejected = events
             if rejected:

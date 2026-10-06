@@ -134,10 +134,15 @@ The server computes the effective state on every admission and returns it in
 | Effective state | Adapter behaviour |
 | --- | --- |
 | `observe` | events only, `authorize` is never called |
-| `shadow` | `authorize` is called and recorded as counterfactual, nothing is blocked; an authorization outage emits `authorization.unavailable` and the call proceeds |
+| `shadow` | `authorize` is called and recorded as counterfactual, nothing is blocked; an authorization outage emits `authorization.unavailable` and the call proceeds; local checks (protected paths, incompatible Hermes, unconfirmed mutators, refused delegation, arguments without a canonical form) emit a local `tool.call.decision` and the call proceeds; an approval still pending from an earlier enforce is not consulted (the call is asked afresh) |
 | `enforce` | `allow` executes; `deny` and `require_approval` block; any error, timeout or invalid answer blocks |
 | `enforce_blocked`, `paused`, `quarantined`, `revoked` | treated as enforce; the server denies |
 | unknown (no answer yet) | treated as enforce: no valid decision, no execution |
+
+Two local reasons block in every mode, shadow and observe included, because
+they are operator commands rather than policy decisions: a `cancel` of the
+session, and a local `pause`, `quarantine` or `revoke` status (it makes the
+adapter treat the instance as enforce until `resume`).
 
 ## How a tool call is controlled
 
@@ -184,7 +189,12 @@ skip the frame and execute: fail open); it returns
   so the next retry resumes the same identity and the gateway answers it.
 - The arguments hash is `blake3` over the gateway's canonical JSON
   (`agenomic.canon/v1`, test vectors generated from agenomic-cloud in
-  `tests/fixtures/hermes_canonical_vectors.json`). Arguments that change
+  `tests/fixtures/hermes_canonical_vectors.json`). Arguments without a
+  canonical form (`NaN`, a set, an object another plugin put there) cannot be
+  authorized: the call is blocked in enforce and proceeds in shadow and
+  observe; in every mode a local `tool.call.decision` (`deny`, reason
+  `arguments_not_canonical`, with a counterfactual outside enforce) is
+  recorded once per call. Arguments that change
   between authorization and execution are blocked in enforce;
   `post_tool_call` compares the executed arguments and emits
   `authorization.argument_mismatch` when another plugin modified them.
@@ -224,12 +234,18 @@ whose key names a credential (`api_key`, `x-api-key`, `password`, `token`,
 info (`scheme://user:***@host`). The scheme, header and key names stay
 readable; prose such as "token budget" or `max_tokens=512` is not masked. In every capture
 mode the event fields and the whole `extra` mapping, its top-level keys
-included, get the same key and pattern masking.
+included, get the same key and pattern masking. A value that is not a JSON
+scalar (an exception, bytes, any other object) is replaced by its masked
+`str()`, and a non-finite float by `null`, so nothing reaches serialization
+unmasked and every event is strict JSON.
 
 The exporter never blocks the agent: a bounded buffer, one daemon thread,
 batches of at most 500 to `POST /events`, 3 retries with backoff,
 deduplication by `event_id`, drop and count on overflow, and an optional
-size capped JSONL spool (mode `0600`) for undelivered batches. The spool is
+size capped JSONL spool for undelivered batches. The spool is `0600` even
+when the file already existed with a wider mode, a spool owned by another
+user or a symbolic link is refused, and a directory the exporter creates for
+it is `0700`. The spool is
 replayed one batch at a time when the buffer is idle and, under continuous
 load, after every 10 live batches or once per `flush_interval_s`. Its stats
 (`buffered`, `dropped`, `buffer_full`, `last_flush_error`) go into every
@@ -293,7 +309,14 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
 - Approved skills (`GET /skills/approved`) are written into `--skills-dir`
   after their digest (`sha256:` or `blake3:`) is checked; targets escaping the
   directory are rejected; files a previous sync wrote and that are no longer
-  approved are removed. Mount that directory read only into the agent.
+  approved are removed. Skill files and the manifest of written files
+  (`.agenomic_manifest.json`) are replaced atomically (temporary file, `fsync`,
+  rename), and new files are added to the manifest before they are written,
+  so an interrupted sync never forgets a file. When the manifest is
+  unreadable or malformed anyway, the sync logs an error and removes every
+  regular file of the directory that is not approved now: the directory
+  belongs to the supervisor, and only approved skills may stay there. Mount
+  that directory read only into the agent.
 - SIGTERM or SIGINT stops the child and sends a final heartbeat. That
   heartbeat (also sent after the child exited without restarts, or after
   restarts were exhausted) is report only: commands it returns are neither

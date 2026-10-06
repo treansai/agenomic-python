@@ -11,6 +11,7 @@ The two Hermes call orders are simulated faithfully:
 from __future__ import annotations
 
 import json
+import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -1353,3 +1354,99 @@ def test_shutdown_closes_the_client_and_releases_the_atexit_hook(
     out = Runner(adapter).agent_loop("terminal", {"command": "ls"}, sid="s", tcid="late")
     assert "error" in json.loads(out)
     assert hooks == []
+
+
+# ---------------------------------------------------------------- shadow never changes execution
+
+
+def _local_decisions(server: FakeAgenomic, reason: str) -> list[dict[str, Any]]:
+    return [
+        e
+        for e in server.events
+        if e.get("type") == "tool.call.decision" and e.get("reason") == reason
+    ]
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+@pytest.mark.parametrize("state", ["observe", "shadow", "enforce"])
+@pytest.mark.parametrize("bad", [float("nan"), {"a", "b"}, object()], ids=["nan", "set", "object"])
+def test_arguments_without_canonical_form_block_only_in_enforce(
+    server: FakeAgenomic, tmp_path: Path, order: str, state: str, bad: object
+) -> None:
+    server.effective_state = state
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    result = getattr(runner, order)("read_file", {"path": "/tmp/x", "injected": bad})
+    adapter.exporter.flush(3.0)
+    recorded = _local_decisions(server, "arguments_not_canonical")
+    assert len(recorded) == 1, "recorded once, whichever gate sees the call first"
+    event = recorded[0]
+    assert event["decision"] == "deny"
+    assert event["extra"]["local"] is True
+    assert event["extra"]["local_mode"] == state
+    assert server.authorize_calls() == []
+    if state == "enforce":
+        assert runner.executions == 0
+        assert "no canonical form" in json.loads(result)["error"]
+        assert "counterfactual" not in event["extra"]
+    else:
+        assert runner.executions == 1, f"{state} never changes execution"
+        assert event["extra"]["counterfactual"] == {
+            "outcome": "deny",
+            "reason_codes": ["arguments_not_canonical"],
+        }
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_pending_approval_from_enforce_never_blocks_in_shadow(
+    server: FakeAgenomic, tmp_path: Path, order: str
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    args = {"path": "/tmp/x", "content": "x"}
+    first = json.loads(getattr(runner, order)("write_file", args, tcid="call_1"))
+    assert "approval" in first["error"]
+    assert runner.executions == 0
+
+    server.effective_state = "shadow"
+    adapter.tick()  # the server now answers shadow
+    assert adapter.local_mode() == "shadow"
+    getattr(runner, order)("write_file", args, tcid="call_2")
+    assert runner.executions == 1, "a still pending approval does not block in shadow"
+    assert server.authorize_calls()[-1].body["tool_call_id"] == "call_2"
+    assert adapter._pending, "the enforce approval stays for a later enforce"
+
+
+@pytest.mark.parametrize("state", ["shadow", "enforce"])
+def test_refused_delegation_is_recorded_and_blocks_only_in_enforce(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    server.effective_state = state
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    monkeypatch.setattr(
+        adapter.client,
+        "reserve_delegation",
+        lambda sid, body: {"decision": "deny", "explanation": "delegation limit reached"},
+    )
+    runner = Runner(adapter)
+    runner.direct("delegate_task", {"tasks": [{"goal": "a"}]})
+    adapter.exporter.flush(3.0)
+    assert _local_decisions(server, "Agenomic denied delegate_task: delegation limit reached")
+    assert runner.executions == (1 if state == "shadow" else 0)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_status_file_is_owner_only_even_over_a_leftover_temporary(tmp_path: Path) -> None:
+    import os
+    import threading
+
+    path = tmp_path / "agenomic" / "status.json"
+    path.parent.mkdir()
+    leftover = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    leftover.write_text("stale")
+    os.chmod(leftover, 0o666)
+    plugin_mod.write_status(path, loaded=True, instance_status="active", effective_state="observe")
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
