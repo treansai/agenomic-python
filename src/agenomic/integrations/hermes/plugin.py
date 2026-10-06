@@ -2441,6 +2441,20 @@ class HermesAdapter:
                 return None
             with self._lock:
                 existing = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None
+            if existing is not None and self._retire_stale(existing):
+                existing = None
+            if (
+                existing is not None
+                and existing.state == "executing"
+                and existing.effective_mode == "shadow"
+                and self.local_mode() == "enforce"
+            ):
+                # Agent loop order: the middleware ran under a shadow decision and enforce
+                # became active before this gate; no enforce permit covers the call.
+                return _block(
+                    f"Agenomic: enforce became active after {tool} was decided in shadow; "
+                    "the action was not executed."
+                )
             if existing is not None and existing.state in ("authorized", "executing"):
                 if existing.local_hash == local_hash:
                     return None
@@ -2478,11 +2492,24 @@ class HermesAdapter:
             reason=f"arguments changed after authorization ({where})",
             extra={"authorized_hash": auth.local_hash, "server_hash": auth.server_hash},
         )
-        if auth.effective_mode == "shadow":
+        if auth.effective_mode == "shadow" or self.local_mode() == "shadow":
+            # Shadow never changes execution, also when it became active after enforce
+            # authorized the call: the mismatch is recorded only.
             return None
         return _block(
             f"Agenomic: arguments of {auth.tool} changed after authorization; the action was not executed."
         )
+
+    def _retire_stale(self, auth: _Authorization) -> bool:
+        """Retire ``auth`` when it was decided under another mode than the current one and
+        has not started executing (the state changed between the gates): the call is then
+        authorized again under the current mode. Returns whether it was retired."""
+        with self._lock:
+            if auth.state != "authorized" or auth.effective_mode == self.local_mode():
+                return False
+            auth.state = "done"
+        self._drop_delegation(auth)
+        return True
 
     # ------------------------------------------------------------------
     # execution and reporting
@@ -2538,6 +2565,8 @@ class HermesAdapter:
             auth = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None
             if auth is not None and auth.state == "done":
                 auth = None
+        if auth is not None and self._retire_stale(auth):
+            auth = None  # decided under another mode: asked again under the current one
         if auth is None:
             # Agent loop order: the middleware runs before pre_tool_call, so it asks first.
             try:

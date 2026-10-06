@@ -852,10 +852,46 @@ def test_failed_tick_still_stops_the_child(monkeypatch: pytest.MonkeyPatch, tmp_
             proc.wait(10)
 
 
+@pytest.mark.parametrize("kind", ["quarantine", "revoke"])
+def test_pending_stop_command_is_applied_before_hermes_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
+) -> None:
+    api = FakeApi()
+    # Left pending by a previous supervisor whose final report did not execute it.
+    api.commands = [{"id": "q1", "kind": kind, "status": "requested"}]
+    s = make_supervisor(tmp_path, api, [sys.executable, "-c", "import time; time.sleep(30)"])
+    monkeypatch.setattr(sup.signal, "signal", lambda *_a: None)
+    order: list[str] = []
+    real_sync = s.sync_skills
+    monkeypatch.setattr(s, "sync_skills", lambda: order.append("skills") or real_sync())
+    real_start = s.start_child
+
+    def counting_start() -> bool:
+        order.append("start")
+        return real_start()
+
+    monkeypatch.setattr(s, "start_child", counting_start)
+    s.settings.restart = False
+    try:
+        s.run()
+        assert s.proc is None, f"a pending {kind} keeps Hermes from starting"
+        assert s.refuse_restart
+        assert ("q1", "applied") in [(c, st) for c, st, _ in api.acks]
+    finally:
+        proc = s.proc
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait(10)
+
+
 def test_final_heartbeat_is_report_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class ResumeAfterStop(FakeApi):
+        ran = False
+
         def heartbeat(self, body: dict[str, Any]) -> dict[str, Any]:
-            if body["process"]["state"] == "stopped":
+            state = body["process"]["state"]
+            self.ran = self.ran or state in ("running", "exited")
+            if state == "stopped" and self.ran:
                 # Only the report sent after the child was stopped carries the command.
                 self.commands = [{"id": "r9", "kind": "resume", "status": "requested"}]
             return super().heartbeat(body)

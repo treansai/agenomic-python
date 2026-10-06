@@ -2142,3 +2142,68 @@ def test_every_cancel_of_one_target_is_applied(
     adapter.subagent_stop(parent_session_id="p", child_session_id="c", child_status="interrupted")
     applied = [c for c, b in server.acks if b["status"] == "applied"]
     assert applied == ["k1", "k2"], "each waiting cancel is acknowledged once"
+
+
+def test_shadow_decision_is_asked_again_when_enforce_starts_between_the_gates(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.effective_state = "shadow"
+    server.decide = lambda body: "deny"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "shadow"
+    runner = Runner(adapter)
+    kw = runner._kw("write_file", "s1", "call_1")
+    args = {"path": "/tmp/x", "content": "y"}
+    # Direct dispatch: shadow records the deny and lets the call through...
+    assert adapter.pre_tool_call(args=args, **kw) is None
+    asked = len(server.authorize_calls())
+    # ...then enforce becomes active before the execution gate.
+    server.effective_state = "enforce"
+    adapter._set_state("enforce")
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert len(server.authorize_calls()) == asked + 1, "decided again under enforce"
+    assert runner.executions == 0, "the enforce deny blocks"
+    assert "error" in json.loads(str(out))
+
+
+def test_enforce_starting_inside_a_shadow_execution_blocks_at_the_second_gate(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server.effective_state = "shadow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real = adapter.pre_tool_call
+
+    def enforce_then_gate(**kwargs: Any) -> Any:
+        server.effective_state = "enforce"
+        adapter._set_state("enforce")
+        return real(**kwargs)
+
+    monkeypatch.setattr(adapter, "pre_tool_call", enforce_then_gate)
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("write_file", {"path": "/tmp/x", "content": "y"}))
+    assert runner.executions == 0
+    assert "enforce became active" in out["error"]
+
+
+def test_argument_change_never_blocks_once_shadow_is_active(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    real = adapter.pre_tool_call
+
+    def shadow_then_gate(**kwargs: Any) -> Any:
+        server.effective_state = "shadow"
+        adapter._set_state("shadow")
+        # Another plugin changed the arguments before this gate sees them.
+        return real(**{**kwargs, "args": {"path": "/tmp/b"}})
+
+    monkeypatch.setattr(adapter, "pre_tool_call", shadow_then_gate)
+    runner = Runner(adapter)
+    # Agent loop: the middleware authorized under enforce; shadow is active when the
+    # second gate sees the changed arguments.
+    runner.agent_loop("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 1, "shadow never changes execution"

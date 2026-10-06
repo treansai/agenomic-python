@@ -1537,10 +1537,11 @@ class Supervisor:
             True
         """
         self.poll()
+        # Commands first: a stop command is never delayed by a slow skills sync.
+        self.heartbeat()
         if self._ticks % max(1, self.settings.skills_every) == 0:
             self.sync_skills()
         self._ticks += 1
-        self.heartbeat()
         self._retry_acks()
 
     def request_stop(self, *_: object) -> None:
@@ -1565,8 +1566,13 @@ class Supervisor:
         """
         signal.signal(signal.SIGTERM, self.request_stop)
         signal.signal(signal.SIGINT, self.request_stop)
+        # Commands still pending (a quarantine or revoke a previous supervisor only reported)
+        # are fetched and applied while Hermes is not running: it starts only if allowed.
+        # Without an answer from the gateway, Hermes starts and the next heartbeat applies them.
+        self.heartbeat()
         self.sync_skills()
-        self.start_child()
+        if self.proc is None:  # a ``resume`` just received already started it
+            self.start_child()
         failed = False
         try:
             while not self._stopping.is_set():
