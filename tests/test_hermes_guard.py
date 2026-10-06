@@ -150,3 +150,34 @@ def test_invalid_deadline_override_blocks(tmp_path: Path, value: str) -> None:
         AGENOMIC_HERMES_GUARD_MAX_AGE_S=value,
     )
     assert_block(code, out, "AGENOMIC_HERMES_GUARD_MAX_AGE_S")
+
+
+def test_status_read_retries_a_transient_sharing_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "status.json"
+    path.write_text(json.dumps({"loaded": True}), encoding="utf-8")
+    real_read = Path.read_text
+    calls: list[int] = []
+
+    def flaky_read(self: Path, *args: Any, **kwargs: Any) -> str:
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError(13, "sharing violation")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read)
+    assert guard._read_status(path) == {"loaded": True}
+    assert len(calls) == 2
+
+
+def test_status_read_gives_up_on_a_persistent_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def denied(self: Path, *args: Any, **kwargs: Any) -> str:
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    monkeypatch.setattr(guard, "_SHARING_BACKOFF_S", 0.0)
+    with pytest.raises(PermissionError):
+        guard._read_status(tmp_path / "status.json")

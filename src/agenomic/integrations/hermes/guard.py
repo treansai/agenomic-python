@@ -98,11 +98,23 @@ def evaluate(
     return None
 
 
+# On Windows a reader can briefly hit a sharing violation while the adapter replaces the
+# status file; retry a few times before treating it as unreadable.
+_SHARING_RETRIES = 5
+_SHARING_BACKOFF_S = 0.02
+
+
 def _read_status(path: Path) -> Optional[dict[str, Any]]:
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
+    for attempt in range(_SHARING_RETRIES):
+        try:
+            raw = path.read_text(encoding="utf-8")
+            break
+        except FileNotFoundError:
+            return None
+        except PermissionError:
+            if attempt == _SHARING_RETRIES - 1:
+                raise
+            time.sleep(_SHARING_BACKOFF_S)
     data = json.loads(raw)
     if not isinstance(data, dict):
         raise ValueError("status file is not an object")

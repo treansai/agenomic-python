@@ -65,7 +65,13 @@ from agenomic.integrations.hermes.exporter import (
     now_iso,
     redacted_preview,
 )
-from agenomic.integrations.hermes.guard import DEFAULT_MAX_AGE_S, STATUS_SCHEMA, status_path
+from agenomic.integrations.hermes.guard import (
+    _SHARING_BACKOFF_S,
+    _SHARING_RETRIES,
+    DEFAULT_MAX_AGE_S,
+    STATUS_SCHEMA,
+    status_path,
+)
 
 logger = logging.getLogger("agenomic.integrations.hermes.plugin")
 
@@ -257,7 +263,18 @@ def write_status(
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump(doc, fh)
-    os.replace(tmp, path)
+    # On Windows the replace fails while a reader (the guard) has the file open; retry
+    # briefly so a concurrent read never costs a heartbeat's status update.
+    for attempt in range(_SHARING_RETRIES):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == _SHARING_RETRIES - 1:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+                raise
+            time.sleep(_SHARING_BACKOFF_S)
 
 
 class HermesAdapter:

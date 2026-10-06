@@ -20,6 +20,7 @@ import pytest
 from hermes_fakes import FakeAgenomic, FakeCtx
 from pydantic import SecretStr
 
+from agenomic.integrations.hermes import guard as guard_mod
 from agenomic.integrations.hermes import plugin as plugin_mod
 from agenomic.integrations.hermes.canonical import arguments_hash
 from agenomic.integrations.hermes.client import HermesApiError
@@ -838,8 +839,31 @@ def test_heartbeat_thread_starts_and_writes_status(server: FakeAgenomic, tmp_pat
     assert adapter._thread is not None
     assert adapter._thread.is_alive()
     assert wait_for(lambda: len(server.calls("/heartbeat")) >= 1)
-    assert json.loads(server_state.read_text())["effective_state"] == "enforce"
+    # Read like the guard does: the heartbeat thread may be replacing the file right now.
+    status = guard_mod._read_status(server_state)
+    assert status is not None
+    assert status["effective_state"] == "enforce"
     adapter.shutdown()
+
+
+def test_status_write_retries_a_transient_sharing_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_replace = plugin_mod.os.replace
+    calls: list[int] = []
+
+    def flaky_replace(src: Any, dst: Any) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError(13, "sharing violation")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(plugin_mod.os, "replace", flaky_replace)
+    path = tmp_path / "agenomic" / "status.json"
+    plugin_mod.write_status(path, loaded=True, instance_status="active", effective_state="observe")
+    assert len(calls) == 2
+    assert json.loads(path.read_text())["effective_state"] == "observe"
+    assert [p.name for p in path.parent.iterdir()] == ["status.json"]
 
 
 def test_staged_skill_write_becomes_a_proposal_never_an_approval(
