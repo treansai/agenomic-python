@@ -612,7 +612,13 @@ class HermesAdapter:
             for kind, name, cb in candidates:
                 if cb == self.pre_tool_call or cb == self.tool_execution:
                     continue
-                label = str(getattr(cb, "__qualname__", None) or getattr(cb, "__name__", repr(cb)))
+                # Never repr(): a callable object's repr can carry its fields (tokens,
+                # prompts, configuration), and this label leaves the process unredacted.
+                label = str(
+                    getattr(cb, "__qualname__", None)
+                    or getattr(cb, "__name__", None)
+                    or f"<{type(cb).__qualname__} instance>"
+                )
                 if label.startswith("shell_hook[pre_tool_call:") and GUARD_COMMAND in label:
                     continue
                 found.append(
@@ -2653,7 +2659,16 @@ class HermesAdapter:
                 input_hash=local_hash,
                 content={"input": args},
             )
-            if self.local_mode() == "observe":
+            # In the agent loop order the middleware's admission is already done: a local
+            # command or a mode change applied since the first check is caught here, read
+            # atomically with the mode this gate then decides under.
+            with self._lock, self._state_lock:
+                local_block = self._local_blocker(sid)
+                observe_now = self.local_mode() == "observe"
+            if local_block is not None:
+                self._emit_local_block(sid, tool, tool_call_id, args, local_block)
+                return _block(local_block[0])
+            if observe_now:
                 return None
             with self._lock:
                 existing = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None

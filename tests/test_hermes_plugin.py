@@ -2682,3 +2682,52 @@ def test_observe_execution_rechecks_blockers_applied_during_its_checks(
     assert runner.executions == 0, f"{applied} applied during the observe checks stops the call"
     assert "not executed" in json.loads(str(out))["error"]
     assert adapter._auth[("s1", "read_file", "call_1")].state == "done"
+
+
+def test_foreign_mutator_label_never_uses_the_repr(server: FakeAgenomic, tmp_path: Path) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+
+    class TokenHook:
+        def __init__(self) -> None:
+            self.token = "sk-live-secret-token"
+
+        def __repr__(self) -> str:
+            return f"TokenHook(token={self.token!r})"
+
+        def __call__(self, **kwargs: Any) -> None:
+            return None
+
+    adapter.ctx._manager._hooks["pre_tool_call"].append(TokenHook())
+    adapter._ensure_started("cli")
+    hello = server.calls("/hello")[0].body
+    assert "sk-live-secret-token" not in json.dumps(hello)
+    labels = [f["callback"] for f in hello["foreign_mutators"]]
+    assert any("TokenHook" in label for label in labels)
+
+
+@pytest.mark.parametrize("applied", ["pause", "enforce"])
+def test_inner_gate_rechecks_observe_before_letting_the_call_run(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, applied: str
+) -> None:
+    server.effective_state = "observe"
+    server.decide = lambda body: "deny"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "observe"
+    runner = Runner(adapter)
+    real_checks = adapter._observe_local_checks
+
+    def applied_during_the_inner_gate(*a: Any, **k: Any) -> Any:
+        out = real_checks(*a, **k)
+        if a[-1] == "pre":  # the middleware's observe admission is already done
+            if applied == "pause":
+                adapter.handle_command({"id": "k1", "kind": "pause", "target_kind": "instance"})
+            else:
+                server.effective_state = "enforce"
+                adapter._set_state("enforce", adapter._state_request())
+        return out
+
+    monkeypatch.setattr(adapter, "_observe_local_checks", applied_during_the_inner_gate)
+    out = runner.agent_loop("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 0, f"{applied} applied inside the middleware stops the call"
+    assert "error" in json.loads(out)
