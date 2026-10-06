@@ -114,3 +114,10 @@ addopts = "-ra --strict-markers --cov=agenomic --cov-report=term-missing"
 markers = [
     "hermes: integration tests against the pinned Hermes Agent (need the Hermes venv, see docs/hermes.md)",
 ]
+
+[tool.coverage.report]
+# Code that only runs on POSIX (descriptor-relative skill sync) is marked
+# `# pragma: posix-only`; the Windows CI job sets COVERAGE_PLATFORM_EXCLUDE to
+# that marker so it is not counted as untested there. Elsewhere the default
+# pattern matches nothing and the code is measured.
+exclude_also = ["${COVERAGE_PLATFORM_EXCLUDE-(?!x)x}"]

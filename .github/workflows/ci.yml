@@ -38,6 +38,9 @@ jobs:
       - name: Mypy
         run: mypy src
       - name: Pytest
+        env:
+          # POSIX-only code cannot run on Windows; see [tool.coverage.report].
+          COVERAGE_PLATFORM_EXCLUDE: "${{ matrix.os == 'windows-latest' && '# pragma: posix-only' || '(?!x)x' }}"
         run: pytest -v --cov=agenomic --cov-fail-under=85
       - name: Run offline examples
         if: matrix.os != 'windows-latest'

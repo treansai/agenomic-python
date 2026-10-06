@@ -483,7 +483,7 @@ def _write_atomic(path: Path, data: bytes, mode: int) -> None:
         os.close(dir_fd)
 
 
-def _write_atomic_at(dir_fd: int, name: str, data: bytes, mode: int) -> None:
+def _write_atomic_at(dir_fd: int, name: str, data: bytes, mode: int) -> None:  # pragma: posix-only
     """:func:`_write_atomic` for the entry ``name`` of the directory open as ``dir_fd``
     (POSIX): the directory must belong to the supervisor, ``name`` must not be a link."""
     if sys.platform == "win32":
@@ -553,7 +553,7 @@ def _skill_parts(rel: str) -> Optional[tuple[str, ...]]:
     return tuple(norm.split("/"))
 
 
-def _open_skills_root(skills_dir: Path) -> int:
+def _open_skills_root(skills_dir: Path) -> int:  # pragma: posix-only
     """A descriptor of ``skills_dir`` created or opened without following a link (POSIX).
 
     The parent directory is opened with ``O_NOFOLLOW`` and must belong to the
@@ -597,7 +597,9 @@ def _open_skills_root(skills_dir: Path) -> int:
     return fd
 
 
-def _open_dir_at(root_fd: int, parts: Sequence[str], *, create: bool) -> Optional[int]:
+def _open_dir_at(
+    root_fd: int, parts: Sequence[str], *, create: bool
+) -> Optional[int]:  # pragma: posix-only
     """A descriptor of the subdirectory ``parts`` of ``root_fd``, every component opened
     with ``O_NOFOLLOW`` and required to belong to the supervisor (POSIX). ``None`` when a
     component is missing and ``create`` is false."""
@@ -633,7 +635,7 @@ def _open_dir_at(root_fd: int, parts: Sequence[str], *, create: bool) -> Optiona
     return fd
 
 
-def _unchanged_at(root_fd: int, parts: Sequence[str], data: bytes) -> bool:
+def _unchanged_at(root_fd: int, parts: Sequence[str], data: bytes) -> bool:  # pragma: posix-only
     """Whether the skill file ``parts`` already holds ``data`` (its mode is then narrowed
     to ``0644``). A link or a non regular file on the way raises
     :class:`UnsafeSkillsPathError`."""
@@ -675,7 +677,7 @@ def _managed_files(root: Path) -> set[str]:
     return found
 
 
-def _managed_files_at(root_fd: int) -> set[str]:
+def _managed_files_at(root_fd: int) -> set[str]:  # pragma: posix-only
     """:func:`_managed_files` through the descriptor of the skills directory (POSIX);
     symbolic links, to files or directories, are never followed."""
     if sys.platform == "win32":
@@ -723,7 +725,7 @@ def _previous_files(root: Path, manifest_path: Path) -> set[str]:
     return files
 
 
-def _previous_files_at(root_fd: int) -> set[str]:
+def _previous_files_at(root_fd: int) -> set[str]:  # pragma: posix-only
     """:func:`_previous_files` through the descriptor of the skills directory (POSIX)."""
     if sys.platform == "win32":
         raise NotImplementedError("directory descriptors are POSIX only")
@@ -793,7 +795,7 @@ def _skill_entry(skill: Mapping[str, JsonValue]) -> tuple[str, Optional[tuple[st
 
 def _sync_skills_at(
     skills: Sequence[Mapping[str, JsonValue]], root_fd: int, counts: dict[str, int]
-) -> dict[str, int]:
+) -> dict[str, int]:  # pragma: posix-only
     """:func:`sync_skills` relative to the trusted descriptor of the directory (POSIX)."""
     if sys.platform == "win32":
         raise NotImplementedError("directory descriptors are POSIX only")
