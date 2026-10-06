@@ -1675,3 +1675,25 @@ def test_filesystem_error_during_the_skills_sync_is_a_failed_sync(
     s.tick()  # never raises; Hermes stays stopped until a sync succeeds
     assert s.state == "stopped"
     assert s._start_after_sync
+
+
+@pytest.mark.parametrize(
+    "failed", [None, {"written": 0, "unchanged": 0, "removed": 0, "rejected": 1}]
+)
+def test_periodic_sync_failure_stops_hermes_until_reconciled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failed: Optional[dict[str, int]]
+) -> None:
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, SLEEPER)
+    results: list[Optional[dict[str, int]]] = [failed, failed, dict(SYNCED)]
+    monkeypatch.setattr(s, "sync_skills", lambda: results.pop(0))
+    assert s.start_child()
+    try:
+        s.tick()  # periodic sync (tick 0) fails: the running Hermes is stopped
+        assert s.state == "stopped", "Hermes never runs with unreconciled skills"
+        s.tick()
+        assert s.state == "stopped", "still not reconciled"
+        s.tick()
+        assert s.state == "running", "restarted once a sync reconciles everything"
+    finally:
+        s.stop_child()

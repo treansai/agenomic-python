@@ -2806,8 +2806,20 @@ class HermesAdapter:
             if self._effective_state in _ENFORCE_LIKE - {"enforce"}:
                 blocked_by = self._effective_state
                 auth.state = "done"
+            elif auth.effective_mode != "enforce" and self.local_mode() == "enforce":
+                # An observe or shadow decision is never executed once enforcement applies.
+                blocked_by = "enforce"
+                auth.state = "done"
             else:
                 auth.state = "executing"
+        if blocked_by == "enforce":
+            self._drop_delegation(auth)
+            return _ExecutionPlan(
+                False,
+                error="Agenomic: the mode changed while this call was decided; "
+                "the action was not executed.",
+                meta=meta,
+            )
         if blocked_by is not None:
             self._drop_delegation(auth)
             return _ExecutionPlan(

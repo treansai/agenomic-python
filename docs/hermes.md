@@ -149,6 +149,11 @@ call. A call blocked by a pending cancel is recorded as a local
 `tool.call.decision` (`deny`, reason code `cancel_pending`); one blocked by a
 local `pause`, `quarantine` or `revoke`, with reason code `instance_stopped`.
 
+Admission at the execution gate is atomic with server state updates: an
+observe or shadow decision is never executed once enforce (or a blocking
+state) has been applied, even when that answer lands after the gate's stale
+check; the call is blocked and is decided again on retry.
+
 ## How a tool call is controlled
 
 Hermes has two call orders, both verified in the pinned source:
@@ -384,6 +389,9 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   same tick (heartbeat, then sync, then start), so a quarantine or revoke
   queued meanwhile applies before any replacement runs. A missing manifest
   (first sync, or deleted by the agent) reconciles the whole directory.
+  A periodic sync that fails or rejects an entry while Hermes runs stops it
+  (it is started again once a sync reconciles every entry), so a revoked
+  skill that could not be removed is never left loaded.
 - Approved skills (`GET /skills/approved`) are written into `--skills-dir`
   after their digest (`sha256:` or `blake3:`) is checked; targets escaping the
   directory are rejected; files a previous sync wrote and that are no longer

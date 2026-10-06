@@ -2543,6 +2543,31 @@ def test_allow_losing_the_state_update_race_to_a_blocking_heartbeat_is_blocked(
     assert newer in out["error"]
 
 
+def test_enforce_applied_after_the_stale_check_stops_a_shadow_admission(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server.effective_state = "shadow"
+    server.decide = lambda body: "deny"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    kw = runner._kw("write_file", "s1", "call_1")
+    args = {"path": "/tmp/x", "content": "y"}
+    assert adapter.pre_tool_call(args=args, **kw) is None  # cached shadow decision
+    real_retire = adapter._retire_stale
+
+    def heartbeat_right_after_the_check(auth: Any) -> bool:
+        retired = real_retire(auth)
+        adapter._set_state("enforce", adapter._state_request())  # lands before admission
+        return retired
+
+    monkeypatch.setattr(adapter, "_retire_stale", heartbeat_right_after_the_check)
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, "a shadow decision never executes under enforce"
+    assert "mode changed" in json.loads(str(out))["error"]
+    assert adapter._auth[("s1", "write_file", "call_1")].state == "done"
+
+
 def test_blocking_state_applied_after_the_stale_check_stops_admission(
     server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

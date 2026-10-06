@@ -1632,9 +1632,20 @@ class Supervisor:
         if self._start_after_sync:
             self._start_when_synced(self.sync_skills())
         elif self._ticks % max(1, self.settings.skills_every) == 0:
-            self.sync_skills()
+            self._stop_unless_synced(self.sync_skills())
         self._ticks += 1
         self._retry_acks()
+
+    def _stop_unless_synced(self, synced: Optional[dict[str, int]]) -> None:
+        """A periodic sync that failed or rejected an entry leaves the approved skills
+        unreconciled: a running Hermes is stopped and only restarted once a later sync
+        reconciles them all."""
+        if self.settings.skills_dir is None or (synced is not None and not synced.get("rejected")):
+            return
+        if self.proc is not None and self.proc.poll() is None:
+            logger.error("approved skills not synced; Hermes is stopped until they are")
+            self.stop_child()
+            self._start_after_sync = True
 
     def _start_when_synced(self, synced: Optional[dict[str, int]]) -> None:
         """Start Hermes once the approved skills are fully reconciled (or no skills directory
