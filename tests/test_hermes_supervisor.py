@@ -1418,3 +1418,25 @@ def test_system_layout_links_under_the_root_are_followed() -> None:
         os.close(fd)
     # A missing component is reported, not created.
     assert sup._open_trusted_dir(links[0] / "agenomic-missing-dir", create=False) is None
+
+
+def test_dropped_supervisor_acknowledgement_lets_the_command_be_delivered_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, ["true"])
+    real = api.ack_command
+
+    def ack_endpoint_down(command_id: str, status: str, detail: dict[str, Any]) -> Any:
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(api, "ack_command", ack_endpoint_down)
+    limit = s._ack_retries.maxlen
+    assert limit is not None
+    # Each unsupported command queues two acknowledgements (received, refused).
+    for i in range(limit):
+        s.handle_command({"id": f"c{i}", "kind": "noop", "status": "requested"})
+    assert "c0" not in s._seen_commands, "its acknowledgements were dropped"
+    monkeypatch.setattr(api, "ack_command", real)
+    s.handle_command({"id": "c0", "kind": "noop", "status": "requested"})
+    assert ("c0", "refused") in [(c, st) for c, st, _ in api.acks]

@@ -2231,3 +2231,58 @@ def test_stale_observe_answer_never_downgrades_a_newer_blocking_state(
     assert adapter._effective_state == newer, "the newer state is kept"
     assert runner.executions == 0
     assert newer in out["error"]
+
+
+def test_shadow_records_an_outstanding_enforce_approval_without_touching_it(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    args = {"path": str(tmp_path / "out.txt"), "content": "x"}
+    runner.direct("write_file", args, tcid="call_1")
+    approval_id = next(iter(server.approvals))
+    (key,) = adapter._pending
+    (entry,) = adapter._pending[key]
+    # The server switches to shadow: the retry runs and the approval is recorded.
+    server.effective_state = "shadow"
+    server.decide = lambda body: "allow"
+    adapter._set_state("shadow")
+    runner.direct("write_file", args, tcid="call_2")
+    assert runner.executions == 1, "shadow never changes execution"
+    assert adapter._pending[key] == [entry], "the approval stays for a later enforce retry"
+    assert entry.claimed_by is None
+    adapter.exporter.flush(3.0)
+    recorded = [
+        e
+        for e in server.events
+        if e.get("type") == "tool.call.decision"
+        and e["extra"].get("local_mode") == "shadow"
+        and e["extra"].get("reason_codes") == ["approval_pending"]
+    ]
+    assert len(recorded) == 1
+    assert recorded[0]["decision"] == "require_approval"
+    assert recorded[0]["extra"]["approval_id"] == approval_id
+    assert recorded[0]["span_id"] == "call_2"
+
+
+def test_dropped_acknowledgement_lets_the_command_be_delivered_again(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    real = adapter.client.ack_command
+
+    def ack_endpoint_down(command_id: str, status: str, detail: Any) -> Any:
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(adapter.client, "ack_command", ack_endpoint_down)
+    limit = adapter._ack_retries.maxlen
+    assert limit is not None
+    # Each command queues two acknowledgements (received, applied): the oldest are dropped.
+    for i in range(limit):
+        adapter.handle_command({"id": f"c{i}", "kind": "pause", "target_kind": "instance"})
+    assert "c0" not in adapter._commands_seen, "its acknowledgements were dropped"
+    assert f"c{limit - 1}" in adapter._commands_seen
+    monkeypatch.setattr(adapter.client, "ack_command", real)
+    adapter.handle_command({"id": "c0", "kind": "pause", "target_kind": "instance"})
+    assert ("c0", "applied") in [(c, b.get("status")) for c, b in server.acks]

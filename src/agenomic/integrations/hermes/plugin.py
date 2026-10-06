@@ -220,6 +220,21 @@ class _ExecutionPlan:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
+def _queue_ack_retry(
+    retries: deque[tuple[str, str, dict[str, Any]]],
+    seen: set[str],
+    item: tuple[str, str, dict[str, Any]],
+) -> None:
+    """Queue a failed acknowledgement. When the bounded queue is full, the oldest one is
+    dropped and its command is no longer marked seen (unless another acknowledgement of
+    it is still queued), so the gateway's redelivery is executed and acknowledged again
+    instead of being ignored forever."""
+    evicted = retries[0] if retries.maxlen is not None and len(retries) == retries.maxlen else None
+    retries.append(item)
+    if evicted is not None and all(queued[0] != evicted[0] for queued in retries):
+        seen.discard(evicted[0])
+
+
 def _add_once(waiting: dict[str, list[str]], target: str, command_id: str) -> None:
     """Record ``command_id`` as waiting for ``target``'s end, once."""
     ids = waiting.setdefault(target, [])
@@ -935,7 +950,9 @@ class HermesAdapter:
         except HermesApiError as exc:
             logger.warning("command %s ack %s failed (%s)", command_id, status, exc.code)
             if exc.status == 0 or exc.status >= 500:
-                self._ack_retries.append((command_id, status, detail))
+                _queue_ack_retry(
+                    self._ack_retries, self._commands_seen, (command_id, status, detail)
+                )
             return False
         self._drop_superseded_acks(command_id, status)
         self._emit("command." + status, None, extra={"command_id": command_id, "detail": detail})
@@ -1934,7 +1951,9 @@ class HermesAdapter:
         with self._lock:
             previous = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None
         pending: Optional[_Pending] = None
-        if mode != "shadow":
+        if mode == "shadow":
+            self._shadow_pending_approval(key, sid, tool, tool_call_id, local_hash)
+        else:
             # An approval required while enforcing stays for a later enforce; in shadow the
             # call is asked afresh, so a pending or refused approval never blocks it.
             pending, block = self._select_pending(
@@ -2216,6 +2235,43 @@ class HermesAdapter:
             while len(store) > _MAX_AUTH:
                 store.popitem(last=False)
         return True
+
+    def _shadow_pending_approval(
+        self,
+        key: tuple[str, str, str],
+        sid: str,
+        tool: str,
+        tool_call_id: str,
+        local_hash: str,
+    ) -> None:
+        """Shadow never blocks on an approval required in enforce for the same action, but
+        records it: a local counterfactual ``require_approval`` naming the approval still
+        held. The entry is only read, never claimed or dropped, so it stays for a later
+        enforce retry."""
+        with self._lock:
+            entries = self._pending.get(key)
+            approval_id = entries[0].approval_id if entries else None
+        if approval_id is None:
+            return
+        self._emit_decision(
+            sid,
+            tool,
+            tool_call_id,
+            "require_approval",
+            APPROVAL_MESSAGE.format(approval_id=approval_id),
+            local_hash,
+            extra={
+                "local": True,
+                "local_mode": "shadow",
+                "shadow": True,
+                "reason_codes": [APPROVAL_PENDING_REASON],
+                "counterfactual": {
+                    "outcome": "require_approval",
+                    "reason_codes": [APPROVAL_PENDING_REASON],
+                },
+                "approval_id": approval_id,
+            },
+        )
 
     def _outstanding_approval(
         self, sid: str, tool: str, args: Mapping[str, object]

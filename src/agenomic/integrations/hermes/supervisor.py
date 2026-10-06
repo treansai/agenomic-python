@@ -1447,7 +1447,15 @@ class Supervisor:
         except HermesApiError as e:
             logger.warning("supervisor ack %s failed (%s)", status, e.code)
             if e.status == 0 or e.status >= 500:
+                evicted = (
+                    self._ack_retries[0]
+                    if len(self._ack_retries) == self._ack_retries.maxlen
+                    else None
+                )
                 self._ack_retries.append((command_id, status, detail))
+                if evicted is not None and all(q[0] != evicted[0] for q in self._ack_retries):
+                    # Dropped unacknowledged: the gateway's redelivery is executed again.
+                    self._seen_commands.discard(evicted[0])
             return
         rank = _ACK_RANK.get(status, 0)
         kept = [
