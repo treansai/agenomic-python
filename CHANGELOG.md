@@ -20,8 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-thread execution bindings (the first writer wins, and `thread_key`
   hashes thread ids before they leave the process) and signed offline
   bundles that `PromptBundle.load` verifies against trusted keys or a
-  pinned digest. `Client()` without `base_url` runs the in-process
+  pinned digest, refusing an expired bundle and a signed one without
+  `expires_at`. `Client()` without `base_url` runs the in-process
   `LocalPromptEngine`, which returns the same error codes.
+- In Agenomic Cloud an API key binds, resolves or exports only a release
+  that is `approved`, in `production` or the current target of one of the
+  agent's channels (403 `session_required` otherwise), and alias moves are
+  session only, so `aliases.move` answers `session_required` to every API
+  key. No SDK call promotes or rolls back a channel.
 - `Client.from_env()`, `client.workspace_id`, `client.whoami()`, `close()`,
   `aclose()` and context manager use, and
   `agenomic.exceptions.ApiError` with the server code, status and details.
@@ -37,24 +43,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agenomic.prompts_file/v1` files, as JSON or as YAML under the
   `agenomic-yaml/1` profile with the new `yaml` extra, and
   `register_runtime` plans the import of live LangChain templates. No
-  source file is ever modified.
+  source file is ever modified. A credential found by the scan is reported
+  by pattern and position, never by value, and a report that carries one
+  anywhere is refused before it is sent (`secret_detected`).
 - `client.bindings.report_usage`, which reports the prompts a binding
   rendered as references and hashes only.
 - `agenomic-py prompts scan`, `import`, `render`, `digest` and
-  `bundle-verify`.
+  `bundle-verify`. `import`, and `render` of a registry reference, exit 2
+  before any request unless `AGENOMIC_ENDPOINT` and `AGENOMIC_API_KEY` are
+  both set; `digest` refuses content that fails validation.
 - `agenomic.integrations.langchain_prompts` with the new `langchain` extra:
   `to_langchain`, `to_langchain_messages` and `from_langchain`.
 - `TrackingCallbackHandler` adds `prompt_binding_id`,
-  `prompt_manifest_digest`, `agent_version`, `prompt_refs` and
-  `prompt_rendered_hash` to model call events when the run metadata carries
-  them, and `CanonicalRun(prompt_manifest_digest=...)` records the digest
-  as the `prompt_version` component.
+  `prompt_manifest_digest`, `agent_version`, `experiment_id`,
+  `experiment_arm_key`, `prompt_refs` and `prompt_rendered_hash` to model
+  call events when the run metadata carries them, and
+  `CanonicalRun(prompt_manifest_digest=...)` records the digest as the
+  `prompt_version` component.
 - `bind_langgraph` and `prompts_for` (`agenomic.integrations`): every
   LangGraph thread is pinned to one prompt release and keeps it through
   interrupts, resumes and process restarts, while new threads follow the
   channel. `scope_config`, `managed_prompt`, `AgentFactory` and the offline
   `LocalBindingStore` complete the adapter, and examples 12 to 16 run it
   offline.
+- `bind_langgraph` runs with a `read` key: it reads the key's scopes from
+  `GET /v1/whoami`, and a key with every scope, `write` or `admin` (or
+  whose scopes are not reported) raises `privileged_credential` unless
+  `allow_privileged_credential=True`. During a registry outage a thread
+  whose binding is cached resumes on it, after a process restart too when
+  the client has a `workspace_id` and a disk cache, and
+  `AgentFactory(build, checkpointer=saver)` lets execution-scope threads
+  resume after a restart.
 - Prompt experiments (`agenomic.experiments`, Agenomic Cloud only):
   `client.experiments` with `create`, `update`, `preflight`, `launch`,
   `cancel`, `get`, `results` and `events`, each with an `a*` twin. `launch`
@@ -69,6 +88,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Node experiments run one graph node (`GraphNodeEntryPoint`) or a function
   (`CallableEntryPoint`); custom evaluators and model judges run on the
   runner.
+- Runner safeguards: live tools run only on a runner built with
+  `GraphTarget(live_tools=True)` (a live trial claimed by a runner without
+  it fails with `tool_mode_unavailable` before anything runs), and then
+  once per call id however often the report is resent; once a trial has
+  ended, every later tool call fails before any request. After its first
+  hello, `serve` keeps running through gateway outages and failing trials,
+  an idle runner long-polls for work until `idle_timeout` instead of
+  polling in a loop, and records of the `agenomic.experiments` logger,
+  tracebacks included, are redacted like results.
 - `agenomic-py experiment serve` and `agenomic-py experiment snapshot`;
   `snapshot_case` freezes the state of a production thread into a
   counterfactual `node_state` case. `local_assignment` and
@@ -76,6 +104,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counterfactual offline.
 - `client.rmp.start(candidate_release_id=...)` links an RMP session to a
   candidate release.
+- Documentation: `docs/prompts.md`, `docs/experiments.md`,
+  `docs/langgraph-matrix.md` and a LangGraph managed prompts section in
+  `docs/integrations.md`; the `docs/README.md` index lists the new pages.
 
 ### Changed
 

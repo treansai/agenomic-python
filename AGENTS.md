@@ -330,6 +330,19 @@ rule of the engineering rules above.
   no em dash. Their code samples carry no new comments. The umbrella leak
   check skips Markdown, so the public-marker check of the added lines is what
   keeps private names out of these files.
+- `CHANGELOG.md` `[Unreleased]` describes managed prompts and experiments as
+  they ship. A fix to code that no release has carried changes the bullet of
+  its feature instead of adding a `### Fixed` entry, because no user saw the
+  earlier behavior (the runner safeguards bullet holds the idle long-poll,
+  the live tool rules and the log redaction this way). Server behavior that
+  no SDK call reaches (approve, promote and rollback refused to API keys, the
+  rollback re-point) belongs in the Agenomic Cloud changelog; a server rule
+  that changes what an SDK call answers (which releases an API key may bind,
+  the scopes `bind_langgraph` reads) is stated with that call. The file's
+  only markdownlint findings are the two repeated 0.1.2 headings (MD024),
+  which predate managed prompts.
+- `docs/README.md` indexes every page under `docs/`: a new page joins it in
+  the commit that adds it, and its examples line follows `examples/`.
 - Static discovery (`prompts/discovery.py`) only parses: `ast.parse` with
   `feature_version=(3, 10)`, so a report does not depend on the interpreter
   that ran the scan (the report says `python_grammar: "3.10"`). Nothing is
