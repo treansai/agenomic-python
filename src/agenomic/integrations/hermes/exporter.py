@@ -240,6 +240,17 @@ def _redact_field(value: object) -> object:
     return _walk(value, _redact_leaf)
 
 
+def redact(value: object) -> object:
+    """Redact any JSON-like value sent outside the event pipeline: credential-named keys
+    and credential-shaped text are masked, every container becomes a dict or a list.
+
+    Example:
+        >>> redact({"api_key": "x", "default": "sk-abcdefghijkl"})
+        {'api_key': '***', 'default': '***'}
+    """
+    return _redact_field(value)
+
+
 def _mask_secret_keys(value: object) -> object:
     return _walk(value, lambda leaf: leaf)
 

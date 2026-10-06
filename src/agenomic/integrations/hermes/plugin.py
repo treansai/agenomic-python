@@ -67,6 +67,7 @@ from agenomic.integrations.hermes.exporter import (
     create_private_temp,
     mask_text,
     now_iso,
+    redact,
     redacted_preview,
 )
 from agenomic.integrations.hermes.guard import (
@@ -991,7 +992,9 @@ class HermesAdapter:
                 "tool_name": name,
                 "source": "builtin",
                 "schema_hash": digest,
-                "input_schema": schema.get("parameters")
+                # Sent outside the event pipeline: a default, example or description can
+                # carry a credential. The hash above is of the original, local schema.
+                "input_schema": redact(schema.get("parameters"))
                 if isinstance(schema.get("parameters"), dict)
                 else {},
             }
@@ -3383,6 +3386,15 @@ class HermesAdapter:
         content = _str(payload.get(content_key))
         diff = _str(skill_pending_diff(record))
         target = f"skills/{name}/{file_path}"
+        if len(target) > 500:
+            # Truncating would propose another path than the one staged: refused instead.
+            logger.warning("staged skill write %s not proposed: target too long", pending_id)
+            self._emit(
+                "skill.proposal.refused",
+                None,
+                extra={"pending_id": pending_id, "reason_codes": ["target_too_long"]},
+            )
+            return
         if mask_text(content) != content or mask_text(diff) != diff or mask_text(target) != target:
             # The proposal body leaves the process without the event redaction pipeline,
             # and a masked skill is not what was staged: a reviewer would approve content
@@ -3398,7 +3410,7 @@ class HermesAdapter:
             return
         body = {
             "kind": "skill",
-            "target": target[:500],
+            "target": target,
             "content": content or diff,
             "diff": diff,
             "rationale": mask_text(

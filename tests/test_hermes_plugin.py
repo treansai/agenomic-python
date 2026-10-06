@@ -3226,3 +3226,73 @@ def test_concurrent_report_evictions_are_all_accounted_for(
     dropped = [e["action_id"] for e in server.events if e["type"] == "action.report_dropped"]
     kept = [i.body["logical_call_id"] for i in adapter._report_retries]
     assert len(dropped) + len(kept) == 3, "every report is either queued or reported dropped"
+
+
+def test_discovered_tool_schemas_are_redacted_before_export(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    secret = "sk-" + "s3cretvalue123456"
+    schema = {
+        "name": "fetch",
+        "parameters": {
+            "type": "object",
+            "properties": {"api_key": {"type": "string", "default": secret}},
+        },
+    }
+
+    class Registry:
+        def get_all_tool_names(self) -> list[str]:
+            return ["fetch"]
+
+        def get_schema(self, name: str) -> dict[str, Any]:
+            return schema
+
+        def get_toolset_for_tool(self, name: str) -> str:
+            return "web"
+
+    fake = types.ModuleType("tools.registry")
+    fake.registry = Registry()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools.registry", fake)
+    adapter = make_adapter(server.url, tmp_path)
+    sent: list[Any] = []
+    monkeypatch.setattr(adapter.client, "tools_discovered", lambda tools: sent.extend(tools))
+    assert adapter.discover_tools() == 1
+    assert "s3cretvalue123456" not in json.dumps(sent)
+    assert adapter._schema_hashes["fetch"] == plugin_mod.schema_hash(schema), (
+        "the hash is of the original schema"
+    )
+
+
+def test_staged_skill_with_an_oversized_target_is_refused_not_truncated(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    record = {
+        "id": "ab12cd34",
+        "summary": "new file",
+        "payload": {
+            "action": "write_file",
+            "name": "s",
+            "file_path": "x" * 600 + ".md",
+            "file_content": "body",
+        },
+    }
+    fake = types.ModuleType("tools.write_approval")
+    fake.list_pending = lambda subsystem: [record] if subsystem == "skills" else []  # type: ignore[attr-defined]
+    fake.skill_pending_diff = lambda r: "body"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools.write_approval", fake)
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.post_tool_call(
+        tool_name="skill_manage",
+        args={},
+        result=json.dumps({"success": True, "staged": True, "pending_id": "ab12cd34"}),
+        session_id="s1",
+        tool_call_id="call_s",
+        status="ok",
+    )
+    assert server.calls("/proposals") == []
