@@ -129,7 +129,8 @@ def test_writability_by_mode_bits(tmp_path: Path) -> None:
     try:
         assert not writable_by(cfg, other_uid, [other_uid])
         assert writable_by(cfg, 0, [0])  # root on a writable mount
-        assert not writable_by(cfg, os.getuid(), [os.getgid()]) or os.getuid() == 0
+        # The owner of tmp_path can rename ro/ out of it and recreate ro/config.yaml.
+        assert writable_by(cfg, os.getuid(), [os.getgid()])
         os.chmod(cfg, 0o446)
         assert writable_by(cfg, other_uid, [other_uid])  # world writable file
         os.chmod(cfg, 0o444)
