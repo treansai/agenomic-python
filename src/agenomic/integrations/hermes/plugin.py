@@ -2169,6 +2169,14 @@ class HermesAdapter:
         if effective_mode in ("shadow", "enforce"):
             # Also when the mode is unchanged: an older heartbeat must not override it.
             applied = self._set_state(effective_mode, seq)
+        if not applied and self._effective_state in _ENFORCE_LIKE - {"enforce"}:
+            # A newer request applied a blocking state after the check above (it maps to
+            # the enforce local mode, so the comparison below would not see it).
+            blocked_now = self._effective_state
+            self._settle_delegation(provisional, commit=False)
+            return _Verdict(
+                block=f"Agenomic: the instance is {blocked_now}; the action was not executed."
+            )
         if not applied and self.local_mode() != effective_mode:
             # A request sent after this one already applied another mode: the verdict is
             # read in that mode, never in the stale one.

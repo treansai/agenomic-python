@@ -2518,3 +2518,26 @@ def test_cached_permit_is_decided_again_once_enforce_becomes_blocked(
     assert runner.executions == 0, "never executed under the old permit"
     assert adapter._auth[("s1", "read_file", "call_1")].state == "done"
     assert len(server.authorize_calls()) >= asked
+
+
+@pytest.mark.parametrize("newer", ["enforce_blocked", "paused"])
+def test_allow_losing_the_state_update_race_to_a_blocking_heartbeat_is_blocked(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newer: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    runner.direct("read_file", {"path": "/tmp/a"}, tcid="call_0")  # session admitted
+    real_set_state = adapter._set_state
+
+    def blocking_heartbeat_wins(state: object, seq: Any = None) -> bool:
+        if seq is not None and state == "enforce":
+            # The heartbeat (sent later) applies its blocking state just before this update.
+            real_set_state(newer, adapter._state_request())
+        return real_set_state(state, seq)
+
+    monkeypatch.setattr(adapter, "_set_state", blocking_heartbeat_wins)
+    before = runner.executions
+    out = json.loads(runner.agent_loop("read_file", {"path": "/tmp/a"}, tcid="call_1"))
+    assert runner.executions == before, "not executed under the stale allow"
+    assert newer in out["error"]
