@@ -71,8 +71,8 @@ from agenomic.integrations.hermes.config import render_hermes_config
 print(yaml.safe_dump(render_hermes_config("https://agenomic.example", model="demo-model")))
 ```
 
-The endpoint is validated first (absolute http(s) URL, no credentials, query, fragment or bare `?`/`#`
-or fragment), as the adapter, the supervisor and the HTTP clients do, and so are the plugin
+The endpoint is validated first (absolute http(s) URL, no credentials, no
+query or fragment, not even a bare `?` or `#`), as the adapter, the supervisor and the HTTP clients do, and so are the plugin
 `settings`: unknown keys and literal values the adapter would refuse are
 rejected, while `${env:VAR}` references are checked when the adapter loads
 (a value made only of references is checked then; a reference mixed with
