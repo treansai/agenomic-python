@@ -23,11 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned digest, refusing an expired bundle and a signed one without
   `expires_at`. `Client()` without `base_url` runs the in-process
   `LocalPromptEngine`, which returns the same error codes.
-- In Agenomic Cloud an API key binds, resolves or exports only a release
-  that is `approved`, in `production` or the current target of one of the
-  agent's channels (403 `session_required` otherwise), and alias moves are
-  session only, so `aliases.move` answers `session_required` to every API
-  key. No SDK call promotes or rolls back a channel.
+- In Agenomic Cloud no binding, resolution or export pins a `rejected` or
+  `rolled_back` release (409 `release_not_bindable`), and an API key names
+  only a release that is `approved`, in `production` or the current target
+  of one of the agent's channels (403 `session_required` for any other).
+  Alias moves are session only, so `aliases.move` answers
+  `session_required` to every API key. No SDK call promotes or rolls back
+  a channel.
 - `Client.from_env()`, `client.workspace_id`, `client.whoami()`, `close()`,
   `aclose()` and context manager use, and
   `agenomic.exceptions.ApiError` with the server code, status and details.
