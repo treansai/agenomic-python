@@ -3957,3 +3957,43 @@ def test_a_delegation_decision_contradicting_its_status_blocks(
     out = json.loads(runner.direct("delegate_task", {"tasks": [{"goal": "a"}]}))
     assert "error" in out
     assert runner.executions == 0
+
+
+def test_an_admission_answer_without_a_session_id_is_a_failed_admission(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    monkeypatch.setattr(
+        adapter.client, "create_session", lambda body: {"session": {}, "effective_state": "enforce"}
+    )
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert not adapter._sessions["s1"].admitted, "retried, not admitted"
+    assert "s1" in adapter._unadmitted
+
+
+def test_an_empty_delegation_id_is_never_a_reservation(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    server.delegation_answer = (200, {"decision": "allow", "delegation_id": ""})
+    runner = Runner(adapter)
+    out = json.loads(runner.direct("delegate_task", {"tasks": [{"goal": "a"}]}))
+    assert "invalid_response" in out["error"]
+    assert runner.executions == 0
+
+
+def test_a_delegation_reserved_under_observe_never_runs_under_an_enforce_permit(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.decide = lambda body: "allow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    # The reservation endpoint still answers observe (the mode changed in between).
+    server.delegation_answer = (200, {"decision": "observe"})
+    runner = Runner(adapter)
+    out = json.loads(runner.direct("delegate_task", {"tasks": [{"goal": "a"}]}))
+    assert "mode changed" in out["error"]
+    assert runner.executions == 0

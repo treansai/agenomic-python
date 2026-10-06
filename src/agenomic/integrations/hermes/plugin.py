@@ -1426,6 +1426,12 @@ class HermesAdapter:
         resp: Optional[dict[str, Any]] = None
         try:
             resp = self.client.create_session(body)
+            info = resp.get("session")
+            if not (isinstance(info, dict) and isinstance(info.get("id"), str) and info["id"]):
+                # Without the gateway's id no cancel naming it could be matched: handled
+                # as a failed admission, retried, instead of admitted.
+                logger.warning("session admission answer without a session id")
+                resp = None
         except HermesApiError as exc:
             logger.warning("session admission failed (%s)", exc.code)
         finally:
@@ -2058,8 +2064,10 @@ class HermesAdapter:
             )
         if decision == "observe":
             return None, None
-        if decision == "allow" and isinstance(resp.get("delegation_id"), str):
-            return None, [resp["delegation_id"], count]
+        delegation_id = resp.get("delegation_id")
+        if decision == "allow" and isinstance(delegation_id, str) and delegation_id:
+            # An empty id would be dropped from the child's admission: never a reservation.
+            return None, [delegation_id, count]
         if decision == "deny":
             codes = resp.get("reason_codes")
             explanation = _str(resp.get("explanation")) or ", ".join(
@@ -2629,6 +2637,20 @@ class HermesAdapter:
         record_id = _str(resp.get("record_id")) or None
         if not shadow and (record_id is None or not isinstance(permit, dict)):
             raise HermesApiError("invalid_response", "allow without record_id and permit", status)
+        if (
+            not shadow
+            and tool == _DELEGATE_TOOL
+            and provisional is None
+            and _str(args.get("action")).lower() not in _DELEGATE_CONTROL_ACTIONS
+        ):
+            # The reservation was decided under observe (none made) and enforce answered
+            # this authorization: no reservation covers the children, so the call is not
+            # executed (the model's retry reserves under enforce).
+            self._drop_pending(key, pending)
+            return _Verdict(
+                block="Agenomic: the mode changed while delegate_task was decided; "
+                "the action was not executed."
+            )
         auth = _Authorization(
             tool_call_id=tool_call_id or logical_call_id,
             session_id=sid,

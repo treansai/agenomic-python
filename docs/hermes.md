@@ -268,7 +268,11 @@ skip the frame and execute: fail open); it returns
   reserves its own, so every allowed call queues exactly one reservation. A
   reservation made by a call that then required approval follows that
   approval: the retry resumed under it reuses it, and a rejected or expired
-  approval drops it.
+  approval drops it. An `allow` without a non-empty `delegation_id` is an
+  invalid answer, and a `delegate_task` whose reservation was answered
+  `observe` is not executed if enforce answers its authorization (no
+  reservation covers its children; the retry reserves under enforce). An
+  admission answer without a session id is handled as a failed admission.
 - Writes by `write_file`/`patch` into `$HERMES_HOME/skills`, `plugins`,
   `config.yaml`, `.env`, `/etc/hermes` or the profile's `protected_paths` are
   decided by the server and, in enforce, also denied locally.
