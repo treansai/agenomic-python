@@ -1827,3 +1827,12 @@ def test_forged_manifest_cannot_hide_a_revoked_skill(tmp_path: Path) -> None:
     assert counts["removed"] == 1
     assert counts["rejected"] == 0
     assert not (out / "b" / "SKILL.md").exists()
+
+
+def test_skill_content_that_is_not_utf8_is_rejected_not_raised(tmp_path: Path) -> None:
+    out = tmp_path / "skills"
+    bad = {"target": "skills/bad/SKILL.md", "digest": "sha256:" + "0" * 64, "content": "x\ud800"}
+    counts = sync_skills([_skill("a", "A"), bad], out)
+    assert counts["rejected"] == 1
+    assert counts["written"] == 1
+    assert not (out / "bad" / "SKILL.md").exists()

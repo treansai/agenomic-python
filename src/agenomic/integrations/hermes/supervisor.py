@@ -1010,7 +1010,12 @@ def _sync_skills_at(
         if parts is None or not isinstance(content, str) or parts == (_MANIFEST,):
             counts["rejected"] += 1
             continue
-        data = content.encode("utf-8")
+        try:
+            data = content.encode("utf-8")
+        except UnicodeEncodeError:  # a lone surrogate: not a skill file, a malformed entry
+            logger.warning("approved skill %s skipped: content is not valid UTF-8", rel)
+            counts["rejected"] += 1
+            continue
         if not _digest_matches(data, str(skill.get("digest") or "")):
             logger.warning("approved skill %s skipped: digest mismatch", rel)
             counts["rejected"] += 1
@@ -1125,7 +1130,12 @@ def _sync_skills_portable(
             logger.warning("approved skill %s skipped: its path goes through a symbolic link", rel)
             counts["rejected"] += 1
             continue
-        data = content.encode("utf-8")
+        try:
+            data = content.encode("utf-8")
+        except UnicodeEncodeError:  # a lone surrogate: not a skill file, a malformed entry
+            logger.warning("approved skill %s skipped: content is not valid UTF-8", rel)
+            counts["rejected"] += 1
+            continue
         if not _digest_matches(data, digest):
             logger.warning("approved skill %s skipped: digest mismatch", rel)
             counts["rejected"] += 1

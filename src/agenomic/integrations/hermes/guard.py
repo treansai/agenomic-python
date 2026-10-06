@@ -48,6 +48,9 @@ MIN_MAX_AGE_S = 3.0
 BLOCK_EXIT = 2
 _MAX_STDIN = 4 * 1024 * 1024
 _BLOCKING_STATES = {"paused", "quarantined", "revoked"}
+# The only effective states that let the plugin decide: anything else (unknown before
+# the first /hello, enforce_blocked, a value this guard does not know) blocks.
+_DECIDING_STATES = {"observe", "shadow", "enforce"}
 _FALLBACK = '{"action":"block","message":"Agenomic guard failed; the action was not executed."}\n'
 
 
@@ -85,8 +88,8 @@ def evaluate(
         >>> evaluate(None, epoch="e1")
         'Agenomic adapter status is missing; the plugin is not loaded. The action was not executed.'
         >>> from datetime import timezone
-        >>> fresh = {"loaded": True, "instance_status": "active", "epoch": "e1",
-        ...     "updated_at": "2026-10-05T12:00:00Z"}
+        >>> fresh = {"loaded": True, "instance_status": "active", "effective_state": "enforce",
+        ...     "epoch": "e1", "updated_at": "2026-10-05T12:00:00Z"}
         >>> t = datetime(2026, 10, 5, 12, 0, 30, tzinfo=timezone.utc).timestamp()
         >>> evaluate(fresh, epoch="e1", now=t) is None
         True
@@ -114,6 +117,12 @@ def evaluate(
         value = status.get(key)
         if isinstance(value, str) and value in _BLOCKING_STATES:
             return f"Agenomic instance is {value}; the action was not executed."
+    state = status.get("effective_state")
+    if state == "enforce_blocked":
+        return "Agenomic instance is enforce_blocked; the action was not executed."
+    if not isinstance(state, str) or state not in _DECIDING_STATES:
+        # Unknown is never allowed: enforce semantics without a decision.
+        return "Agenomic instance state is unknown; the action was not executed."
     return None
 
 

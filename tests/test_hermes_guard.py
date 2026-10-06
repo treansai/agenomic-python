@@ -120,14 +120,24 @@ def test_each_failure_blocks_with_json_and_exit_2(
 
 
 def test_bad_stdin_blocks(tmp_path: Path) -> None:
-    fresh = {"loaded": True, "instance_status": "active", "updated_at": iso()}
+    fresh = {
+        "loaded": True,
+        "instance_status": "active",
+        "effective_state": "enforce",
+        "updated_at": iso(),
+    }
     assert_block(*run(tmp_path, fresh, stdin="[]"), "not an object")
     code, out = run(tmp_path, fresh, stdin="{garbage")
     assert_block(code, out, "guard failed")
 
 
 def test_max_age_env(tmp_path: Path) -> None:
-    status = {"loaded": True, "instance_status": "active", "updated_at": iso(-30)}
+    status = {
+        "loaded": True,
+        "instance_status": "active",
+        "effective_state": "enforce",
+        "updated_at": iso(-30),
+    }
     assert run(tmp_path, status)[0] == 0
     assert_block(*run(tmp_path, status, AGENOMIC_HERMES_GUARD_MAX_AGE_S="10"), "stale")
 
@@ -209,6 +219,26 @@ def test_status_read_gives_up_on_a_persistent_permission_error(
 def test_deadline_below_the_minimum_blocks(tmp_path: Path, value: str) -> None:
     # The adapter refreshes at most once a second and within a third of the deadline, so a
     # deadline below MIN_MAX_AGE_S would make a healthy adapter look stale between updates.
-    fresh = {"loaded": True, "instance_status": "active", "updated_at": iso()}
+    fresh = {
+        "loaded": True,
+        "instance_status": "active",
+        "effective_state": "enforce",
+        "updated_at": iso(),
+    }
     assert_block(*run(tmp_path, fresh, AGENOMIC_HERMES_GUARD_MAX_AGE_S=value), "minimum")
     assert run(tmp_path, fresh, AGENOMIC_HERMES_GUARD_MAX_AGE_S="3")[0] == 0
+
+
+@pytest.mark.parametrize("state", [None, "unknown", "enforce_blocked", "something_new"])
+def test_unknown_or_blocked_effective_state_fails_closed(tmp_path: Path, state: Any) -> None:
+    status: dict[str, Any] = {"loaded": True, "instance_status": "active", "updated_at": iso()}
+    if state is not None:
+        status["effective_state"] = state
+    code, out = run(tmp_path, status)
+    assert_block(code, out, "enforce_blocked" if state == "enforce_blocked" else "unknown")
+
+
+@pytest.mark.parametrize("state", ["observe", "shadow", "enforce"])
+def test_deciding_states_let_the_plugin_decide(tmp_path: Path, state: str) -> None:
+    status = {"loaded": True, "instance_status": "active", "effective_state": state}
+    assert run(tmp_path, {**status, "updated_at": iso()})[0] == 0
