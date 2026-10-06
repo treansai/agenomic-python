@@ -96,15 +96,20 @@ def test_batching_and_dedup() -> None:
 
 def test_backpressure_drops_and_counts_without_blocking() -> None:
     gate = threading.Event()
+    sending = threading.Event()
 
     def stalled(batch: list[dict[str, Any]]) -> None:
+        sending.set()
         gate.wait(5)
 
     builder = EventBuilder()
     exporter = EventExporter(
         stalled, max_events=2, batch_size=1, flush_interval_s=0.01, max_retries=0
     )
-    time.sleep(0.05)
+    # Park the worker inside a send first, so it cannot drain the buffer (and clear
+    # buffer_full) while the agent loop floods it below.
+    assert exporter.submit(builder.build("first"))
+    assert sending.wait(2)
     started = time.monotonic()
     results = [exporter.submit(builder.build("x")) for _ in range(10)]
     assert time.monotonic() - started < 1.0  # never blocks the agent loop
