@@ -599,11 +599,16 @@ class Supervisor:
             connect=self._connect,
         )
 
-    def heartbeat(self) -> None:
-        """Report process state and isolation; execute returned commands.
+    def heartbeat(self, *, execute: bool = True) -> None:
+        """Report process state and isolation; execute returned commands unless ``execute``
+        is false (the final report after supervision ended: commands are neither executed
+        nor acknowledged, so the gateway delivers them again to the next supervisor).
 
         Example:
             >>> sup = _demo_supervisor(commands=[{"id": "c1", "kind": "quarantine"}])
+            >>> sup.heartbeat(execute=False)
+            >>> sup.refuse_restart
+            False
             >>> sup.heartbeat()
             >>> sup.refuse_restart
             True
@@ -623,7 +628,7 @@ class Supervisor:
             logger.warning("supervisor heartbeat failed (%s)", e.code)
             return
         commands = resp.get("commands")
-        if isinstance(commands, list):
+        if execute and isinstance(commands, list):
             for command in commands:
                 if isinstance(command, dict):
                     self.handle_command(command)
@@ -762,7 +767,9 @@ class Supervisor:
         finally:
             code = self.stop_child()
         try:
-            self.heartbeat()
+            # Report only: a command executed now (a ``resume`` would start Hermes again)
+            # would act on a process nothing supervises once ``run`` returns.
+            self.heartbeat(execute=False)
         except Exception:
             logger.exception("final supervisor heartbeat failed")
             failed = True

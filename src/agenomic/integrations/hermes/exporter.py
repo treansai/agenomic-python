@@ -10,7 +10,9 @@ ignored), then secret pattern masking and truncation.
 buffer, one daemon thread, never blocking the agent loop. It batches up to 500
 events per ``POST /v1/hermes/runtime/events``, retries a batch a limited number
 of times with backoff, deduplicates by ``event_id``, and counts what it drops.
-An optional spool keeps undelivered batches in a size capped JSONL file.
+An optional spool keeps undelivered batches in a size capped JSONL file; it is
+replayed one batch at a time when the buffer is idle and, under continuous
+load, after every ``REPLAY_EVERY`` live batches or once per flush interval.
 
 Telemetry is not the security record: decisions are stored server side when
 they are made, so a dropped event never changes a decision.
@@ -55,6 +57,9 @@ EVENT_SCHEMA = "agenomic.hermes.event/v1"
 MAX_BATCH = 500
 MAX_EVENT_BYTES = 64 * 1024
 _DEDUP_WINDOW = 50_000
+#: Under continuous load one spool batch is replayed after this many live batches (or once
+#: a flush interval passed since the last replay), so a busy process still drains its spool.
+REPLAY_EVERY = 10
 
 #: Key families masked anywhere in a preview, matched case insensitively after removing
 #: separators: a normalized key containing one of these (or ending in ``token``) is masked,
@@ -258,12 +263,14 @@ class EventBuilder:
                 # Free-form fields (reason, explanation, error text) can carry credentials
                 # in metadata mode too, so every field is redacted, not only content.
                 event[key] = _redact_field(value)
-        extra_doc: dict[str, Any] = {k: _redact_field(v) for k, v in (extra or {}).items()}
+        # The whole mapping is redacted, so its own credential-named keys are masked too.
+        extra_doc = cast(dict[str, Any], _redact_field(dict(extra or {})))
         if content:
             extra_doc["content_hashes"] = {k: content_hash(v) for k, v in content.items()}
             if self.capture == "redacted_preview":
                 extra_doc["previews"] = {
-                    k: redacted_preview(v, self.preview_chars) for k, v in content.items()
+                    k: _MASK if is_secret_key(k) else redacted_preview(v, self.preview_chars)
+                    for k, v in content.items()
                 }
         event["extra"] = extra_doc
         return event
@@ -379,6 +386,8 @@ class EventExporter:
         self._last_error: Optional[str] = None
         self._delivered = 0
         self._last_failure_at = float("-inf")
+        self._live_since_replay = 0
+        self._last_replay_at = float("-inf")
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
 
@@ -552,6 +561,12 @@ class EventExporter:
                 batch = self._take_batch()
             if batch:
                 self._deliver(batch)
+                self._live_since_replay += 1
+                if (
+                    self._live_since_replay >= REPLAY_EVERY
+                    or time.monotonic() - self._last_replay_at >= self._interval
+                ):
+                    self._replay_spool()
             else:
                 self._replay_spool()
             with self._cond:
@@ -580,6 +595,8 @@ class EventExporter:
         return False
 
     def _replay_spool(self) -> None:
+        self._live_since_replay = 0
+        self._last_replay_at = time.monotonic()
         if self._spool is None or self._spool.size() == 0:
             return
         # After a failed delivery, wait a few intervals before replaying the spool again.

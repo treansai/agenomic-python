@@ -502,3 +502,37 @@ def test_failed_tick_still_stops_the_child(monkeypatch: pytest.MonkeyPatch, tmp_
         if proc.poll() is None:
             proc.kill()
             proc.wait(10)
+
+
+def test_final_heartbeat_is_report_only(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    class ResumeAfterStop(FakeApi):
+        def heartbeat(self, body: dict[str, Any]) -> dict[str, Any]:
+            if body["process"]["state"] == "stopped":
+                # Only the report sent after the child was stopped carries the command.
+                self.commands = [{"id": "r9", "kind": "resume", "status": "requested"}]
+            return super().heartbeat(body)
+
+    api = ResumeAfterStop()
+    s = make_supervisor(tmp_path, api, [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(s, "sync_skills", lambda: None)
+    monkeypatch.setattr(sup.signal, "signal", lambda *_a: None)
+    real_start = s.start_child
+    starts: list[bool] = []
+
+    def counting_start() -> bool:
+        started = real_start()
+        starts.append(started)
+        return started
+
+    monkeypatch.setattr(s, "start_child", counting_start)
+    try:
+        assert s.run() == 0
+        assert api.heartbeats[-1]["process"]["state"] == "stopped"
+        assert starts == [True], "no child is started once supervision has ended"
+        assert s.state == "stopped"
+        assert api.acks == [], "the command stays pending for the next supervisor"
+    finally:
+        proc = s.proc
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait(10)

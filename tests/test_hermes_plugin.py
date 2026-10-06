@@ -1177,3 +1177,55 @@ def test_shutdown_makes_the_guard_block(server: FakeAgenomic, tmp_path: Path) ->
     assert guard_mod.evaluate(status, max_age_s=60) is not None, "the guard blocks after unload"
     adapter.tick()  # a late heartbeat never reopens the guard
     assert guard_mod._read_status(adapter.status_file)["loaded"] is False  # type: ignore[index]
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_new_mutator_is_confirmed_before_authorizing(
+    server: FakeAgenomic, tmp_path: Path, order: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")  # the first hello; no heartbeat tick follows
+    assert server.calls("/hello")[-1].body["foreign_mutators"] == []
+
+    def other_plugin(**kwargs: Any) -> dict[str, Any]:
+        return {"action": "modify", "args": {}}
+
+    adapter.ctx._manager._hooks["pre_tool_call"].append(other_plugin)
+    result = getattr(Runner(adapter), order)("read_file", {"path": "/tmp/x"})
+    assert json.loads(result) == {"success": True}
+    paths = [r.path for r in server.requests if r.method == "POST"]
+    last_hello = len(paths) - 1 - paths[::-1].index("/v1/hermes/runtime/hello")
+    first_authorize = next(i for i, p in enumerate(paths) if p.endswith("/actions/authorize"))
+    assert last_hello < first_authorize, "hello with the new mutator precedes the authorization"
+    assert len(server.calls("/hello")[-1].body["foreign_mutators"]) == 1
+
+
+@pytest.mark.parametrize("state", ["enforce", "shadow"])
+def test_unconfirmed_mutator_change_blocks_in_enforce(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    server.effective_state = state
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")  # the first hello; no heartbeat tick follows
+
+    def other_plugin(**kwargs: Any) -> dict[str, Any]:
+        return {"action": "modify", "args": {}}
+
+    adapter.ctx._manager._hooks["pre_tool_call"].append(other_plugin)
+
+    def down(body: Any) -> Any:
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(adapter.client, "hello", down)
+    runner = Runner(adapter)
+    result = runner.direct("read_file", {"path": "/tmp/x"})
+    adapter.exporter.flush(3.0)
+    decisions = [e for e in server.events if e.get("type") == "tool.call.decision"]
+    assert any(e["extra"].get("foreign_mutators_unconfirmed") for e in decisions)
+    if state == "enforce":
+        assert runner.executions == 0
+        assert "not confirmed" in json.loads(result)["error"]
+        assert server.authorize_calls() == []
+    else:
+        assert runner.executions == 1, "shadow records the change but does not block"
+        assert len(server.authorize_calls()) == 1

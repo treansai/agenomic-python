@@ -186,6 +186,10 @@ skip the frame and execute: fail open); it returns
 - Other plugins' `pre_tool_call` callbacks and `tool_request`/`tool_execution`
   middleware can change arguments after the decision. They are reported in
   `/hello` as `foreign_mutators`; the server refuses enforce while any exists.
+  The list is re-read before every authorization: when it differs from the
+  one the server last confirmed, a `/hello` is sent first; if that hello is
+  not delivered the call is blocked in enforce (in shadow it proceeds), and a
+  local `tool.call.decision` with `foreign_mutators_unconfirmed` is emitted.
 
 The adapter never answers a Hermes approval: approval hooks are observed only.
 
@@ -195,14 +199,18 @@ Events follow `agenomic.hermes.event/v1` (`event_id` ULID, per process `seq`,
 `trace_id` = root Hermes session, `span_id` per API request and tool call,
 `parent_span_id` for subagents). Content is reduced to `blake3:` hashes before
 it reaches the queue or the spool. With `capture.content: redacted_preview`,
-previews go through `RedactionEngine` (credential keys masked at any depth),
-credential pattern masking (`agmhr_`, `sk-`, bearer tokens, ...) and
-truncation.
+previews go through `redacted_preview` in `exporter.py` (credential keys masked at any depth,
+including a content mapping's own top-level keys), credential pattern
+masking (`agmhr_`, `sk-`, bearer tokens, ...) and truncation. In every capture
+mode the event fields and the whole `extra` mapping, its top-level keys
+included, get the same key and pattern masking.
 
 The exporter never blocks the agent: a bounded buffer, one daemon thread,
 batches of at most 500 to `POST /events`, 3 retries with backoff,
 deduplication by `event_id`, drop and count on overflow, and an optional
-size capped JSONL spool (mode `0600`) for undelivered batches. Its stats
+size capped JSONL spool (mode `0600`) for undelivered batches. The spool is
+replayed one batch at a time when the buffer is idle and, under continuous
+load, after every 10 live batches or once per `flush_interval_s`. Its stats
 (`buffered`, `dropped`, `buffer_full`, `last_flush_error`) go into every
 heartbeat. Telemetry is not the security record: decisions are stored server
 side when they are made, so dropped events never change a decision.
@@ -258,7 +266,11 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   after their digest (`sha256:` or `blake3:`) is checked; targets escaping the
   directory are rejected; files a previous sync wrote and that are no longer
   approved are removed. Mount that directory read only into the agent.
-- SIGTERM or SIGINT stops the child and sends a final heartbeat.
+- SIGTERM or SIGINT stops the child and sends a final heartbeat. That
+  heartbeat (also sent after the child exited without restarts, or after
+  restarts were exhausted) is report only: commands it returns are neither
+  executed nor acknowledged, so the gateway delivers them to the next
+  supervisor.
 
 ## Guard
 

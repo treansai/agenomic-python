@@ -1559,6 +1559,9 @@ class HermesAdapter:
         if not session.admitted:
             self._admit(session)
         mode = self.local_mode()
+        unconfirmed = self._confirm_foreign_mutators(sid, tool, tool_call_id, local_hash, mode)
+        if unconfirmed is not None:
+            return _Verdict(block=unconfirmed)
         key = (sid, tool, local_hash)
         if tool == _DELEGATE_TOOL:
             with self._lock:
@@ -1710,6 +1713,28 @@ class HermesAdapter:
             while len(self._auth) > _MAX_AUTH:
                 self._auth.popitem(last=False)
         return _Verdict(authorization=auth)
+
+    def _confirm_foreign_mutators(
+        self, sid: str, tool: str, tool_call_id: str, local_hash: str, mode: LocalMode
+    ) -> Optional[str]:
+        """Re-send hello before authorizing when the argument mutators changed since the server
+        last confirmed them; a block message (enforce) when that hello is not delivered."""
+        if self.foreign_mutators() == self._foreign or self._hello():
+            return None
+        reason = (
+            f"Agenomic: Hermes callbacks that can change the arguments of {tool} changed and "
+            "the gateway has not confirmed them; the action was not executed."
+        )
+        self._emit_decision(
+            sid,
+            tool,
+            tool_call_id,
+            "deny",
+            reason,
+            local_hash,
+            extra={"local": True, "foreign_mutators_unconfirmed": True, "local_mode": mode},
+        )
+        return None if mode in ("observe", "shadow") else reason
 
     def _local_checks(self, tool: str, args: Mapping[str, Any]) -> Optional[str]:
         """Defence in depth applied in enforce after the gateway allowed."""

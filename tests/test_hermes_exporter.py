@@ -242,3 +242,53 @@ def test_every_json_container_is_redacted() -> None:
     text = json.dumps(event, default=str)
     for secret in ("plainsecret", "sk-abcdefghijklmnop"):
         assert secret not in text
+
+
+def test_top_level_credential_keys_are_masked() -> None:
+    event = EventBuilder("redacted_preview").build(
+        "tool.call.requested",
+        extra={"Authorization": "plainsecret", "X-Api-Key": 42, "status_code": 200},
+        content={"api_key": "plainsecret", "input": {"q": "x"}},
+        usage={"input_tokens": 3, "auth_token": "plainsecret"},
+    )
+    assert event["extra"]["Authorization"] == "***"
+    assert event["extra"]["X-Api-Key"] == "***"
+    assert event["extra"]["status_code"] == 200
+    assert event["extra"]["previews"]["api_key"] == "***"
+    assert event["extra"]["previews"]["input"] == '{"q":"x"}'
+    assert event["usage"] == {"input_tokens": 3, "auth_token": "***"}
+    assert "plainsecret" not in json.dumps(event, default=str)
+
+
+def test_spool_is_replayed_while_live_traffic_continues(tmp_path: Path) -> None:
+    builder = EventBuilder()
+    spool = tmp_path / "events.jsonl"
+    spooled = [builder.build("spooled") for _ in range(3)]
+    spool.write_text("".join(json.dumps(e) + "\n" for e in spooled))
+    feed_limit = 200
+    live = {"batches": 0}
+    replayed_after: list[int] = []
+    done = threading.Event()
+    holder: dict[str, EventExporter] = {}
+
+    def post(batch: list[dict[str, Any]]) -> None:
+        if any(e["type"] == "spooled" for e in batch):
+            replayed_after.append(live["batches"])
+            done.set()
+            return
+        live["batches"] += 1
+        if live["batches"] < feed_limit:
+            # Feed the next live event before returning: the buffer is never empty.
+            holder["exporter"].submit(builder.build("live"))
+        else:
+            done.set()
+
+    # A long flush interval: only the live batch count can trigger the replay.
+    exporter = EventExporter(post, flush_interval_s=30.0, batch_size=1, spool_path=str(spool))
+    holder["exporter"] = exporter
+    exporter._last_replay_at = time.monotonic()
+    exporter.submit(builder.build("live"))
+    assert done.wait(10.0)
+    assert replayed_after, "the spool is replayed"
+    assert replayed_after[0] < feed_limit, "while live traffic was still flowing"
+    exporter.close(2.0)
