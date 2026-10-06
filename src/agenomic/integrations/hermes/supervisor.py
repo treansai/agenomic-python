@@ -31,7 +31,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import secrets
 import signal
 import socket
@@ -49,12 +48,17 @@ from typing import Any, Callable, Optional, Protocol
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator
 
 from agenomic.integrations.hermes.client import HermesApiError, SupervisorClient
-from agenomic.integrations.hermes.config import DEFAULT_TOKEN_ENV
+from agenomic.integrations.hermes.config import (
+    _PROVIDER_KEYS,
+    _SECRET_NAME,
+    DEFAULT_TOKEN_ENV,
+    SUPERVISOR_TOKEN_ENV,
+    runtime_token_env_problem,
+)
 from agenomic.integrations.hermes.exporter import now_iso
 
 logger = logging.getLogger("agenomic.integrations.hermes.supervisor")
 
-SUPERVISOR_TOKEN_ENV = "AGENOMIC_HERMES_SUPERVISOR_TOKEN"
 ENDPOINT_ENV = "AGENOMIC_HERMES_ENDPOINT"
 DEFAULT_ENV_ALLOWLIST = (
     "PATH",
@@ -83,37 +87,8 @@ DEFAULT_ENV_ALLOWLIST = (
 )
 DEFAULT_FORBIDDEN_HOSTS = ("api.openai.com:443", "api.anthropic.com:443", "openrouter.ai:443")
 DOCKER_SOCKETS = ("/var/run/docker.sock", "/run/docker.sock")
-_SECRET_NAME = re.compile(
-    r"(_API_KEY|_TOKEN|_SECRET|_PASSWORD|_ACCESS_KEY|_PRIVATE_KEY)$|^API_KEY$", re.I
-)
-_PROVIDER_KEYS = re.compile(
-    r"_API_KEY$|^API_KEY$|^AWS_SECRET_ACCESS_KEY$|^GOOGLE_APPLICATION_CREDENTIALS$", re.I
-)
 #: Prefix of every Agenomic runtime token (the credential the Hermes plugin presents).
 RUNTIME_TOKEN_PREFIX = "agmhr_"
-
-
-def runtime_token_env_problem(name: str) -> Optional[str]:
-    """Why ``name`` cannot carry the runtime token into the child, or ``None``.
-
-    The runtime token variable is the only credential the child receives, so it must
-    not be the supervisor token, a provider key, or any other credential shaped name
-    (``*_API_KEY``, ``*_TOKEN``, ``*_SECRET``, ``*_PASSWORD``...) unless it is an
-    ``AGENOMIC_`` name.
-
-    Example:
-        >>> runtime_token_env_problem("AGENOMIC_HERMES_RUNTIME_TOKEN") is None
-        True
-        >>> runtime_token_env_problem("OPENAI_API_KEY")
-        'OPENAI_API_KEY is a provider credential name, not the Agenomic runtime token'
-    """
-    if name == SUPERVISOR_TOKEN_ENV:
-        return f"{name} is the supervisor credential and is never passed to the child"
-    if _PROVIDER_KEYS.search(name):
-        return f"{name} is a provider credential name, not the Agenomic runtime token"
-    if _SECRET_NAME.search(name) and not name.upper().startswith("AGENOMIC_"):
-        return f"{name} names another credential; use an AGENOMIC_ variable for the runtime token"
-    return None
 
 
 def runtime_token_problem(

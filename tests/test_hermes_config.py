@@ -196,3 +196,28 @@ def test_render_adapter_config() -> None:
         "capture": {"content": "metadata"},
         "buffer": {"spool_path": "/var/spool/a.jsonl"},
     }
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "API_KEY",
+        "AGENOMIC_HERMES_SUPERVISOR_TOKEN",
+        "GITHUB_TOKEN",
+    ],
+)
+def test_renderers_refuse_credential_names_for_the_runtime_token(name: str) -> None:
+    # Hermes sends the variable named here as the model API key to Agenomic: a provider
+    # or other credential name would hand that secret to the gateway.
+    with pytest.raises(ValueError, match=name):
+        render_hermes_config("https://a.example", runtime_token_env=name)
+    with pytest.raises(ValueError, match=name):
+        render_adapter_config("https://a.example", runtime_token_env=name)
+    assert (
+        render_hermes_config("https://a.example", runtime_token_env="AGENOMIC_RT")["model"][
+            "api_key"
+        ]
+        == "${AGENOMIC_RT}"
+    )

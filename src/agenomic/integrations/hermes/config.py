@@ -49,6 +49,13 @@ logger = logging.getLogger("agenomic.integrations.hermes.config")
 CONFIG_SCHEMA = "agenomic.hermes.adapter_config/v1"
 CONFIG_ENV = "AGENOMIC_HERMES_CONFIG"
 DEFAULT_TOKEN_ENV = "AGENOMIC_HERMES_RUNTIME_TOKEN"
+SUPERVISOR_TOKEN_ENV = "AGENOMIC_HERMES_SUPERVISOR_TOKEN"
+_SECRET_NAME = re.compile(
+    r"(_API_KEY|_TOKEN|_SECRET|_PASSWORD|_ACCESS_KEY|_PRIVATE_KEY)$|^API_KEY$", re.I
+)
+_PROVIDER_KEYS = re.compile(
+    r"_API_KEY$|^API_KEY$|^AWS_SECRET_ACCESS_KEY$|^GOOGLE_APPLICATION_CREDENTIALS$", re.I
+)
 PLUGIN_ID = "agenomic"
 GUARD_COMMAND = "agenomic-hermes-guard"
 MODEL_GATEWAY_PATH = "/v1/hermes/runtime/model/v1"
@@ -347,6 +354,38 @@ def _to_hermes_refs(value: Any) -> Any:
     return value
 
 
+def runtime_token_env_problem(name: str) -> Optional[str]:
+    """Why ``name`` cannot carry the runtime token into the child, or ``None``.
+
+    The runtime token variable is the only credential the child receives, so it must
+    not be the supervisor token, a provider key, or any other credential shaped name
+    (``*_API_KEY``, ``*_TOKEN``, ``*_SECRET``, ``*_PASSWORD``...) unless it is an
+    ``AGENOMIC_`` name.
+
+    Example:
+        >>> runtime_token_env_problem("AGENOMIC_HERMES_RUNTIME_TOKEN") is None
+        True
+        >>> runtime_token_env_problem("OPENAI_API_KEY")
+        'OPENAI_API_KEY is a provider credential name, not the Agenomic runtime token'
+    """
+    if name == SUPERVISOR_TOKEN_ENV:
+        return f"{name} is the supervisor credential and is never passed to the child"
+    if _PROVIDER_KEYS.search(name):
+        return f"{name} is a provider credential name, not the Agenomic runtime token"
+    if _SECRET_NAME.search(name) and not name.upper().startswith("AGENOMIC_"):
+        return f"{name} names another credential; use an AGENOMIC_ variable for the runtime token"
+    return None
+
+
+def _check_runtime_token_env(name: str) -> None:
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
+        raise ValueError("runtime_token_env must be an environment variable name")
+    problem = runtime_token_env_problem(name)
+    if problem is not None:
+        # Hermes would send this variable's value as the model API key to Agenomic.
+        raise ValueError(problem)
+
+
 def render_hermes_config(
     endpoint: str,
     *,
@@ -373,8 +412,7 @@ def render_hermes_config(
         True
     """
     base = endpoint.rstrip("/")
-    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", runtime_token_env):
-        raise ValueError("runtime_token_env must be an environment variable name")
+    _check_runtime_token_env(runtime_token_env)
     if guard_timeout_s < 1 or guard_timeout_s > 300:
         raise ValueError("guard_timeout_s must be within [1, 300] (the Hermes clamp)")
     plugin_settings: dict[str, Any] = {"endpoint": base}
@@ -422,10 +460,15 @@ def render_adapter_config(
     """Adapter config document for the ``AGENOMIC_HERMES_CONFIG`` file.
 
     Example:
-        >>> doc = render_adapter_config("https://agenomic.example", runtime_token_env="MY_TOKEN")
+        >>> doc = render_adapter_config("https://agenomic.example", runtime_token_env="AGENOMIC_RT")
         >>> doc["runtime_token"], doc["schema_version"]
-        ('${env:MY_TOKEN}', 'agenomic.hermes.adapter_config/v1')
+        ('${env:AGENOMIC_RT}', 'agenomic.hermes.adapter_config/v1')
+        >>> render_adapter_config("https://agenomic.example", runtime_token_env="OPENAI_API_KEY")
+        Traceback (most recent call last):
+        ...
+        ValueError: OPENAI_API_KEY is a provider credential name, not the Agenomic runtime token
     """
+    _check_runtime_token_env(runtime_token_env)
     buffer: dict[str, JsonValue] = {}
     if spool_path:
         buffer["spool_path"] = spool_path
