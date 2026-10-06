@@ -573,6 +573,13 @@ def binding_bundle(binding: ExecutionBinding, artifacts: Any) -> PromptBundle:
             binding_id=binding.binding_id,
         )
     digests = bundle.child_manifest_digests
+    if digests.keys() != binding.children.keys():
+        raise integrity_error(
+            "manifest_digest_mismatch",
+            "the artifacts and the binding pin different children",
+            expected=sorted(binding.children),
+            actual=sorted(digests),
+        )
     for child_id, child in binding.children.items():
         if digests.get(child_id) != child.get("prompt_manifest_digest"):
             raise integrity_error(

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from typing import Any
 
 import httpx
@@ -280,6 +282,47 @@ def test_async_requests_use_one_client_per_loop(client: Client, server: FakeProm
         await aclose_pool(client)
 
     asyncio.run(closing())
+
+
+def test_closing_a_pool_releases_clients_of_other_loops(client: Client) -> None:
+    loops: dict[str, Any] = {}
+    ready = threading.Event()
+    stop = threading.Event()
+
+    def other_loop() -> None:
+        async def main() -> None:
+            loops["client"] = pool_for(client).current()
+            loops["loop"] = asyncio.get_running_loop()
+            ready.set()
+            await asyncio.to_thread(stop.wait)
+
+        asyncio.run(main())
+
+    thread = threading.Thread(target=other_loop, daemon=True)
+    thread.start()
+    assert ready.wait(timeout=5)
+
+    async def closing() -> None:
+        await aclose_pool(client)
+
+    asyncio.run(closing())
+    assert loops["client"].is_closed
+
+    stop.set()
+    thread.join(timeout=5)
+
+    ready.clear()
+    stop.clear()
+    thread = threading.Thread(target=other_loop, daemon=True)
+    thread.start()
+    assert ready.wait(timeout=5)
+    close_pool(client)
+    deadline = time.monotonic() + 5
+    while not loops["client"].is_closed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert loops["client"].is_closed
+    stop.set()
+    thread.join(timeout=5)
 
 
 def test_async_retry_and_errors(

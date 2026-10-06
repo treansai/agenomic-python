@@ -68,20 +68,38 @@ class HttpPool:
                 self._async[loop] = client
             return client
 
-    def close(self) -> None:
+    def _detach(
+        self,
+    ) -> tuple[Optional[httpx.Client], list[tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]]]:
         with self._lock:
-            client, self._sync = self._sync, None
+            sync, self._sync = self._sync, None
+            clients = list(self._async.items())
             self._async = weakref.WeakKeyDictionary()
-        if client is not None:
-            client.close()
+        return sync, clients
+
+    def close(self) -> None:
+        sync, clients = self._detach()
+        for owner, client in clients:
+            if owner.is_running() and not owner.is_closed():
+                asyncio.run_coroutine_threadsafe(client.aclose(), owner)
+        if sync is not None:
+            sync.close()
 
     async def aclose(self) -> None:
         loop = asyncio.get_running_loop()
-        with self._lock:
-            current = self._async.pop(loop, None)
-        self.close()
-        if current is not None:
-            await current.aclose()
+        sync, clients = self._detach()
+        if sync is not None:
+            sync.close()
+        remote = []
+        for owner, client in clients:
+            if owner is loop:
+                await client.aclose()
+            elif owner.is_running() and not owner.is_closed():
+                remote.append(
+                    asyncio.wrap_future(asyncio.run_coroutine_threadsafe(client.aclose(), owner))
+                )
+        if remote:
+            await asyncio.gather(*remote, return_exceptions=True)
 
 
 _POOLS: weakref.WeakKeyDictionary[Any, HttpPool] = weakref.WeakKeyDictionary()

@@ -695,7 +695,8 @@ def _prompt_fields(meta: dict[str, Any]) -> dict[str, Any]:
     fields: dict[str, Any] = {}
     for source, target in PROMPT_SCALARS:
         value = meta.get(source)
-        if isinstance(value, str) and _SCALAR.fullmatch(value):
+        pattern = _SHA256 if target == "prompt_manifest_digest" else _SCALAR
+        if isinstance(value, str) and pattern.fullmatch(value):
             fields[target] = value
     rendered = meta.get("agenomic_rendered_hash")
     if isinstance(rendered, str) and _SHA256.fullmatch(rendered):

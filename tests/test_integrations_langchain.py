@@ -464,6 +464,10 @@ async def test_malformed_prompt_metadata_is_dropped_whole() -> None:
     assert "prompt_refs" not in alias
     assert "prompt_rendered_hash" not in alias
     assert "prompt_binding_id" not in alias
+    bad_manifest = await _model_started(
+        _pinned_metadata(agenomic_prompt_manifest_digest="not-a-digest")
+    )
+    assert "prompt_manifest_digest" not in bad_manifest
     legacy = await _model_started(_pinned_metadata(agenomic_genome_version=None))
     assert "agent_version" not in legacy
     plain = await _model_started({"ls_provider": "openai"})

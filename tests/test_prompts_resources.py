@@ -917,6 +917,10 @@ def test_bindings_create_get_and_counterfactual(client: Client, server: FakeProm
             ),
             "manifest_digest_mismatch",
         ),
+        (
+            lambda p, root, child: p["binding"]["children"].pop(CHILD),
+            "manifest_digest_mismatch",
+        ),
         (lambda p, root, child: p.pop("artifacts"), "invalid_response"),
         (lambda p, root, child: p.update(created="yes"), "invalid_response"),
         (lambda p, root, child: p["binding"].pop("binding_id"), "invalid_response"),
