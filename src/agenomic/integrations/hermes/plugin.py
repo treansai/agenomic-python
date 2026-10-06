@@ -406,7 +406,8 @@ class HermesAdapter:
         self._post_status: OrderedDict[tuple[str, str, str], str] = OrderedDict()
         # Calls whose arguments had no canonical form and were already recorded, so the
         # second gate of the same call does not record it again.
-        self._not_canonical: OrderedDict[tuple[str, str, str], None] = OrderedDict()
+        # Which gate ("pre" or "execution") recorded a call's non-canonical arguments.
+        self._not_canonical: OrderedDict[tuple[str, str, str], str] = OrderedDict()
         self._report_retries: deque[_ReportRetry] = deque(maxlen=1000)
         self._commands_seen: set[str] = set()
         # Acknowledgements that failed in transport; retried on every tick until accepted.
@@ -2124,20 +2125,34 @@ class HermesAdapter:
         return f"Agenomic authorization unavailable ({code}); the action was not executed."
 
     def _arguments_not_canonical(
-        self, sid: str, tool: str, tool_call_id: str, args: Mapping[str, object]
+        self,
+        sid: str,
+        tool: str,
+        tool_call_id: str,
+        args: Mapping[str, object],
+        gate: Literal["pre", "execution"],
     ) -> Optional[str]:
         """Arguments without a canonical form (NaN, a set, an object another plugin put
         there) cannot be authorized: blocked in enforce; in shadow and observe the call
         proceeds and a local ``tool.call.decision`` records the counterfactual deny.
-        Recorded once per call, whichever gate sees it first."""
+
+        Recorded once per invocation, whichever gate sees it first: the other gate of the
+        same invocation consumes the entry; the same gate seeing the call id again is a
+        later invocation reusing it, which is recorded on its own."""
         mode = self.local_mode()
         key = (sid, tool, tool_call_id)
+        recorded = False
         with self._lock:
-            recorded = bool(tool_call_id) and key in self._not_canonical
-            if tool_call_id and not recorded:
-                self._not_canonical[key] = None
-                while len(self._not_canonical) > _MAX_AUTH:
-                    self._not_canonical.popitem(last=False)
+            if tool_call_id:
+                first = self._not_canonical.get(key)
+                if first is not None and first != gate:
+                    del self._not_canonical[key]
+                    recorded = True
+                else:
+                    self._not_canonical[key] = gate
+                    self._not_canonical.move_to_end(key)
+                    while len(self._not_canonical) > _MAX_AUTH:
+                        self._not_canonical.popitem(last=False)
         if not recorded:
             extra: dict[str, object] = {
                 "local": True,
@@ -2208,7 +2223,7 @@ class HermesAdapter:
             try:
                 local_hash = arguments_hash(args)
             except CanonicalError:
-                message = self._arguments_not_canonical(sid, tool, tool_call_id, args)
+                message = self._arguments_not_canonical(sid, tool, tool_call_id, args, "pre")
                 return _block(message) if message else None
             self._emit(
                 "tool.call.requested",
@@ -2286,7 +2301,7 @@ class HermesAdapter:
         try:
             local_hash = arguments_hash(args)
         except CanonicalError:
-            message = self._arguments_not_canonical(sid, tool, tool_call_id, args)
+            message = self._arguments_not_canonical(sid, tool, tool_call_id, args, "execution")
             if message:
                 return _ExecutionPlan(False, error=message, meta=meta)
             return _ExecutionPlan(True, meta=meta)

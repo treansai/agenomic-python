@@ -1474,6 +1474,23 @@ def test_arguments_without_canonical_form_block_only_in_enforce(
 
 
 @pytest.mark.parametrize("order", ["agent_loop", "direct"])
+@pytest.mark.parametrize("state", ["observe", "shadow", "enforce"])
+def test_reused_call_id_with_non_canonical_arguments_is_recorded_each_time(
+    server: FakeAgenomic, tmp_path: Path, order: str, state: str
+) -> None:
+    # A later invocation reusing a (session, tool, tool_call_id) is a new action: it gets
+    # its own audit record instead of being taken for the second gate of the first one.
+    server.effective_state = state
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    for _ in range(2):
+        getattr(runner, order)("read_file", {"path": "/tmp/x", "bad": float("nan")}, tcid="call_1")
+    adapter.exporter.flush(3.0)
+    assert len(_local_decisions(server, "arguments_not_canonical")) == 2
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
 def test_pending_approval_from_enforce_never_blocks_in_shadow(
     server: FakeAgenomic, tmp_path: Path, order: str
 ) -> None:
