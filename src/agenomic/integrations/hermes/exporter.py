@@ -169,6 +169,20 @@ def is_secret_key(key: str) -> bool:
     )
 
 
+def _rejected_events(response: object) -> list[object]:
+    """The ``rejected`` list of an ``/events`` answer (empty when absent or malformed)."""
+    if isinstance(response, Mapping):
+        rejected = response.get("rejected")
+        if isinstance(rejected, list):
+            return rejected
+    return []
+
+
+def _reason(entry: object) -> str:
+    reason = entry.get("reason") if isinstance(entry, Mapping) else None
+    return mask_text(reason)[:64] if isinstance(reason, str) and reason else "unknown"
+
+
 def _is_container(value: object) -> bool:
     """Whether ``json.dumps`` (with ``default=str``) would expand ``value`` into members."""
     return isinstance(value, (Mapping, Set)) or (
@@ -950,7 +964,7 @@ class EventExporter:
     def _deliver(self, batch: list[dict[str, Any]], *, spool_on_failure: bool = True) -> bool:
         for attempt in range(self._max_retries + 1):
             try:
-                self._post(batch)
+                response = self._post(batch)
             except Exception as exc:  # the transport's failure is telemetry only
                 self._last_error = f"{type(exc).__name__}: {getattr(exc, 'code', '')}".rstrip(": ")
                 if attempt < self._max_retries:
@@ -962,7 +976,15 @@ class EventExporter:
                 break
             else:
                 self._last_error = None
-                self._delivered += len(batch)
+                # Per-event rejections (not an object, invalid id or type, too large) are
+                # permanent: counted as dropped with their reasons, never as delivered.
+                rejected = _rejected_events(response)
+                self._delivered += max(0, len(batch) - len(rejected))
+                if rejected:
+                    reasons = sorted({_reason(r) for r in rejected})
+                    self._count_drop(
+                        f"rejected by the gateway ({', '.join(reasons)})", len(rejected)
+                    )
                 return True
         self._last_failure_at = time.monotonic()
         if not spool_on_failure:  # a replayed batch is still in the spool

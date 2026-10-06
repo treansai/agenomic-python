@@ -919,3 +919,23 @@ def test_credential_shaped_content_keys_are_masked(capture: str) -> None:
     out = json.dumps(event)
     assert "s3cretvalue123456" not in out
     assert "input" in event["extra"]["content_hashes"]  # type: ignore[index,operator]
+
+
+def test_events_rejected_by_the_gateway_are_dropped_not_delivered() -> None:
+    builder = EventBuilder()
+    events = [builder.build("x") for _ in range(3)]
+
+    def post(batch: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "accepted": len(batch) - 1,
+            "duplicates": 0,
+            "rejected": [{"event_id": batch[0]["event_id"], "reason": "too_large"}],
+        }
+
+    exporter = EventExporter(post, batch_size=3, flush_interval_s=0.05)
+    for e in events:
+        assert exporter.submit(e)
+    assert exporter.flush(3.0) is False, "a rejected event is a drop"
+    assert exporter.delivered == 2
+    assert exporter.stats()["dropped"] == 1
+    exporter.close()
