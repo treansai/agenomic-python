@@ -3412,7 +3412,11 @@ class HermesAdapter:
             else _str(payload.get("file_path")) or "SKILL.md"
         )
         content_key = "file_content" if action == "write_file" else "content"
-        content = _str(payload.get(content_key))
+        raw_content = payload.get(content_key)
+        # An empty string is real content (an empty file): only an absent field falls back
+        # to the diff, so the proposal always describes what was staged.
+        has_content = isinstance(raw_content, str)
+        content = raw_content if isinstance(raw_content, str) else ""
         diff = _str(skill_pending_diff(record))
         target = f"skills/{name}/{file_path}"
         if len(target) > 500:
@@ -3440,7 +3444,7 @@ class HermesAdapter:
         body = {
             "kind": "skill",
             "target": target,
-            "content": content or diff,
+            "content": content if has_content else diff,
             "diff": diff,
             "rationale": mask_text(
                 _str(record.get("summary")) or f"Hermes staged {action} {pending_id}"

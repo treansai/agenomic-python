@@ -1850,7 +1850,16 @@ def test_manifest_alias_of_an_approved_skill_never_removes_it(tmp_path: Path) ->
     assert json.loads(manifest.read_text()) == {"files": ["a/SKILL.md"]}
 
 
-@pytest.mark.parametrize("endpoint", ["ftp://gw.example", "gw.example", "https://"])
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "ftp://gw.example",
+        "gw.example",
+        "https://",
+        "https://gw.example?x=y",
+        "https://gw.example#f",
+    ],
+)
 def test_main_refuses_an_endpoint_that_is_not_an_http_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, endpoint: str
 ) -> None:

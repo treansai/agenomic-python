@@ -1875,7 +1875,12 @@ def main(
         logger.error("endpoint missing: pass --endpoint or set %s", ENDPOINT_ENV)
         return 2
     parsed = urlsplit(endpoint)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.netloc
+        or parsed.query
+        or parsed.fragment
+    ):
         # A client that can never reach the gateway would start Hermes with no way to
         # receive a quarantine or revoke.
         logger.error("endpoint must be an absolute http(s) URL")

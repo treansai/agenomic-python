@@ -3343,3 +3343,37 @@ def test_shadow_rerun_of_an_executing_call_rechecks_state(
     adapter.tool_execution(args=args, next_call=first_execution, **kw)
     assert runner.executions == 1, "the rerun never executes under the stale shadow decision"
     assert "error" in json.loads(str(second["out"]))
+
+
+def test_staged_empty_file_is_proposed_as_empty_not_as_its_diff(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    record = {
+        "id": "ab12cd34",
+        "summary": "empty file",
+        "payload": {
+            "action": "write_file",
+            "name": "s",
+            "file_path": "notes.md",
+            "file_content": "",
+        },
+    }
+    fake = types.ModuleType("tools.write_approval")
+    fake.list_pending = lambda subsystem: [record] if subsystem == "skills" else []  # type: ignore[attr-defined]
+    fake.skill_pending_diff = lambda r: "--- a/notes.md\n+++ b/notes.md\n"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools.write_approval", fake)
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.post_tool_call(
+        tool_name="skill_manage",
+        args={},
+        result=json.dumps({"success": True, "staged": True, "pending_id": "ab12cd34"}),
+        session_id="s1",
+        tool_call_id="call_s",
+        status="ok",
+    )
+    sent = server.calls("/proposals")
+    assert len(sent) == 1
+    assert sent[0].body["content"] == ""
