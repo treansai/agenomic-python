@@ -64,6 +64,7 @@ from agenomic.integrations.hermes.exporter import (
     EventExporter,
     content_hash,
     create_private_temp,
+    mask_text,
     now_iso,
     redacted_preview,
 )
@@ -3215,15 +3216,28 @@ class HermesAdapter:
         )
         content_key = "file_content" if action == "write_file" else "content"
         content = _str(payload.get(content_key))
-        diff = skill_pending_diff(record)
+        diff = _str(skill_pending_diff(record))
+        if mask_text(content) != content or mask_text(diff) != diff:
+            # The proposal body leaves the process without the event redaction pipeline,
+            # and a masked skill is not what was staged: a reviewer would approve content
+            # Hermes never wrote. A credential-bearing proposal is not sent at all.
+            logger.warning(
+                "staged skill write %s not proposed: it carries a credential", pending_id
+            )
+            self._emit(
+                "skill.proposal.refused",
+                None,
+                extra={"pending_id": pending_id, "reason_codes": ["credential_detected"]},
+            )
+            return
         body = {
             "kind": "skill",
-            "target": f"skills/{name}/{file_path}"[:500],
+            "target": mask_text(f"skills/{name}/{file_path}")[:500],
             "content": content or diff,
             "diff": diff,
-            "rationale": (_str(record.get("summary")) or f"Hermes staged {action} {pending_id}")[
-                :4000
-            ],
+            "rationale": mask_text(
+                _str(record.get("summary")) or f"Hermes staged {action} {pending_id}"
+            )[:4000],
         }
         try:
             proposal = self.client.propose(body)

@@ -99,7 +99,9 @@ hooks_auto_accept: true
   Agenomic Model Gateway. Hermes expands `${VAR}` and `${env:VAR}` in string
   values; the rendered file uses `${VAR}`.
 - `skills.write_approval: true` stages every `skill_manage` write instead of
-  applying it.
+  applying it; the plugin sends each staged write to Agenomic as a change
+  proposal. A staged write whose content or diff carries a credential is never
+  sent (a local `skill.proposal.refused` event, reason `credential_detected`).
 - `plugins.hook_callback_timeout` also bounds shell hooks, so it is kept at
   least as large as the guard timeout.
 - `hooks_auto_accept: true` registers the guard without the TTY consent

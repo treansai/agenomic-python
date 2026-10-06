@@ -2811,3 +2811,39 @@ def test_start_up_failure_still_starts_the_heartbeat_and_is_retried(
         assert failures["n"] == 0, "discovery is retried by the heartbeat"
     finally:
         adapter.shutdown()
+
+
+def test_staged_skill_carrying_a_credential_is_never_proposed(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    secret = "agmhr_" + "s3cretvalue123456"
+    record = {
+        "id": "ab12cd34",
+        "summary": "new skill",
+        "payload": {
+            "action": "create",
+            "name": "summarize",
+            "content": f"---\nname: summarize\n---\nuse token {secret}",
+        },
+    }
+    fake = types.ModuleType("tools.write_approval")
+    fake.list_pending = lambda subsystem: [record] if subsystem == "skills" else []  # type: ignore[attr-defined]
+    fake.skill_pending_diff = lambda r: r["payload"]["content"]  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools.write_approval", fake)
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.post_tool_call(
+        tool_name="skill_manage",
+        args={"action": "create", "name": "summarize"},
+        result=json.dumps({"success": True, "staged": True, "pending_id": "ab12cd34"}),
+        session_id="s1",
+        tool_call_id="call_s",
+        status="ok",
+    )
+    assert server.calls("/proposals") == [], "a credential-bearing proposal is not sent"
+    adapter.exporter.flush(3.0)
+    assert secret not in json.dumps([r.body for r in server.requests])
+    refused = [e for e in server.events if e["type"] == "skill.proposal.refused"]
+    assert refused[0]["extra"]["reason_codes"] == ["credential_detected"]
