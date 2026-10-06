@@ -2773,7 +2773,32 @@ class HermesAdapter:
             return _ExecutionPlan(False, error=cancelled, meta=meta)
         if self.local_mode() == "observe":
             self._observe_local_checks(sid, tool, tool_call_id, args, "execution")
-            return _ExecutionPlan(True, observe=True, auth=self._observe_cached(meta), meta=meta)
+            observed = self._observe_cached(meta)
+            # Same atomic recheck as the admission below: a local command, or enforce (or a
+            # blocking state), applied while the observe checks ran stops the call.
+            local_block: Optional[tuple[str, str]] = None
+            changed: Optional[str] = None
+            with self._lock, self._state_lock:
+                local_block = self._local_blocker(sid)
+                if local_block is None and self.local_mode() == "enforce":
+                    changed = self._effective_state or "enforce"
+                if (local_block or changed) and observed is not None:
+                    observed.state = "done"
+            if observed is not None and (local_block or changed):
+                self._drop_delegation(observed)
+            if local_block is not None:
+                self._emit_local_block(sid, tool, tool_call_id, args, local_block)
+                return _ExecutionPlan(False, error=local_block[0], meta=meta)
+            if changed is not None:
+                if changed in _ENFORCE_LIKE - {"enforce"}:
+                    error = f"Agenomic: the instance is {changed}; the action was not executed."
+                else:
+                    error = (
+                        "Agenomic: the mode changed while this call was decided; "
+                        "the action was not executed."
+                    )
+                return _ExecutionPlan(False, error=error, meta=meta)
+            return _ExecutionPlan(True, observe=True, auth=observed, meta=meta)
         try:
             local_hash = arguments_hash(args)
         except CanonicalError:
@@ -2819,7 +2844,7 @@ class HermesAdapter:
             if blocked is not None:
                 return _ExecutionPlan(False, error=blocked["message"], meta=meta)
         blocked_by: Optional[str] = None
-        local_block: Optional[tuple[str, str]] = None
+        local_block = None
         # Admission is atomic with server state updates (lock order: _lock, then
         # _state_lock; _set_state never takes _lock): a blocking state applied after the
         # earlier checks is seen here, before the call is marked executing.

@@ -2649,3 +2649,36 @@ def test_transient_4xx_command_ack_is_retried(
     assert [b["status"] for _, b in server.acks] == ["received"]
     adapter._retry_acks()
     assert [b["status"] for _, b in server.acks] == ["received", "applied"]
+
+
+@pytest.mark.parametrize("applied", ["pause", "cancel_session", "enforce", "quarantined"])
+def test_observe_execution_rechecks_blockers_applied_during_its_checks(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, applied: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    assert adapter.pre_tool_call(args=args, **kw) is None  # cached enforce permit
+    adapter._set_state("observe", adapter._state_request())  # then observe applies
+    real_checks = adapter._observe_local_checks
+
+    def command_during_the_checks(*a: Any, **k: Any) -> Any:
+        out = real_checks(*a, **k)
+        if applied == "pause":
+            adapter.handle_command({"id": "k1", "kind": "pause", "target_kind": "instance"})
+        elif applied == "cancel_session":
+            adapter.handle_command(
+                {"id": "k1", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+            )
+        else:
+            adapter._set_state(applied, adapter._state_request())
+        return out
+
+    monkeypatch.setattr(adapter, "_observe_local_checks", command_during_the_checks)
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, f"{applied} applied during the observe checks stops the call"
+    assert "not executed" in json.loads(str(out))["error"]
+    assert adapter._auth[("s1", "read_file", "call_1")].state == "done"

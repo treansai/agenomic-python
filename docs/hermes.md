@@ -152,7 +152,8 @@ local `pause`, `quarantine` or `revoke`, with reason code `instance_stopped`.
 Admission at the execution gate is atomic with server state updates: an
 observe or shadow decision is never executed once enforce (or a blocking
 state) has been applied, even when that answer lands after the gate's stale
-check; the call is blocked and is decided again on retry. A local `pause`,
+check; the call is blocked and is decided again on retry. The observe path at
+the execution gate makes the same recheck before it lets a call through. A local `pause`,
 `quarantine`, `revoke` or `cancel` is written under the same lock and checked
 again at admission, so one applied while the authorization was in flight
 still stops the call.
@@ -363,7 +364,9 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
 - Every heartbeat (`--interval-s`, default 15) sends the process state and an
   isolation self check: `provider_secrets_absent` (child environment),
   `egress_restricted` (true only if a TCP connect to every `--forbidden-host`
-  fails), `config_readonly` and `skills_readonly` (mode bits and ownership of
+  fails), `config_readonly` (every configuration source, additively:
+  `$HERMES_HOME/config.yaml`, `$HERMES_HOME/.env`, each `--config-path` and the
+  `AGENOMIC_HERMES_CONFIG` file passed to the child) and `skills_readonly` (mode bits and ownership of
   the files and their directories for the child uid, read only mounts;
   `skills_readonly` is also false when the supervisor refuses `--skills-dir`,
   see below), `docker_socket_absent`, `runs_as_non_root`. The checks run from the

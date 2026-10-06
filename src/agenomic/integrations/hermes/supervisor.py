@@ -1442,7 +1442,14 @@ class Supervisor:
             (True, False)
         """
         home = self.settings.hermes_home
-        config_paths = self.settings.config_paths or [home / "config.yaml", home / ".env"]
+        # Every source the child reads its configuration from, additively: Hermes's own
+        # files, the paths given explicitly and the adapter config file it is pointed to.
+        config_paths: list[Path] = [home / "config.yaml", home / ".env"]
+        config_paths += self.settings.config_paths
+        adapter_config = self.child_env.get("AGENOMIC_HERMES_CONFIG")
+        if adapter_config:
+            config_paths.append(Path(adapter_config).expanduser())
+        config_paths = list(dict.fromkeys(config_paths))
         skills_paths = [
             p for p in (self.settings.skills_dir, home / "skills", home / "plugins") if p
         ]

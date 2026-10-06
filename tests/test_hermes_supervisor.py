@@ -1753,3 +1753,35 @@ def test_missing_manifest_reconciles_symbolic_links(tmp_path: Path, target_kind:
     assert not (out / "c").is_symlink()
     assert revoked.exists(), "the link is removed, never what it points to"
     assert json.loads((out / ".agenomic_manifest.json").read_text()) == {"files": ["a/SKILL.md"]}
+
+
+def test_config_attestation_covers_every_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter_cfg = tmp_path / "adapter.yaml"
+    explicit = tmp_path / "extra.yaml"
+    api = FakeApi()
+    settings = SupervisorSettings(
+        argv=SLEEPER,
+        hermes_home=tmp_path / "home",
+        config_paths=[explicit],
+        forbidden_hosts=["api.openai.com:443"],
+        restart=False,
+    )
+    s = Supervisor(
+        settings,
+        api,
+        environ={**PROCESS_ENV, "AGENOMIC_HERMES_CONFIG": str(adapter_cfg)},
+        connect=refuse,
+    )
+    checked: list[Path] = []
+
+    def record(path: Path, uid: int, gids: Any) -> bool:
+        checked.append(Path(path))
+        return False  # read only, so every source is checked (any() stops at the first)
+
+    monkeypatch.setattr(sup, "writable_by", record)
+    s.isolation()
+    home = tmp_path / "home"
+    for source in (home / "config.yaml", home / ".env", explicit, adapter_cfg):
+        assert source in checked, f"{source} is attested"
