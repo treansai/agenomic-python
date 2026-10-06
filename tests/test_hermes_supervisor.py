@@ -712,17 +712,29 @@ def test_interrupted_sync_still_names_the_files_it_wrote(
 ) -> None:
     out = tmp_path / "skills"
     sync_skills([_skill("a", "A")], out)
-    real = sup._write_atomic
     written: list[str] = []
+    if sys.platform == "win32":
+        real = sup._write_atomic
 
-    def crash_after_one_skill(path: Path, data: bytes, mode: int) -> None:
-        if path.name == "SKILL.md" and written:
-            raise OSError(28, "No space left on device")
-        real(path, data, mode)
-        if path.name == "SKILL.md":
-            written.append(str(path))
+        def crash_after_one_skill(path: Path, data: bytes, mode: int) -> None:
+            if path.name == "SKILL.md" and written:
+                raise OSError(28, "No space left on device")
+            real(path, data, mode)
+            if path.name == "SKILL.md":
+                written.append(str(path))
 
-    monkeypatch.setattr(sup, "_write_atomic", crash_after_one_skill)
+        monkeypatch.setattr(sup, "_write_atomic", crash_after_one_skill)
+    else:  # POSIX writes go through the descriptor of the skills directory
+        real_at = sup._write_atomic_at
+
+        def crash_after_one_skill_at(dir_fd: int, name: str, data: bytes, mode: int) -> None:
+            if name == "SKILL.md" and written:
+                raise OSError(28, "No space left on device")
+            real_at(dir_fd, name, data, mode)
+            if name == "SKILL.md":
+                written.append(name)
+
+        monkeypatch.setattr(sup, "_write_atomic_at", crash_after_one_skill_at)
     with pytest.raises(OSError):
         sync_skills([_skill("a", "A"), _skill("b", "B"), _skill("c", "C")], out)
     monkeypatch.undo()
@@ -813,3 +825,88 @@ def test_skills_dir_owned_by_another_user_is_refused(tmp_path: Path) -> None:
     assert counts == {"written": 1, "unchanged": 0, "removed": 0, "rejected": 1}
     assert not (out / "a" / "SKILL.md").exists()
     assert (out / "b" / "SKILL.md").read_text() == "B"
+
+
+@posix_only
+def test_skills_dir_swapped_for_a_link_after_the_check_is_never_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "skills"
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    real_problem = sup.skills_dir_problem
+
+    def check_then_swap(path: Path) -> str | None:
+        problem = real_problem(path)  # the directory is missing: no problem
+        path.symlink_to(victim)  # the agent plants a link right after the check
+        return problem
+
+    monkeypatch.setattr(sup, "skills_dir_problem", check_then_swap)
+    counts = sync_skills([_skill("a", "A")], out)
+    assert counts == {"written": 0, "unchanged": 0, "removed": 0, "rejected": 1}
+    assert list(victim.iterdir()) == [], "nothing is written through the planted link"
+
+
+@posix_only
+def test_skills_dir_swapped_for_a_link_at_creation_is_never_followed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "skills"
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    real_mkdir = os.mkdir
+    planted: list[str] = []
+
+    def mkdir_after_a_plant(path: Any, mode: int = 0o777, **kw: Any) -> None:
+        if os.path.basename(os.fspath(path)) == "skills" and not planted:
+            out.symlink_to(victim)  # the agent wins the race against the creation
+            planted.append("skills")
+        real_mkdir(path, mode, **kw)
+
+    monkeypatch.setattr(os, "mkdir", mkdir_after_a_plant)
+    counts = sync_skills([_skill("a", "A")], out)
+    monkeypatch.undo()
+    assert planted
+    assert counts["written"] == 0
+    assert counts["rejected"] == 1
+    assert list(victim.iterdir()) == [], "nothing is written through the planted link"
+
+
+@posix_only
+def test_descriptor_sync_writes_nested_skills_and_removes_stale_ones(tmp_path: Path) -> None:
+    out = tmp_path / "missing" / "skills"
+    deep = {
+        "target": "skills/team/deep/SKILL.md",
+        "digest": "sha256:" + hashlib.sha256(b"D").hexdigest(),
+        "content": "D",
+    }
+    counts = sync_skills([_skill("a", "A"), deep], out)
+    assert counts == {"written": 2, "unchanged": 0, "removed": 0, "rejected": 0}
+    assert (out / "team" / "deep" / "SKILL.md").read_text() == "D"
+    assert json.loads((out / ".agenomic_manifest.json").read_text()) == {
+        "files": ["a/SKILL.md", "team/deep/SKILL.md"]
+    }
+    counts = sync_skills([_skill("a", "A")], out)
+    assert counts == {"written": 0, "unchanged": 1, "removed": 1, "rejected": 0}
+    assert not (out / "team" / "deep" / "SKILL.md").exists()
+    # A stale file behind a directory link is kept, and its target untouched.
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "SKILL.md").write_text("precious")
+    sync_skills([_skill("a", "A"), deep], out)
+    (out / "team" / "deep" / "SKILL.md").unlink()
+    (out / "team" / "deep").rmdir()
+    (out / "team" / "deep").symlink_to(victim)
+    assert sync_skills([_skill("a", "A")], out)["removed"] == 0
+    assert (victim / "SKILL.md").read_text() == "precious"
+
+
+@posix_only
+def test_skills_dir_whose_parent_is_a_link_is_refused(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "parent").symlink_to(real)
+    counts = sync_skills([_skill("a", "A")], tmp_path / "parent" / "skills")
+    assert counts["rejected"] == 1
+    assert counts["written"] == 0
+    assert list(real.iterdir()) == []

@@ -8,7 +8,8 @@ ignored), then secret pattern masking and truncation.
 
 :class:`EventExporter` mirrors the LangChain ``_Dispatcher``: a bounded
 buffer, one daemon thread, never blocking the agent loop. It batches up to 500
-events per ``POST /v1/hermes/runtime/events``, retries a batch a limited number
+events and ``BATCH_MAX_BYTES`` (under the 1 MiB body limit) per
+``POST /v1/hermes/runtime/events``, retries a batch a limited number
 of times with backoff, deduplicates by ``event_id``, and counts what it drops.
 An optional spool keeps undelivered batches in a size capped JSONL file; it is
 replayed one batch at a time when the buffer is idle and, under continuous
@@ -62,7 +63,12 @@ logger = logging.getLogger("agenomic.integrations.hermes.exporter")
 
 EVENT_SCHEMA = "agenomic.hermes.event/v1"
 MAX_BATCH = 500
+#: Largest event the gateway accepts (``MAX_EVENT_BYTES``, compact UTF-8 JSON).
 MAX_EVENT_BYTES = 64 * 1024
+#: Documented body limit of ``POST /v1/hermes/runtime/events``.
+MAX_REQUEST_BYTES = 1024 * 1024
+#: Bytes of events one request may carry: the body limit less headroom for the envelope.
+BATCH_MAX_BYTES = MAX_REQUEST_BYTES - 16 * 1024
 _DEDUP_WINDOW = 50_000
 #: Under continuous load one spool batch is replayed after this many live batches (or once
 #: a flush interval passed since the last replay), so a busy process still drains its spool.
@@ -442,6 +448,35 @@ def create_private_temp(path: Path) -> tuple[Path, int]:
     return Path(name), fd
 
 
+def _fit(event: dict[str, Any]) -> Optional[tuple[dict[str, Any], int, int]]:
+    """``(event, size, wire)`` for an event the gateway accepts, or ``None``.
+
+    ``size`` is the compact UTF-8 JSON size the gateway checks against
+    ``MAX_EVENT_BYTES``; an event above it loses its ``extra`` (``{"truncated": true}``),
+    and one still above it is refused (``None``): the gateway would reject it anyway.
+    ``wire`` bounds the bytes the event takes in a request body whatever the JSON
+    encoder of the transport (ASCII escapes, ``", "`` separators), separator included.
+    Raises ``TypeError``/``ValueError`` when the event cannot be serialized.
+
+    Example:
+        >>> event, size, wire = _fit({"event_id": "e", "extra": {"x": "y" * 70_000}})
+        >>> event["extra"], size <= MAX_EVENT_BYTES <= 70_000, wire >= size
+        ({'truncated': True}, True, True)
+    """
+    size = len(
+        json.dumps(event, separators=(",", ":"), ensure_ascii=False, default=str).encode("utf-8")
+    )
+    if size > MAX_EVENT_BYTES:
+        event = {k: v for k, v in event.items() if k != "extra"}
+        event["extra"] = {"truncated": True}
+        size = len(
+            json.dumps(event, separators=(",", ":"), ensure_ascii=False, default=str).encode()
+        )
+        if size > MAX_EVENT_BYTES:
+            return None
+    return event, size, len(json.dumps(event, default=str)) + 2
+
+
 #: Top-level keys an ``agenomic.hermes.event/v1`` document may carry.
 _EVENT_KEYS = frozenset(
     {"schema_version", "event_id", "type", "seq", "occurred_at", "extra", *EventBuilder._FIELDS}
@@ -531,8 +566,15 @@ class _Spool:
                     fh.writelines(lines)
             return rejected
 
-    def head(self, limit: int) -> tuple[list[str], list[dict[str, Any]]]:
-        """The first ``limit`` lines, left on disk, and the replayable events among them."""
+    def head(
+        self, limit: int, max_bytes: int = BATCH_MAX_BYTES
+    ) -> tuple[list[str], list[dict[str, Any]]]:
+        """The first lines (at most ``limit``, their events at most ``max_bytes`` on the
+        wire, at least one line), left on disk, and the replayable events among them.
+
+        A replayed event is fitted like a submitted one (:func:`_fit`): truncated above
+        ``MAX_EVENT_BYTES``, left out when still too large, like an invalid record.
+        """
         with self._lock:
             if self.refused:
                 return [], []
@@ -541,15 +583,25 @@ class _Spool:
             except PermissionError as e:
                 self._refuse(e)
                 return [], []
+        taken: list[str] = []
         events: list[dict[str, Any]] = []
+        used = 0
         for line in lines:
+            fitted = None
             try:
                 item = _replayable(json.loads(line))
-            except json.JSONDecodeError:
-                item = None
-            if item is not None:
-                events.append(item)
-        return lines, events
+                if item is not None:
+                    fitted = _fit(item)
+            except (TypeError, ValueError):  # JSONDecodeError is a ValueError
+                fitted = None
+            if fitted is not None:
+                event, _size, wire = fitted
+                if events and used + wire > max_bytes:
+                    break
+                used += wire
+                events.append(event)
+            taken.append(line)
+        return taken, events
 
     def remove(self, taken: list[str]) -> None:
         """Rewrite the spool without ``taken``, a head returned by :meth:`head`.
@@ -592,7 +644,8 @@ class _Spool:
 class EventExporter:
     """Bounded, batching, retrying event exporter on a daemon thread.
 
-    ``post`` receives a list of at most ``batch_size`` events and returns the
+    ``post`` receives a list of at most ``batch_size`` events (and ``BATCH_MAX_BYTES``
+    on the wire, at least one event) and returns the
     server answer; any exception counts as a failed attempt. ``submit`` never
     blocks: when the buffer is full the event goes to the spool, or is dropped
     and counted.
@@ -620,7 +673,7 @@ class EventExporter:
         self._max_retries = max(0, max_retries)
         self._backoff = backoff_s
         self._spool = _Spool(Path(spool_path).expanduser(), spool_max_bytes) if spool_path else None
-        self._buf: deque[tuple[dict[str, Any], int]] = deque()
+        self._buf: deque[tuple[dict[str, Any], int, int]] = deque()
         self._bytes = 0
         self._seen: OrderedDict[str, None] = OrderedDict()
         self._cond = threading.Condition()
@@ -633,6 +686,8 @@ class EventExporter:
         self._last_failure_at = float("-inf")
         self._live_since_replay = 0
         self._last_replay_at = float("-inf")
+        self._spool_errors = 0
+        self._worker_errors = 0
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
 
@@ -652,15 +707,14 @@ class EventExporter:
             self._count_drop("event without event_id")
             return False
         try:
-            encoded = json.dumps(event, separators=(",", ":"), ensure_ascii=False, default=str)
+            fitted = _fit(event)
         except (TypeError, ValueError):
             self._count_drop("event not serializable")
             return False
-        size = len(encoded.encode("utf-8"))
-        if size > MAX_EVENT_BYTES:
-            event = {k: v for k, v in event.items() if k != "extra"}
-            event["extra"] = {"truncated": True}
-            size = len(json.dumps(event, default=str).encode("utf-8"))
+        if fitted is None:
+            self._count_drop("event larger than MAX_EVENT_BYTES even without extra")
+            return False
+        event, size, wire = fitted
         with self._cond:
             if self._closed:
                 self._count_drop_locked("exporter closed")
@@ -672,10 +726,10 @@ class EventExporter:
                 overflow = True
             else:
                 overflow = False
-                self._buf.append((event, size))
+                self._buf.append((event, size, wire))
                 self._bytes += size
                 self._remember(event_id)
-                if len(self._buf) >= self._batch_size:
+                if len(self._buf) >= self._batch_size or self._bytes >= BATCH_MAX_BYTES:
                     self._cond.notify_all()
         if overflow:
             self._overflow([event], "buffer full")
@@ -778,7 +832,7 @@ class EventExporter:
             self._cond.notify_all()
         self._thread.join(timeout)
         with self._cond:
-            leftover = [e for e, _ in self._buf]
+            leftover = [e for e, _, _ in self._buf]
             self._buf.clear()
             self._bytes = 0
         if leftover:
@@ -787,10 +841,16 @@ class EventExporter:
 
     # -- worker --------------------------------------------------------
     def _take_batch(self) -> list[dict[str, Any]]:
+        """At most ``batch_size`` events and ``BATCH_MAX_BYTES`` on the wire, at least one."""
         batch: list[dict[str, Any]] = []
+        used = 0
         while self._buf and len(batch) < self._batch_size:
-            event, size = self._buf.popleft()
+            event, size, wire = self._buf[0]
+            if batch and used + wire > BATCH_MAX_BYTES:
+                break
+            self._buf.popleft()
             self._bytes -= size
+            used += wire
             batch.append(event)
         if len(self._buf) < self._max_events:
             self._buffer_full = False
@@ -805,19 +865,33 @@ class EventExporter:
                 if self._closed and not self._buf:
                     return
                 batch = self._take_batch()
-            if batch:
-                self._deliver(batch)
-                self._live_since_replay += 1
-                if (
-                    self._live_since_replay >= REPLAY_EVERY
-                    or time.monotonic() - self._last_replay_at >= self._interval
-                ):
+            try:
+                if batch:
+                    self._deliver(batch)
+                    self._live_since_replay += 1
+                    if (
+                        self._live_since_replay >= REPLAY_EVERY
+                        or time.monotonic() - self._last_replay_at >= self._interval
+                    ):
+                        self._replay_spool()
+                else:
                     self._replay_spool()
-            else:
-                self._replay_spool()
-            with self._cond:
-                self._in_flight = 0
-                self._cond.notify_all()
+            except Exception:  # the only worker thread must outlive any bug in a step
+                self._worker_errors += 1
+                self._last_failure_at = time.monotonic()
+                if self._worker_errors <= 3:
+                    logger.exception("Hermes event exporter step failed; the worker continues")
+            finally:
+                with self._cond:
+                    self._in_flight = 0
+                    self._cond.notify_all()
+
+    def _spool_failed(self, what: str, error: OSError) -> None:
+        """A spool stat, read or rewrite failed: logged once, counted, replay backs off."""
+        self._spool_errors += 1
+        self._last_failure_at = time.monotonic()
+        if self._spool_errors == 1:
+            logger.warning("event spool %s failed: %s", what, type(error).__name__)
 
     def _deliver(self, batch: list[dict[str, Any]], *, spool_on_failure: bool = True) -> bool:
         for attempt in range(self._max_retries + 1):
@@ -845,18 +919,20 @@ class EventExporter:
     def _replay_spool(self) -> None:
         self._live_since_replay = 0
         self._last_replay_at = time.monotonic()
-        if self._spool is None or self._spool.size() == 0:
+        if self._spool is None:
             return
-        # After a failed delivery, wait a few intervals before replaying the spool again.
+        # After a failed delivery or spool access, wait a few intervals before replaying.
         if time.monotonic() - self._last_failure_at < 5 * self._interval:
             return
         try:
-            lines, events = self._spool.head(self._batch_size)
+            if self._spool.size() == 0:
+                return
+            lines, events = self._spool.head(self._batch_size, BATCH_MAX_BYTES)
         except OSError as e:
-            logger.warning("event spool read failed: %s", type(e).__name__)
+            self._spool_failed("read", e)
             return
         if len(events) < len(lines):
-            self._count_drop("invalid spool record", len(lines) - len(events))
+            self._count_drop("invalid or oversized spool record", len(lines) - len(events))
         if events:
             with self._cond:
                 self._in_flight = len(events)
@@ -872,4 +948,4 @@ class EventExporter:
         try:
             self._spool.remove(lines)
         except OSError as e:
-            logger.warning("event spool rewrite failed: %s", type(e).__name__)
+            self._spool_failed("rewrite", e)

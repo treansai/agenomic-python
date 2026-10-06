@@ -256,7 +256,10 @@ scalar (an exception, bytes, any other object) is replaced by its masked
 unmasked and every event is strict JSON.
 
 The exporter never blocks the agent: a bounded buffer, one daemon thread,
-batches of at most 500 to `POST /events`, 3 retries with backoff,
+batches of at most 500 events and about 1 MiB to `POST /events` (each batch is
+also capped by serialized size, with headroom for the envelope, under the
+documented 1 MiB body limit; a batch always carries at least one event), 3
+retries with backoff,
 deduplication by `event_id`, drop and count on overflow, and an optional
 size capped JSONL spool for undelivered batches. The spool is `0600` even
 when the file already existed with a wider mode, and a directory the exporter
@@ -272,6 +275,15 @@ load, after every 10 live batches or once per `flush_interval_s`. A replayed
 record must have the `agenomic.hermes.event/v1` shape (schema, string
 `event_id` and `type`, no unknown top-level key) and goes through the
 redaction walk again before it is sent; anything else is dropped and counted.
+Replayed batches are capped by serialized size like live ones, and a replayed
+record goes through the same per-event check as a submitted event: above the
+gateway's 64 KiB per-event limit its `extra` becomes `{"truncated": true}`,
+and an event still above the limit (submitted or replayed) is dropped and
+counted, since the gateway would reject it. A spool that cannot be inspected
+(a `stat`, read or rewrite failure) is logged once, counted, and replay backs
+off for a few flush intervals; live delivery continues. Any unexpected error
+in a delivery or replay step is logged and the worker thread carries on: it
+never dies silently.
 A replayed batch stays in the file until the server acknowledged it, then is
 removed while events appended meanwhile are kept; a crash in between sends it
 again, which the gateway absorbs because it deduplicates events by
@@ -344,11 +356,19 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   rename), and new files are added to the manifest before they are written,
   so an interrupted sync never forgets a file. The temporary file has an
   unpredictable name and is created exclusively (`O_EXCL`, `O_NOFOLLOW`, mode
-  `0600` until complete); on POSIX every step is relative to a descriptor of
-  the parent directory opened without following a link, which must belong to
-  the supervisor's uid. Symbolic links are never followed: a skills directory
-  that is a link or belongs to another user is refused as a whole (logged as
-  an error, nothing written, `skills_readonly` false), a skill whose path
+  `0600` until complete). On POSIX the skills directory is created and opened
+  once without following a link: its parent is opened with `O_NOFOLLOW` and
+  must belong to the supervisor's euid or root, the directory is created
+  relative to that descriptor, then opened with `O_DIRECTORY|O_NOFOLLOW` and
+  must belong to the supervisor's euid. Everything else (subdirectories, each
+  opened or created with `O_NOFOLLOW` and owner checked, reads, atomic writes,
+  removals, the manifest) is relative to that descriptor and never goes
+  through a path resolved again, so a link the agent swaps in at any moment
+  is never followed. Windows has no directory descriptors and keeps explicit
+  link checks. Symbolic links are never followed: a skills directory that is
+  a link, has a parent that is a link, or belongs to another user is refused
+  as a whole (logged as an error, nothing written, `skills_readonly` false),
+  a skill whose path
   goes through a link (the file or a directory) is rejected, and a stale file
   behind a link is left alone. When the manifest is
   unreadable or malformed anyway, the sync logs an error and removes every

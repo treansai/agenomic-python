@@ -31,6 +31,7 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
 import secrets
 import signal
 import socket
@@ -409,6 +410,15 @@ def _digest_matches(content: bytes, digest: str) -> bool:
 
 
 _MANIFEST = ".agenomic_manifest.json"
+#: Opens a directory without following a final symbolic link (POSIX).
+_DIR_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+#: ``open`` errors meaning a symbolic link (``ELOOP``, ``EMLINK`` on some BSDs) or not a directory.
+_LINK_ERRNOS = (errno.ELOOP, errno.EMLINK, errno.ENOTDIR)
 
 
 class UnsafeSkillsPathError(OSError):
@@ -462,44 +472,51 @@ def _write_atomic(path: Path, data: bytes, mode: int) -> None:
         _write_atomic_portable(path, data, mode)
         return
     try:
-        dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        dir_fd = os.open(path.parent, _DIR_FLAGS)
     except OSError as e:
-        if e.errno in (errno.ELOOP, errno.EMLINK, errno.ENOTDIR) and path.parent.is_symlink():
+        if e.errno in _LINK_ERRNOS and path.parent.is_symlink():
             raise UnsafeSkillsPathError(f"{path.parent} is a symbolic link") from e
         raise
     try:
-        if os.fstat(dir_fd).st_uid != os.geteuid():
-            raise UnsafeSkillsPathError(f"{path.parent} belongs to another user")
-        name = path.name
-        try:
-            if stat.S_ISLNK(os.lstat(name, dir_fd=dir_fd).st_mode):
-                raise UnsafeSkillsPathError(f"{path} is a symbolic link")
-        except FileNotFoundError:
-            pass
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
-        while True:
-            tmp = f".{name}.{secrets.token_hex(8)}.tmp"
-            try:
-                fd = os.open(tmp, flags, 0o600, dir_fd=dir_fd)
-                break
-            except FileExistsError:
-                continue
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(data)
-                fh.flush()
-                os.fchmod(fh.fileno(), mode)
-                os.fsync(fh.fileno())
-            os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp, dir_fd=dir_fd)
-            raise
-        # Make the rename itself durable; a directory that cannot be synced only loses that.
-        with contextlib.suppress(OSError):
-            os.fsync(dir_fd)
+        _write_atomic_at(dir_fd, path.name, data, mode)
     finally:
         os.close(dir_fd)
+
+
+def _write_atomic_at(dir_fd: int, name: str, data: bytes, mode: int) -> None:
+    """:func:`_write_atomic` for the entry ``name`` of the directory open as ``dir_fd``
+    (POSIX): the directory must belong to the supervisor, ``name`` must not be a link."""
+    if sys.platform == "win32":
+        raise NotImplementedError("directory descriptors are POSIX only")
+    if os.fstat(dir_fd).st_uid != os.geteuid():
+        raise UnsafeSkillsPathError(f"the directory of {name} belongs to another user")
+    try:
+        if stat.S_ISLNK(os.lstat(name, dir_fd=dir_fd).st_mode):
+            raise UnsafeSkillsPathError(f"{name} is a symbolic link")
+    except FileNotFoundError:
+        pass
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    while True:
+        tmp = f".{name}.{secrets.token_hex(8)}.tmp"
+        try:
+            fd = os.open(tmp, flags, 0o600, dir_fd=dir_fd)
+            break
+        except FileExistsError:
+            continue
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fchmod(fh.fileno(), mode)
+            os.fsync(fh.fileno())
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=dir_fd)
+        raise
+    # Make the rename itself durable; a directory that cannot be synced only loses that.
+    with contextlib.suppress(OSError):
+        os.fsync(dir_fd)
 
 
 def _write_atomic_portable(path: Path, data: bytes, mode: int) -> None:
@@ -520,6 +537,131 @@ def _write_atomic_portable(path: Path, data: bytes, mode: int) -> None:
         raise
 
 
+def _skill_parts(rel: str) -> Optional[tuple[str, ...]]:
+    """The components of a skill path relative to the skills directory, normalized
+    lexically, or ``None`` when it is empty, absolute or leaves the directory.
+
+    Example:
+        >>> _skill_parts("demo/SKILL.md"), _skill_parts("a/../b.md"), _skill_parts("../x")
+        (('demo', 'SKILL.md'), ('b.md',), None)
+    """
+    if not rel or os.path.isabs(rel) or rel.startswith("/"):
+        return None
+    norm = posixpath.normpath(rel.replace(os.sep, "/"))
+    if norm in (".", "..") or norm.startswith(("../", "/")):
+        return None
+    return tuple(norm.split("/"))
+
+
+def _open_skills_root(skills_dir: Path) -> int:
+    """A descriptor of ``skills_dir`` created or opened without following a link (POSIX).
+
+    The parent directory is opened with ``O_NOFOLLOW`` and must belong to the
+    supervisor's euid or root; the directory itself is created relative to it, then
+    opened with ``O_NOFOLLOW`` and must belong to the supervisor. A link or a directory
+    of another user swapped in between the checks is refused
+    (:class:`UnsafeSkillsPathError`), never followed.
+    """
+    if sys.platform == "win32":
+        raise NotImplementedError("directory descriptors are POSIX only")
+    path = Path(os.path.abspath(skills_dir))
+    name = path.name
+    if not name:
+        raise UnsafeSkillsPathError("is a filesystem root")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        parent_fd = os.open(path.parent, _DIR_FLAGS)
+    except OSError as e:
+        if e.errno in _LINK_ERRNOS:
+            raise UnsafeSkillsPathError("has a parent that is a symbolic link") from e
+        raise
+    try:
+        if os.fstat(parent_fd).st_uid not in (os.geteuid(), 0):
+            raise UnsafeSkillsPathError("has a parent that belongs to another user")
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(name, 0o755, dir_fd=parent_fd)
+        try:
+            fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+        except OSError as e:
+            if e.errno in _LINK_ERRNOS:
+                raise UnsafeSkillsPathError("is a symbolic link or not a directory") from e
+            raise
+    finally:
+        os.close(parent_fd)
+    try:
+        if os.fstat(fd).st_uid != os.geteuid():
+            raise UnsafeSkillsPathError("belongs to another user")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _open_dir_at(root_fd: int, parts: Sequence[str], *, create: bool) -> Optional[int]:
+    """A descriptor of the subdirectory ``parts`` of ``root_fd``, every component opened
+    with ``O_NOFOLLOW`` and required to belong to the supervisor (POSIX). ``None`` when a
+    component is missing and ``create`` is false."""
+    if sys.platform == "win32":
+        raise NotImplementedError("directory descriptors are POSIX only")
+    fd = os.dup(root_fd)
+    try:
+        for i, part in enumerate(parts):
+            if create:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, 0o755, dir_fd=fd)
+            try:
+                child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if create:
+                    raise
+                os.close(fd)
+                return None
+            except OSError as e:
+                if e.errno in _LINK_ERRNOS:
+                    where = "/".join(parts[: i + 1])
+                    raise UnsafeSkillsPathError(
+                        f"{where} is a symbolic link or not a directory"
+                    ) from e
+                raise
+            os.close(fd)
+            fd = child
+            if os.fstat(fd).st_uid != os.geteuid():
+                raise UnsafeSkillsPathError(f"{'/'.join(parts[: i + 1])} belongs to another user")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _unchanged_at(root_fd: int, parts: Sequence[str], data: bytes) -> bool:
+    """Whether the skill file ``parts`` already holds ``data`` (its mode is then narrowed
+    to ``0644``). A link or a non regular file on the way raises
+    :class:`UnsafeSkillsPathError`."""
+    if sys.platform == "win32":
+        raise NotImplementedError("directory descriptors are POSIX only")
+    dir_fd = _open_dir_at(root_fd, parts[:-1], create=False)
+    if dir_fd is None:
+        return False
+    try:
+        try:
+            mode = os.lstat(parts[-1], dir_fd=dir_fd).st_mode
+        except FileNotFoundError:
+            return False
+        if stat.S_ISLNK(mode):
+            raise UnsafeSkillsPathError(f"{'/'.join(parts)} is a symbolic link")
+        if not stat.S_ISREG(mode):
+            raise UnsafeSkillsPathError(f"{'/'.join(parts)} is not a regular file")
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+        with os.fdopen(fd, "rb") as fh:
+            if fh.read() != data:
+                return False
+            if stat.S_IMODE(os.fstat(fh.fileno()).st_mode) != 0o644:
+                os.fchmod(fh.fileno(), 0o644)  # a wider mode set since the last sync
+        return True
+    finally:
+        os.close(dir_fd)
+
+
 def _managed_files(root: Path) -> set[str]:
     """Every regular file under ``root`` (symbolic links and the manifest excluded), relative
     and with ``/`` separators on every platform, so manifest entries compare equal on Windows."""
@@ -531,6 +673,34 @@ def _managed_files(root: Path) -> set[str]:
                 continue
             found.add(full.relative_to(root).as_posix())
     return found
+
+
+def _managed_files_at(root_fd: int) -> set[str]:
+    """:func:`_managed_files` through the descriptor of the skills directory (POSIX);
+    symbolic links, to files or directories, are never followed."""
+    if sys.platform == "win32":
+        raise NotImplementedError("directory descriptors are POSIX only")
+    found: set[str] = set()
+    for dirpath, _dirs, files, dfd in os.fwalk(".", dir_fd=root_fd):
+        for name in files:
+            if name == _MANIFEST:
+                continue
+            try:
+                if stat.S_ISREG(os.lstat(name, dir_fd=dfd).st_mode):
+                    found.add(posixpath.normpath(posixpath.join(dirpath, name)))
+            except OSError:
+                continue
+    return found
+
+
+def _manifest_files(raw: str) -> Optional[set[str]]:
+    try:
+        files = json.loads(raw).get("files")
+        if isinstance(files, list) and all(isinstance(f, str) for f in files):
+            return set(files)
+    except (ValueError, AttributeError):
+        pass
+    return None
 
 
 def _previous_files(root: Path, manifest_path: Path) -> set[str]:
@@ -546,14 +716,33 @@ def _previous_files(root: Path, manifest_path: Path) -> set[str]:
             "skills manifest unreadable (%s); reconciling the whole directory", type(exc).__name__
         )
         return _managed_files(root)
+    files = _manifest_files(raw)
+    if files is None:
+        logger.error("skills manifest malformed; reconciling the whole directory")
+        return _managed_files(root)
+    return files
+
+
+def _previous_files_at(root_fd: int) -> set[str]:
+    """:func:`_previous_files` through the descriptor of the skills directory (POSIX)."""
+    if sys.platform == "win32":
+        raise NotImplementedError("directory descriptors are POSIX only")
     try:
-        files = json.loads(raw).get("files")
-        if isinstance(files, list) and all(isinstance(f, str) for f in files):
-            return set(files)
-    except (ValueError, AttributeError):
-        pass
-    logger.error("skills manifest malformed; reconciling the whole directory")
-    return _managed_files(root)
+        fd = os.open(_MANIFEST, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=root_fd)
+        with os.fdopen(fd, "rb") as fh:
+            raw = fh.read().decode("utf-8")
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError) as exc:
+        logger.error(
+            "skills manifest unreadable (%s); reconciling the whole directory", type(exc).__name__
+        )
+        return _managed_files_at(root_fd)
+    files = _manifest_files(raw)
+    if files is None:
+        logger.error("skills manifest malformed; reconciling the whole directory")
+        return _managed_files_at(root_fd)
+    return files
 
 
 def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> dict[str, int]:
@@ -562,6 +751,11 @@ def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> 
     are skipped. Files and the manifest are replaced atomically; when the manifest is
     unreadable or malformed, every regular file of the directory that is not approved now
     is removed (the directory belongs to the supervisor) and the fact is logged as an error.
+
+    On POSIX the directory is created and opened once without following a link (see
+    :func:`_open_skills_root`) and everything else (subdirectories, reads, writes,
+    removals, the manifest) goes through that descriptor, never through a path resolved
+    again, so a link swapped in by the agent at any point is never followed.
 
     Example:
         >>> import tempfile, hashlib
@@ -577,7 +771,119 @@ def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> 
         logger.error("skills directory %s %s; approved skills not written", skills_dir, problem)
         counts["rejected"] = len(skills)
         return counts
+    if sys.platform == "win32":
+        return _sync_skills_portable(skills, skills_dir, counts)
+    try:
+        root_fd = _open_skills_root(skills_dir)
+    except UnsafeSkillsPathError as e:
+        logger.error("skills directory %s %s; approved skills not written", skills_dir, e)
+        counts["rejected"] = len(skills)
+        return counts
+    try:
+        return _sync_skills_at(skills, root_fd, counts)
+    finally:
+        os.close(root_fd)
+
+
+def _skill_entry(skill: Mapping[str, JsonValue]) -> tuple[str, Optional[tuple[str, ...]], object]:
+    target = str(skill.get("target") or "")
+    rel = target[len("skills/") :] if target.startswith("skills/") else target
+    return rel, _skill_parts(rel), skill.get("content")
+
+
+def _sync_skills_at(
+    skills: Sequence[Mapping[str, JsonValue]], root_fd: int, counts: dict[str, int]
+) -> dict[str, int]:
+    """:func:`sync_skills` relative to the trusted descriptor of the directory (POSIX)."""
+    if sys.platform == "win32":
+        raise NotImplementedError("directory descriptors are POSIX only")
+    previous = _previous_files_at(root_fd)
+    current: set[str] = set()
+    writes: list[tuple[tuple[str, ...], bytes]] = []
+    for skill in skills:
+        rel, parts, content = _skill_entry(skill)
+        if parts is None or not isinstance(content, str) or parts == (_MANIFEST,):
+            counts["rejected"] += 1
+            continue
+        data = content.encode("utf-8")
+        if not _digest_matches(data, str(skill.get("digest") or "")):
+            logger.warning("approved skill %s skipped: digest mismatch", rel)
+            counts["rejected"] += 1
+            continue
+        try:
+            unchanged = _unchanged_at(root_fd, parts, data)
+        except UnsafeSkillsPathError as e:
+            # A symbolic link on the way (the file itself or a directory): never followed.
+            logger.warning("approved skill %s skipped: %s", rel, e)
+            counts["rejected"] += 1
+            continue
+        current.add("/".join(parts))
+        if unchanged:
+            counts["unchanged"] += 1
+            continue
+        writes.append((parts, data))
+    if any("/".join(parts) not in previous for parts, _ in writes):
+        # Record the new files before writing them: a sync interrupted after a write still
+        # leaves a manifest that names it, so a later sync removes it once unapproved.
+        _write_atomic_at(
+            root_fd,
+            _MANIFEST,
+            json.dumps({"files": sorted(previous | current)}).encode("utf-8"),
+            0o644,
+        )
+    for parts, data in writes:
+        try:
+            dir_fd = _open_dir_at(root_fd, parts[:-1], create=True)
+            assert dir_fd is not None  # created when missing
+            try:
+                _write_atomic_at(dir_fd, parts[-1], data, 0o644)
+            finally:
+                os.close(dir_fd)
+        except UnsafeSkillsPathError as e:
+            logger.error("approved skill %s not written: %s", "/".join(parts), e)
+            counts["rejected"] += 1
+            continue
+        counts["written"] += 1
+    for stale in sorted(previous - current):
+        stale_parts = _skill_parts(stale)
+        if stale_parts is None or stale_parts == (_MANIFEST,):
+            continue
+        try:
+            dir_fd = _open_dir_at(root_fd, stale_parts[:-1], create=False)
+        except UnsafeSkillsPathError:
+            logger.warning("stale skill %s kept: its path goes through a symbolic link", stale)
+            continue
+        if dir_fd is None:
+            continue
+        try:
+            try:
+                mode = os.lstat(stale_parts[-1], dir_fd=dir_fd).st_mode
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(mode):
+                logger.warning("stale skill %s kept: it is a symbolic link", stale)
+            elif stat.S_ISREG(mode):
+                os.unlink(stale_parts[-1], dir_fd=dir_fd)
+                counts["removed"] += 1
+        finally:
+            os.close(dir_fd)
+    _write_atomic_at(
+        root_fd, _MANIFEST, json.dumps({"files": sorted(current)}).encode("utf-8"), 0o644
+    )
+    return counts
+
+
+def _sync_skills_portable(
+    skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path, counts: dict[str, int]
+) -> dict[str, int]:
+    """:func:`sync_skills` without directory descriptors (Windows): explicit link checks."""
     skills_dir.mkdir(parents=True, exist_ok=True)
+    if skills_dir.is_symlink():
+        logger.error(
+            "skills directory %s is a symbolic link; approved skills not written", skills_dir
+        )
+        counts["rejected"] = len(skills)
+        return counts
     root = skills_dir.resolve()
     manifest_path = root / _MANIFEST
     previous = _previous_files(root, manifest_path)
@@ -611,8 +917,6 @@ def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> 
         relative = dest.relative_to(root).as_posix()
         current.add(relative)
         if dest.exists() and dest.read_bytes() == data:
-            if sys.platform != "win32" and stat.S_IMODE(dest.stat().st_mode) != 0o644:
-                os.chmod(dest, 0o644)  # a wider mode set since the last sync is narrowed
             counts["unchanged"] += 1
             continue
         writes.append((dest, data))

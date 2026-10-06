@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from agenomic.integrations.hermes import exporter as exporter_mod
 from agenomic.integrations.hermes.exporter import (
     EVENT_SCHEMA,
     EventBuilder,
@@ -17,6 +18,9 @@ from agenomic.integrations.hermes.exporter import (
     mask_text,
     redacted_preview,
 )
+
+#: The documented ``POST /v1/hermes/runtime/events`` body limit (cloud docs/hermes/api.md).
+BODY_LIMIT = 1024 * 1024
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
 
@@ -583,3 +587,107 @@ def test_spool_rewrite_ignores_a_link_planted_at_the_old_temporary_name(tmp_path
     assert victim.read_text() == "precious"
     assert len(spool.path.read_text().splitlines()) == 1
     assert oct(spool.path.stat().st_mode & 0o777) == "0o600"
+
+
+# ---------------------------------------------------------------- worker resilience
+
+
+def test_spool_stat_error_keeps_the_worker_delivering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unreadable(self: Any) -> int:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(exporter_mod._Spool, "size", unreadable)
+    batches, post = collect()
+    exporter = EventExporter(post, flush_interval_s=0.01, spool_path=str(tmp_path / "s.jsonl"))
+    for _ in range(3):
+        assert exporter.submit(EventBuilder().build("live"))
+        assert exporter.flush(5.0), "live events are still delivered"
+    assert sum(len(b) for b in batches) == 3
+    assert exporter._thread.is_alive()
+    assert exporter._spool_errors >= 1
+    exporter.close(1.0)
+
+
+def test_unexpected_worker_error_is_logged_and_the_worker_continues(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def broken(self: Any) -> None:
+        raise RuntimeError("bug in a replay step")
+
+    monkeypatch.setattr(EventExporter, "_replay_spool", broken)
+    batches, post = collect()
+    exporter = EventExporter(post, flush_interval_s=0.01)
+    with caplog.at_level("ERROR", logger="agenomic.integrations.hermes.exporter"):
+        for _ in range(3):
+            assert exporter.submit(EventBuilder().build("live"))
+            assert exporter.flush(5.0)
+    assert sum(len(b) for b in batches) == 3
+    assert exporter._thread.is_alive()
+    assert any("worker continues" in r.getMessage() for r in caplog.records)
+    exporter.close(1.0)
+
+
+# ---------------------------------------------------------------- request size
+
+
+def _within_body_limit(batch: list[dict[str, Any]]) -> bool:
+    """Whatever the transport's JSON encoder (compact UTF-8, or ASCII escapes)."""
+    body = {"events": batch}
+    compact = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    escaped = json.dumps(body).encode("utf-8")
+    return max(len(compact), len(escaped)) <= BODY_LIMIT
+
+
+def _large_event(builder: EventBuilder, i: int) -> dict[str, Any]:
+    # Near the 64 KiB per event limit; half of them non-ASCII (6 bytes once escaped).
+    blob = ("é" * 25_000) if i % 2 else ("a" * 60_000)
+    return builder.build("tool.call.completed", extra={"blob": blob})
+
+
+def test_live_batches_stay_under_the_request_body_limit() -> None:
+    batches, post = collect()
+    # A long interval: every event is buffered before the first batch is taken.
+    exporter = EventExporter(post, flush_interval_s=30.0)
+    builder = EventBuilder()
+    events = [_large_event(builder, i) for i in range(60)]
+    for event in events:
+        assert exporter.submit(event)
+    assert exporter.flush(10.0)
+    assert len(batches) > 1
+    assert all(_within_body_limit(b) for b in batches)
+    delivered = [e["event_id"] for b in batches for e in b]
+    assert delivered == [e["event_id"] for e in events], "all delivered, in order"
+    assert all(b[0]["extra"] != {"truncated": True} for b in batches)
+    exporter.close(1.0)
+
+
+def test_replayed_spool_batches_stay_under_the_request_body_limit(tmp_path: Path) -> None:
+    builder = EventBuilder()
+    spooled = [_large_event(builder, i) for i in range(40)]
+    oversized = builder.build("x", extra={"blob": "b" * 100_000})
+    hopeless = builder.build("x", reason="r" * 100_000)  # too large even without extra
+    spool = tmp_path / "events.jsonl"
+    spool.write_text(
+        "".join(json.dumps(e, ensure_ascii=False) + "\n" for e in [*spooled, oversized, hopeless]),
+        encoding="utf-8",
+    )
+    batches: list[list[dict[str, Any]]] = []
+    done = threading.Event()
+
+    def post(batch: list[dict[str, Any]]) -> None:
+        batches.append(list(batch))
+        if sum(len(b) for b in batches) >= len(spooled) + 1:
+            done.set()
+
+    exporter = EventExporter(post, flush_interval_s=0.01, spool_path=str(spool))
+    assert done.wait(20.0)
+    exporter.close(2.0)
+    assert len(batches) > 1
+    assert all(_within_body_limit(b) for b in batches)
+    by_id = {e["event_id"]: e for b in batches for e in b}
+    assert all(e["event_id"] in by_id for e in spooled)
+    assert by_id[oversized["event_id"]]["extra"] == {"truncated": True}
+    assert hopeless["event_id"] not in by_id
+    assert exporter.stats()["dropped"] == 1, "the record the gateway would refuse is counted"
