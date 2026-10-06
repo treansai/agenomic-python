@@ -896,3 +896,10 @@ def test_replayed_spool_batches_stay_under_the_request_body_limit(tmp_path: Path
     assert by_id[oversized["event_id"]]["extra"] == {"truncated": True}
     assert hopeless["event_id"] not in by_id
     assert exporter.stats()["dropped"] == 1, "the record the gateway would refuse is counted"
+
+
+def test_credential_shaped_mapping_keys_are_masked() -> None:
+    out = json.dumps(
+        exporter_mod._walk({"labels": {"agmhr_" + "s3cretvalue123456": "x"}}, lambda v: v)
+    )
+    assert "s3cretvalue123456" not in out

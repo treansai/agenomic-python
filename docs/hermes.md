@@ -355,8 +355,9 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
 
 - The child environment is built from an allowlist (`PATH`, `HOME`, locale,
   `HERMES_HOME`, `AGENOMIC_HERMES_CONFIG`, ... plus `--allow-env`). Every
-  `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD` is removed even when
-  allowlisted, except the runtime token variable. The supervisor token is
+  `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, and every provider
+  credential (`AWS_SECRET_ACCESS_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`), is
+  removed even when allowlisted, except the runtime token variable. The supervisor token is
   never passed.
 - `AGENOMIC_HERMES_SUPERVISOR_TOKEN` must hold a supervisor token
   (`agmhs_...`); any other value (a provider key, a runtime token...) is

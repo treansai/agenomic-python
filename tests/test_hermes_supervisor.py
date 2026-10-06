@@ -1785,3 +1785,14 @@ def test_config_attestation_covers_every_source(
     home = tmp_path / "home"
     for source in (home / "config.yaml", home / ".env", explicit, adapter_cfg):
         assert source in checked, f"{source} is attested"
+
+
+def test_allowlisted_provider_credential_is_scrubbed() -> None:
+    env = build_child_env(
+        {"GOOGLE_APPLICATION_CREDENTIALS": "/sa.json", "AWS_SECRET_ACCESS_KEY": "k", "X": "1"},
+        allow=["GOOGLE_APPLICATION_CREDENTIALS", "AWS_SECRET_ACCESS_KEY", "X"],
+    )
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert env["X"] == "1"
+    assert provider_secrets_absent(env)

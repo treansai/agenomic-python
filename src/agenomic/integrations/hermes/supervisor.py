@@ -152,7 +152,9 @@ def build_child_env(
         if name == runtime_token_env:
             if not _runtime_token_exempt(name, source, runtime_token_env):
                 continue
-        elif _SECRET_NAME.search(name):
+        elif _SECRET_NAME.search(name) or _PROVIDER_KEYS.search(name):
+            # Provider credentials (GOOGLE_APPLICATION_CREDENTIALS...) too: the scrub wins
+            # over the allowlist, exactly as provider_secrets_absent() classifies them.
             continue
         env[name] = source[name]
     return env

@@ -180,11 +180,14 @@ def _walk(value: object, leaf: Callable[[object], object]) -> object:
     """Mask credential-named keys in every mapping, sequence or set; ``leaf`` maps the rest.
 
     Every container becomes a ``dict`` or ``list``, so no tuple, custom mapping or set
-    reaches ``json.dumps`` with its members unredacted.
+    reaches ``json.dumps`` with its members unredacted. Keys are exported too: a
+    credential-shaped string key is masked like any text.
     """
     if isinstance(value, Mapping):
         return {
-            k: _MASK if isinstance(k, str) and is_secret_key(k) else _walk(v, leaf)
+            (mask_text(k) if isinstance(k, str) else k): (
+                _MASK if isinstance(k, str) and is_secret_key(k) else _walk(v, leaf)
+            )
             for k, v in value.items()
         }
     if _is_container(value):
