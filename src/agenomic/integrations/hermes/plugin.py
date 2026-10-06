@@ -179,6 +179,8 @@ class _Provisional:
     # by an invocation that then required approval follows that approval, so the retry
     # resumed under it (and no other identical invocation) reuses it.
     slot: tuple[str, str, str, str] = ("", "", "", "")
+    # The tool call it was reserved for: a retry under the same id takes it back first.
+    tool_call_id: str = ""
 
 
 @dataclass
@@ -413,7 +415,9 @@ class HermesAdapter:
         # until the action itself is allowed; a retry after an approval (of that approval)
         # or a transport error reuses them.
         # One invocation at a time claims an entry (see ``_Provisional``).
-        self._provisional_delegations: dict[tuple[str, str, str, str], _Provisional] = {}
+        # Every reservation waiting in a slot, oldest first: identical invocations that
+        # failed (transport error) each keep their own until a retry takes it.
+        self._provisional_delegations: dict[tuple[str, str, str, str], list[_Provisional]] = {}
         # Keyed by (session, tool, tool_call_id): providers reuse call ids across sessions,
         # and an authorization must never serve another session's or tool's call.
         self._auth: OrderedDict[tuple[str, str, str], _Authorization] = OrderedDict()
@@ -675,9 +679,10 @@ class HermesAdapter:
         return state if state in _BLOCKING_STATUS else "active"
 
     def _gates_registered(self) -> bool:
-        # Either gate can ask the gateway and refuse; without both the guard must keep
-        # blocking, because no callback would consult Agenomic before a tool runs.
-        return bool(self._contracts["pre_tool_call"] or self._contracts["tool_execution"])
+        # Both gates are needed: in each Hermes ordering one of them runs after the
+        # other mutators and is the only place an argument change after authorization is
+        # detected. With either missing, the guard keeps blocking every tool.
+        return bool(self._contracts["pre_tool_call"] and self._contracts["tool_execution"])
 
     def _write_status(self) -> None:
         if not self._gates_registered():
@@ -1636,8 +1641,14 @@ class HermesAdapter:
         own, so two concurrent identical invocations never share one reservation.
         """
         with self._lock:
-            entry = self._provisional_delegations.get(slot)
-            if entry is not None and entry.claimed_by in (None, claim):
+            waiting = [
+                e
+                for e in self._provisional_delegations.get(slot, ())
+                if e.claimed_by in (None, claim)
+            ]
+            if waiting:
+                # The one reserved for this tool call, else the oldest one waiting.
+                entry = next((e for e in waiting if e.tool_call_id == tool_call_id), waiting[0])
                 entry.claimed_by = claim
                 return None, entry
         denied, reservation = self._reserve_delegation(sid, args, tool_call_id)
@@ -1657,11 +1668,25 @@ class HermesAdapter:
             return denied, None
         if reservation is None:
             return None, None
-        provisional = _Provisional(reservation, claimed_by=claim, slot=slot)
+        provisional = _Provisional(
+            reservation, claimed_by=claim, slot=slot, tool_call_id=tool_call_id
+        )
         with self._lock:
-            # Published only when free: a retry of this action then finds and reuses it.
-            self._provisional_delegations.setdefault(slot, provisional)
+            # Published claimed: a retry of this action finds it once it is released.
+            self._provisional_delegations.setdefault(slot, []).append(provisional)
         return None, provisional
+
+    def _unlist_delegation(self, provisional: _Provisional) -> None:
+        """Remove ``provisional`` from its slot (the lock is held)."""
+        entries = self._provisional_delegations.get(provisional.slot)
+        if entries is None:
+            return
+        for i, entry in enumerate(entries):
+            if entry is provisional:
+                del entries[i]
+                break
+        if not entries:
+            del self._provisional_delegations[provisional.slot]
 
     def _rebind_delegation(self, provisional: Optional[_Provisional], approval_id: str) -> None:
         """The action of this reservation now waits for ``approval_id``: the reservation
@@ -1671,12 +1696,13 @@ class HermesAdapter:
         sid, tool, local_hash, _ = provisional.slot
         target = (sid, tool, local_hash, approval_id)
         with self._lock:
-            if self._provisional_delegations.get(provisional.slot) is provisional:
-                del self._provisional_delegations[provisional.slot]
+            self._unlist_delegation(provisional)
             provisional.slot = target
-            if self._provisional_delegations.setdefault(target, provisional) is not provisional:
+            if self._provisional_delegations.get(target):
                 # That approval already has its reservation: this one is forgotten.
                 provisional.settled = True
+                return
+            self._provisional_delegations[target] = [provisional]
 
     def _release_delegation(self, provisional: Optional[_Provisional]) -> None:
         """This invocation stops deciding: an unsettled reservation waits for a retry."""
@@ -1685,14 +1711,9 @@ class HermesAdapter:
         with self._lock:
             if provisional.settled:
                 return
-            key = provisional.slot
-            current = self._provisional_delegations.get(key)
-            if current is None:
-                self._provisional_delegations[key] = provisional
-            elif current is not provisional:
-                # Another invocation's reservation already waits for this action.
-                provisional.settled = True
-                return
+            entries = self._provisional_delegations.setdefault(provisional.slot, [])
+            if not any(e is provisional for e in entries):
+                entries.append(provisional)
             provisional.claimed_by = None
 
     def _settle_delegation(
@@ -1705,8 +1726,7 @@ class HermesAdapter:
         with self._lock:
             provisional.settled = True
             key = provisional.slot
-            if self._provisional_delegations.get(key) is provisional:
-                del self._provisional_delegations[key]
+            self._unlist_delegation(provisional)
             if commit:
                 self._delegations.setdefault(key[0], deque()).append(provisional.reservation)
                 return provisional.reservation
@@ -1744,10 +1764,13 @@ class HermesAdapter:
         are both forgotten."""
         self._drop_pending(key, pending)
         with self._lock:
-            provisional = self._provisional_delegations.get((*key, pending.approval_id))
-            if provisional is None or provisional.claimed_by is not None:
-                return
-        self._settle_delegation(provisional, commit=False)
+            waiting = [
+                e
+                for e in self._provisional_delegations.get((*key, pending.approval_id), ())
+                if e.claimed_by is None
+            ]
+        for provisional in waiting:
+            self._settle_delegation(provisional, commit=False)
 
     def _unclaim(self, pending: _Pending, claim: str) -> None:
         with self._lock:

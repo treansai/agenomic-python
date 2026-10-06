@@ -424,7 +424,10 @@ status file the plugin keeps fresh, `$HERMES_HOME/agenomic/status.json`
 (`loaded`, `instance_status`, `effective_state`, `updated_at`). It blocks when
 the file is missing, unreadable, older than `AGENOMIC_HERMES_GUARD_MAX_AGE_S`
 (default 120 s), dated in the future, not `loaded`, or says `paused`,
-`quarantined` or `revoked`. When Hermes unloads the plugin (or the process
+`quarantined` or `revoked`. The plugin writes `loaded: true` only when both
+gates, the `pre_tool_call` hook and the `tool_execution` middleware, are
+registered: with one missing, an argument change after authorization could go
+undetected in one of the two Hermes call orders, so the guard keeps blocking. When Hermes unloads the plugin (or the process
 exits) the plugin writes `loaded: false`, so the guard blocks at once instead
 of when the file goes stale; it then drains the exporter, closes its HTTP
 client and removes its `atexit` hook, so reloads do not accumulate adapters or

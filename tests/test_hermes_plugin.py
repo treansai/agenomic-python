@@ -1075,6 +1075,37 @@ def test_guard_keeps_blocking_when_no_gate_registers(server: FakeAgenomic, tmp_p
     assert status["loaded"] is False
 
 
+@pytest.mark.parametrize("missing", ["pre_tool_call", "tool_execution"])
+def test_guard_keeps_blocking_when_one_gate_is_missing(
+    server: FakeAgenomic, tmp_path: Path, missing: str
+) -> None:
+    class _OneGateCtx(FakeCtx):
+        def register_hook(self, name: str, cb: Any) -> None:
+            if name == missing:
+                raise RuntimeError("no gate")
+            super().register_hook(name, cb)
+
+        def register_middleware(self, kind: str, cb: Any) -> None:
+            if kind == missing:
+                raise RuntimeError("no middleware")
+            super().register_middleware(kind, cb)
+
+    config = AdapterConfig.model_validate({"endpoint": server.url})
+    ctx = _OneGateCtx()
+    adapter = HermesAdapter(
+        config,
+        SecretStr("agmhr_t"),
+        ctx=ctx,
+        hermes_home=tmp_path / "h",
+        start_threads=False,
+        identity=dict(PINNED),
+    )
+    adapter.install(ctx)
+    assert not adapter._contracts[missing]
+    status = json.loads(adapter.status_file.read_text())
+    assert status["loaded"] is False, f"without {missing} the guard stays closed"
+
+
 def test_delegation_reservation_is_queued_only_after_the_action_is_allowed(
     server: FakeAgenomic, tmp_path: Path
 ) -> None:
@@ -1713,7 +1744,8 @@ def test_concurrent_approvals_each_keep_their_delegation_reservation(
     assert [r[0] for r in queued] == ["del-d_a"], "the reservation made under a2 follows a2"
     (slot,) = adapter._provisional_delegations
     assert slot[3] == server.pending_by_call["d_b"]
-    assert adapter._provisional_delegations[slot].reservation[0] == "del-d_b"
+    (waiting,) = adapter._provisional_delegations[slot]
+    assert waiting.reservation[0] == "del-d_b"
 
 
 def _observe_decisions(server: FakeAgenomic) -> list[dict[str, Any]]:
@@ -1968,3 +2000,37 @@ def test_each_child_takes_the_reservation_of_the_invocation_that_built_it(
     assert admitted["c_a"] == "del-d_a"
     assert admitted["c_b"] == "del-d_b"
     assert not adapter._delegations.get("p"), "both reservations are used up"
+
+
+def test_failed_identical_delegations_each_keep_their_reservation(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    args = {"tasks": [{"goal": "x"}]}
+
+    def reserve(sid: str, body: Any) -> Any:
+        return {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
+
+    monkeypatch.setattr(adapter.client, "reserve_delegation", reserve)
+    original = adapter.client.authorize
+
+    def unreachable_then_interleave(sid: str, body: Any) -> Any:
+        # d2 reserves while d1 is still deciding; both authorizations then fail.
+        if body["tool_call_id"] == "d1":
+            runner.direct("delegate_task", args, sid="p", tcid="d2")
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(adapter.client, "authorize", unreachable_then_interleave)
+    runner.direct("delegate_task", args, sid="p", tcid="d1")
+    assert runner.executions == 0
+    (waiting,) = adapter._provisional_delegations.values()
+    assert [p.reservation[0] for p in waiting] == ["del-d1", "del-d2"], "neither is dropped"
+    monkeypatch.setattr(adapter.client, "authorize", original)
+    # A retry under d2 takes back d2's reservation; another retry takes the oldest one.
+    runner.direct("delegate_task", args, sid="p", tcid="d2")
+    runner.direct("delegate_task", args, sid="p", tcid="d3")
+    assert runner.executions == 2
+    assert [r[0] for r in adapter._delegations["p"]] == ["del-d2", "del-d1"]
+    assert not adapter._provisional_delegations
