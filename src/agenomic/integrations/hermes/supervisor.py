@@ -1153,6 +1153,9 @@ class Supervisor:
         self._ticks = 0
         self._launch_failed = False
         self.gave_up = False
+        # The leader exited and what remains of its process group is not stopped yet: no
+        # replacement starts (and no restart decision is made) until the group is empty.
+        self._group_pending = False
 
     # -- child process -----------------------------------------------
     def start_child(self) -> bool:
@@ -1166,6 +1169,10 @@ class Supervisor:
             -15
         """
         if self.refuse_restart or not self.settings.argv:
+            return False
+        leader_gone = self.proc is None or self.proc.poll() is not None
+        if self._pgid is not None and leader_gone and not self._release_group():
+            # The previous group still runs: a replacement would leave it unsupervised.
             return False
         self.state = "starting"
         kwargs: dict[str, Any] = {"env": self.child_env, "start_new_session": True}
@@ -1214,8 +1221,32 @@ class Supervisor:
             self.state = "exited"
             self.exit_code = code
             logger.warning("Hermes exited with code %d", code)
-            if code != 0 and not self._stopping.is_set():
-                self._restart_or_give_up(f"exit code {code}")
+            self._group_pending = True
+        if not self._group_pending:
+            return
+        # Descendants outliving the leader are stopped before anything else: a replacement
+        # would overwrite the recorded group and leave them unsupervised.
+        if not self._release_group():
+            return
+        self._group_pending = False
+        self.state = "exited"
+        if code != 0 and not self._stopping.is_set():
+            self._restart_or_give_up(f"exit code {code}")
+
+    def _release_group(self) -> bool:
+        """Stop what remains of the recorded process group once its leader is reaped.
+
+        True when the group is empty (it is then forgotten: its id may be reused);
+        otherwise the state is ``stop_failed`` and the group stays recorded.
+        """
+        if self._pgid is None:
+            return True
+        if not _stop_group(self._pgid, time.monotonic() + self.settings.grace_s):
+            logger.error("Hermes process group %d did not stop", self._pgid)
+            self.state = "stop_failed"
+            return False
+        self._pgid = None
+        return True
 
     def _restart_or_give_up(self, why: str) -> None:
         if not self.settings.restart or self.refuse_restart:
@@ -1244,6 +1275,7 @@ class Supervisor:
             (-15, 'stopped')
         """
         proc = self.proc
+        self._group_pending = False
         if proc is None:
             self.state = "stopped"
             return self.exit_code
@@ -1256,10 +1288,12 @@ class Supervisor:
                 self._signal(proc, _KILL_SIGNAL)
                 proc.wait()
         self.exit_code = proc.returncode
-        if self._pgid is not None and not _stop_group(self._pgid, deadline):
-            logger.error("Hermes process group %d did not stop", self._pgid)
-            self.state = "stop_failed"
-            return self.exit_code
+        if self._pgid is not None:
+            if not _stop_group(self._pgid, deadline):
+                logger.error("Hermes process group %d did not stop", self._pgid)
+                self.state = "stop_failed"
+                return self.exit_code
+            self._pgid = None
         self.state = "stopped"
         return self.exit_code
 
@@ -1480,7 +1514,11 @@ class Supervisor:
         try:
             while not self._stopping.is_set():
                 self.tick()
-                if not self.settings.restart and self.state in ("exited", "stopped"):
+                if not self.settings.restart and (
+                    self.state in ("exited", "stopped") or self._group_pending
+                ):
+                    # Without restarts a group that did not stop is retried once more on
+                    # the way out and the supervisor exits 1 if it still survives.
                     break
                 if self.gave_up:
                     break

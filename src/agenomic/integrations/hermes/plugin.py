@@ -117,6 +117,11 @@ NO_AUTH_MESSAGE = "Agenomic: no valid authorization for this action"
 NOT_CANONICAL_REASON = "arguments_not_canonical"
 #: Reason recorded when a tool call is blocked because a cancel of its session or subagent is pending.
 CANCEL_PENDING_REASON = "cancel_pending"
+#: Reason codes of the local checks enforce applies after the gateway allowed; outside
+#: enforce they are recorded as counterfactuals.
+PROTECTED_PATH_REASON = "protected_path"
+HERMES_INCOMPATIBLE_REASON = "hermes_incompatible"
+FOREIGN_MUTATORS_REASON = "foreign_mutators_unconfirmed"
 
 
 @dataclass
@@ -408,6 +413,8 @@ class HermesAdapter:
         # second gate of the same call does not record it again.
         # Which gate ("pre" or "execution") recorded a call's non-canonical arguments.
         self._not_canonical: OrderedDict[tuple[str, str, str], str] = OrderedDict()
+        # Which gate recorded a call's local checks in observe (same pattern).
+        self._observed_local: OrderedDict[tuple[str, str, str], str] = OrderedDict()
         self._report_retries: deque[_ReportRetry] = deque(maxlen=1000)
         self._commands_seen: set[str] = set()
         # Acknowledgements that failed in transport; retried on every tick until accepted.
@@ -1835,6 +1842,11 @@ class HermesAdapter:
         unconfirmed = self._confirm_foreign_mutators(sid, tool, tool_call_id, local_hash, mode)
         if unconfirmed is not None:
             return _Verdict(block=unconfirmed)
+        # The hello may have changed the effective state: observe never asks the gateway,
+        # and the snapshot taken before it must not decide what happens next.
+        mode = self.local_mode()
+        if mode == "observe":
+            return _Verdict()
         key = (sid, tool, local_hash)
         claim = tool_call_id or f"hermes-{uuid.uuid4().hex}"
         with self._lock:
@@ -2051,10 +2063,7 @@ class HermesAdapter:
         last confirmed them; a block message (enforce) when that hello is not delivered."""
         if self.foreign_mutators() == self._foreign or self._hello():
             return None
-        reason = (
-            f"Agenomic: Hermes callbacks that can change the arguments of {tool} changed and "
-            "the gateway has not confirmed them; the action was not executed."
-        )
+        reason = self._mutators_message(tool)
         self._emit_decision(
             sid,
             tool,
@@ -2066,20 +2075,97 @@ class HermesAdapter:
         )
         return None if mode in ("observe", "shadow") else reason
 
-    def _local_checks(self, tool: str, args: Mapping[str, Any]) -> Optional[str]:
-        """Defence in depth applied in enforce after the gateway allowed."""
+    @staticmethod
+    def _mutators_message(tool: str) -> str:
+        return (
+            f"Agenomic: Hermes callbacks that can change the arguments of {tool} changed and "
+            "the gateway has not confirmed them; the action was not executed."
+        )
+
+    def _local_finding(self, tool: str, args: Mapping[str, Any]) -> Optional[tuple[str, str]]:
+        """The message and reason code of the first local check the call fails."""
         if not self.hermes_compatible:
             return (
                 f"Agenomic: Hermes {self._identity.get('version')} is not in the adapter "
-                "compatibility table; protected actions are blocked in enforce"
+                "compatibility table; protected actions are blocked in enforce",
+                HERMES_INCOMPATIBLE_REASON,
             )
         hits = self.protected_targets(tool, args)
         if hits:
             return (
                 f"Agenomic denied {tool}: writes to protected Hermes paths need a reviewed "
-                "proposal (local check)"
+                "proposal (local check)",
+                PROTECTED_PATH_REASON,
             )
         return None
+
+    def _local_checks(self, tool: str, args: Mapping[str, Any]) -> Optional[str]:
+        """Defence in depth applied in enforce after the gateway allowed."""
+        finding = self._local_finding(tool, args)
+        return finding[0] if finding is not None else None
+
+    def _first_gate(
+        self,
+        store: OrderedDict[tuple[str, str, str], str],
+        key: tuple[str, str, str],
+        gate: Literal["pre", "execution"],
+    ) -> bool:
+        """Whether ``gate`` records this invocation: the other gate of the same invocation
+        consumes the entry the first one left; the same gate seeing the call id again is a
+        later invocation reusing it, which records on its own."""
+        if not key[2]:
+            return True
+        with self._lock:
+            first = store.get(key)
+            if first is not None and first != gate:
+                del store[key]
+                return False
+            store[key] = gate
+            store.move_to_end(key)
+            while len(store) > _MAX_AUTH:
+                store.popitem(last=False)
+        return True
+
+    def _observe_local_checks(
+        self,
+        sid: str,
+        tool: str,
+        tool_call_id: str,
+        args: Mapping[str, object],
+        gate: Literal["pre", "execution"],
+    ) -> None:
+        """Observe never blocks and never asks the gateway, but the local checks enforce
+        would apply (Hermes compatibility, protected paths, argument mutators the gateway
+        has not confirmed) are recorded as local ``tool.call.decision`` events with the
+        counterfactual deny, once per invocation. Delegations and pending approvals are
+        gateway state and are not touched."""
+        try:
+            findings: list[tuple[str, str]] = []
+            if self.foreign_mutators() != self._foreign:
+                findings.append((self._mutators_message(tool), FOREIGN_MUTATORS_REASON))
+            local = self._local_finding(tool, args)
+            if local is not None:
+                findings.append(local)
+            if not findings or not self._first_gate(
+                self._observed_local, (sid, tool, tool_call_id), gate
+            ):
+                return
+            input_hash = content_hash(args)
+            for message, code in findings:
+                extra: dict[str, object] = {
+                    "local": True,
+                    "local_mode": "observe",
+                    "reason_codes": [code],
+                    "counterfactual": {"outcome": "deny", "reason_codes": [code]},
+                }
+                if code == FOREIGN_MUTATORS_REASON:
+                    extra["foreign_mutators_unconfirmed"] = True
+                self._emit_decision(
+                    sid, tool, tool_call_id, "deny", message, input_hash, extra=extra
+                )
+        except Exception as exc:
+            # Recording only: observe never changes execution.
+            logger.warning("observe local checks failed: %s", type(exc).__name__)
 
     def _emit_decision(
         self,
@@ -2120,7 +2206,9 @@ class HermesAdapter:
             reason=str(code)[:100],
             extra={"local_mode": mode},
         )
-        if mode == "shadow":
+        if mode in ("shadow", "observe"):
+            # Shadow and observe never change execution (observe can be reached after the
+            # authorization started, e.g. through the hello confirming argument mutators).
             return None
         return f"Agenomic authorization unavailable ({code}); the action was not executed."
 
@@ -2140,20 +2228,7 @@ class HermesAdapter:
         same invocation consumes the entry; the same gate seeing the call id again is a
         later invocation reusing it, which is recorded on its own."""
         mode = self.local_mode()
-        key = (sid, tool, tool_call_id)
-        recorded = False
-        with self._lock:
-            if tool_call_id:
-                first = self._not_canonical.get(key)
-                if first is not None and first != gate:
-                    del self._not_canonical[key]
-                    recorded = True
-                else:
-                    self._not_canonical[key] = gate
-                    self._not_canonical.move_to_end(key)
-                    while len(self._not_canonical) > _MAX_AUTH:
-                        self._not_canonical.popitem(last=False)
-        if not recorded:
+        if self._first_gate(self._not_canonical, (sid, tool, tool_call_id), gate):
             extra: dict[str, object] = {
                 "local": True,
                 "local_mode": mode,
@@ -2220,6 +2295,8 @@ class HermesAdapter:
             cancelled = self._blocked_session(sid, tool, tool_call_id, args)
             if cancelled:
                 return _block(cancelled)
+            if self.local_mode() == "observe":
+                self._observe_local_checks(sid, tool, tool_call_id, args, "pre")
             try:
                 local_hash = arguments_hash(args)
             except CanonicalError:
@@ -2297,6 +2374,7 @@ class HermesAdapter:
         if cancelled:
             return _ExecutionPlan(False, error=cancelled, meta=meta)
         if self.local_mode() == "observe":
+            self._observe_local_checks(sid, tool, tool_call_id, args, "execution")
             return _ExecutionPlan(True, observe=True, meta=meta)
         try:
             local_hash = arguments_hash(args)

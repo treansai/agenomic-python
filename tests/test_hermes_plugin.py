@@ -1710,3 +1710,116 @@ def test_concurrent_approvals_each_keep_their_delegation_reservation(
     (slot,) = adapter._provisional_delegations
     assert slot[3] == server.pending_by_call["d_b"]
     assert adapter._provisional_delegations[slot].reservation[0] == "del-d_b"
+
+
+def _observe_decisions(server: FakeAgenomic) -> list[dict[str, Any]]:
+    return [
+        e
+        for e in server.events
+        if e.get("type") == "tool.call.decision" and e["extra"].get("local_mode") == "observe"
+    ]
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+@pytest.mark.parametrize("check", ["protected_path", "hermes_incompatible", "mutator"])
+def test_observe_records_local_checks_as_counterfactuals(
+    server: FakeAgenomic, tmp_path: Path, order: str, check: str
+) -> None:
+    server.effective_state = "observe"
+    identity = (
+        {"version": "0.22.0", "release_date": None, "commit": None}
+        if check == "hermes_incompatible"
+        else None
+    )
+    adapter = make_adapter(server.url, tmp_path, identity=identity)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "observe"
+    hellos = len(server.calls("/hello"))
+    target = tmp_path / "out.txt"
+    if check == "protected_path":
+        target = tmp_path / "home" / "skills" / "evil" / "SKILL.md"
+        target.parent.mkdir(parents=True)
+    if check == "mutator":
+
+        def other_plugin(**kwargs: Any) -> dict[str, Any]:
+            return {"action": "modify", "args": {}}
+
+        adapter.ctx._manager._hooks["pre_tool_call"].append(other_plugin)
+    runner = Runner(adapter)
+    getattr(runner, order)(
+        "write_file", {"path": str(target), "content": "x"}, effect=write_effect(target)
+    )
+    assert runner.executions == 1, "observe never changes execution"
+    assert target.read_text() == "x"
+    adapter.exporter.flush(3.0)
+    assert server.authorize_calls() == []
+    assert server.calls("/delegations") == []
+    assert len(server.calls("/hello")) == hellos, "observe asks the gateway nothing"
+    code = "foreign_mutators_unconfirmed" if check == "mutator" else check
+    recorded = _observe_decisions(server)
+    assert len(recorded) == 1, "recorded once, whichever gate sees the call first"
+    event = recorded[0]
+    assert event["decision"] == "deny"
+    assert event["extra"]["local"] is True
+    assert event["extra"]["reason_codes"] == [code]
+    assert event["extra"]["counterfactual"] == {"outcome": "deny", "reason_codes": [code]}
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_observe_without_a_local_finding_records_no_decision(
+    server: FakeAgenomic, tmp_path: Path, order: str
+) -> None:
+    server.effective_state = "observe"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    getattr(runner, order)("read_file", {"path": "/tmp/x"})
+    assert runner.executions == 1
+    adapter.exporter.flush(3.0)
+    assert _observe_decisions(server) == []
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_hello_switching_to_observe_fails_open_on_authorization_errors(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, order: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+
+    def other_plugin(**kwargs: Any) -> dict[str, Any]:
+        return {"action": "modify", "args": {}}
+
+    adapter.ctx._manager._hooks["pre_tool_call"].append(other_plugin)
+    # The hello confirming the new mutator answers observe; authorize is unreachable.
+    server.effective_state = "observe"
+    authorize_attempts: list[str] = []
+
+    def down(sid: str, body: Any) -> Any:
+        authorize_attempts.append(sid)
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(adapter.client, "authorize", down)
+    runner = Runner(adapter)
+    result = getattr(runner, order)("read_file", {"path": "/tmp/x"})
+    assert json.loads(result) == {"success": True}
+    assert runner.executions == 1, "observe never changes execution"
+    assert adapter.local_mode() == "observe"
+    assert len(server.calls("/hello")[-1].body["foreign_mutators"]) == 1
+    assert authorize_attempts == [], "observe never asks for an authorization"
+    adapter.exporter.flush(3.0)
+    assert "tool.call.requested" in server.event_types()
+
+
+@pytest.mark.parametrize("state", ["observe", "shadow"])
+def test_authorization_outage_fails_open_outside_enforce(
+    server: FakeAgenomic, tmp_path: Path, state: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._effective_state = state
+    exc = HermesApiError("unreachable", "connection refused", 0)
+    assert adapter._unavailable("s1", "read_file", "call_1", exc) is None
+    adapter._effective_state = "enforce"
+    assert adapter._unavailable("s1", "read_file", "call_1", exc)
+    adapter.exporter.flush(3.0)
+    assert "authorization.unavailable" in server.event_types()

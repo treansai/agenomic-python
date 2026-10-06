@@ -406,6 +406,122 @@ def test_run_fails_when_the_group_cannot_be_stopped(
     assert s.state == "stop_failed"
 
 
+# The leader starts a grandchild in its process group that ignores SIGTERM, waits until it
+# runs, then exits 1 and leaves it behind.
+EXITING_LEADER = (
+    "import os, subprocess, sys, time\n"
+    "subprocess.Popen([sys.executable, '-c', "
+    "'import os, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    'open(sys.argv[1] + ".tmp", "w").write(str(os.getpid())); '
+    'os.replace(sys.argv[1] + ".tmp", sys.argv[1]); time.sleep(120)\', sys.argv[1]])\n'
+    "deadline = time.monotonic() + 30\n"
+    "while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:\n"
+    "    time.sleep(0.02)\n"
+    "raise SystemExit(1)\n"
+)
+
+
+def _no_restart_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_sleep = time.sleep
+    # The restart backoff waits whole seconds; short polling waits keep their length.
+    monkeypatch.setattr(sup.time, "sleep", lambda s: None if s >= 1 else real_sleep(s))
+
+
+@posix_only
+def test_leader_exit_stops_its_group_before_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_restart_backoff(monkeypatch)
+    api = FakeApi()
+    pid_file = tmp_path / "grandchild.pid"
+    s = make_supervisor(tmp_path, api, [sys.executable, "-c", EXITING_LEADER, str(pid_file)])
+    s.settings.restart = True
+    s.settings.grace_s = 0.5
+    grandchild: int | None = None
+    survivors_at_restart: list[bool] = []
+    real_start = s.start_child
+
+    def start() -> bool:
+        assert grandchild is not None
+        survivors_at_restart.append(not _pid_gone(grandchild))
+        s.settings.argv = SLEEPER  # the replacement leaves nothing behind
+        return real_start()
+
+    try:
+        assert s.start_child()
+        first_pgid = s._pgid
+        assert _wait_for(pid_file.exists)
+        grandchild = int(pid_file.read_text())
+        monkeypatch.setattr(s, "start_child", start)
+
+        def restarted() -> bool:
+            s.poll()
+            return s.restarts == 1
+
+        assert _wait_for(restarted, timeout=20.0)
+        assert survivors_at_restart == [False], "the old group is empty before the replacement"
+        assert s.state == "running"
+        assert s._pgid is not None
+        assert s._pgid != first_pgid
+    finally:
+        if grandchild is None and pid_file.exists():
+            grandchild = int(pid_file.read_text())
+        if grandchild is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(grandchild, signal.SIGKILL)
+        if s.proc is not None and s.proc.poll() is None:
+            s.proc.kill()
+            s.proc.wait()
+
+
+@posix_only
+def test_no_replacement_while_the_old_group_cannot_be_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_restart_backoff(monkeypatch)
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, [sys.executable, "-c", "raise SystemExit(1)"])
+    s.settings.restart = True
+    stoppable = False
+    attempts: list[int] = []
+    real = sup._stop_group
+
+    def stop_group(pgid: int, deadline: float) -> bool:
+        attempts.append(pgid)
+        return stoppable and real(pgid, deadline)
+
+    monkeypatch.setattr(sup, "_stop_group", stop_group)
+    try:
+        assert s.start_child()
+        assert s.proc is not None
+        first = s.proc
+        first_pgid = s._pgid
+        first.wait()
+        s.tick()
+        assert s.state == "stop_failed"
+        assert s.proc is first, "no replacement started"
+        assert s.restarts == 0
+        assert api.heartbeats[-1]["process"]["state"] == "stop_failed"
+        s.tick()  # retried on every tick, still before any restart
+        assert attempts == [first_pgid, first_pgid]
+        assert s.proc is first
+        assert s.restarts == 0
+        # A resume does not start a replacement either while the old group survives.
+        api.commands = [{"id": "r1", "kind": "resume", "status": "requested"}]
+        s.heartbeat()
+        assert api.acks[-1][2]["restarted"] is False
+        assert s.proc is first
+        assert s.state == "stop_failed"
+        stoppable = True
+        s.poll()
+        assert s.restarts == 1
+        assert s.proc is not first
+    finally:
+        if s.proc is not None and s.proc.poll() is None:
+            s.proc.kill()
+            s.proc.wait()
+
+
 def test_tick_poll_and_skill_sync(tmp_path: Path) -> None:
     api = FakeApi()
     body = "# s"

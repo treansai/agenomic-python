@@ -133,7 +133,7 @@ The server computes the effective state on every admission and returns it in
 
 | Effective state | Adapter behaviour |
 | --- | --- |
-| `observe` | events only, `authorize` is never called |
+| `observe` | events only, `authorize` is never called (also when a `/hello` sent during an authorization switches to observe: the call proceeds without asking, and an authorization outage never blocks); local checks (protected paths, incompatible Hermes, argument mutators the gateway has not confirmed) emit one local `tool.call.decision` per call (`deny`, `local_mode: observe`, with a counterfactual) and the call proceeds; delegations are not reserved and pending approvals are not consulted |
 | `shadow` | `authorize` is called and recorded as counterfactual, nothing is blocked; an authorization outage emits `authorization.unavailable` and the call proceeds; local checks (protected paths, incompatible Hermes, unconfirmed mutators, refused delegation, arguments without a canonical form) emit a local `tool.call.decision` and the call proceeds; an approval still pending from an earlier enforce is not consulted (the call is asked afresh) |
 | `enforce` | `allow` executes; `deny` and `require_approval` block; any error, timeout or invalid answer blocks |
 | `enforce_blocked`, `paused`, `quarantined`, `revoked` | treated as enforce; the server denies |
@@ -354,6 +354,13 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   acknowledged as applied and is executed again when the gateway delivers it
   again; a supervisor leaving with such a group exits 1. `resume`
   allows restarts again and starts the child.
+- When the Hermes process exits on its own, what remains of its process group
+  is stopped the same way (SIGTERM, SIGKILL after `--grace-s`) before
+  anything else: before a restart, before giving up, and also after a clean
+  exit. While that group cannot be emptied the process state is `stop_failed`
+  (reported in every heartbeat), no replacement is started (neither a restart
+  nor `resume`) and the group stop is retried on every tick; without restarts
+  the supervisor retries once more on the way out and exits 1.
 - Approved skills (`GET /skills/approved`) are written into `--skills-dir`
   after their digest (`sha256:` or `blake3:`) is checked; targets escaping the
   directory are rejected; files a previous sync wrote and that are no longer
