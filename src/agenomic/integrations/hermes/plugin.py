@@ -2664,7 +2664,8 @@ class HermesAdapter:
             # atomically with the mode this gate then decides under.
             with self._lock, self._state_lock:
                 local_block = self._local_blocker(sid)
-                observe_now = self.local_mode() == "observe"
+                mode_now = self.local_mode()
+                observe_now = mode_now == "observe"
                 # local_mode() folds enforce_blocked into enforce: the raw state is read too,
                 # so a permit cached before a blocking heartbeat is never reused.
                 raw_state = self._effective_state
@@ -2675,6 +2676,18 @@ class HermesAdapter:
                 return _block(
                     f"Agenomic: the instance is {raw_state}; the action was not executed."
                 )
+            admitted = getattr(self._invocation, "admitted", None)
+            if admitted is not None and admitted[0] == (sid, tool, tool_call_id):
+                # The middleware already admitted this very call (agent loop order). An
+                # authorization made here would belong to no execution plan: never
+                # reported, left reusable. A stricter mode since then blocks instead.
+                if admitted[1] in ("observe", "shadow") and mode_now == "enforce":
+                    return _block(
+                        f"Agenomic: enforce became active after {tool} was decided in "
+                        f"{admitted[1]}; the action was not executed."
+                    )
+                if admitted[1] == "observe" and mode_now == "shadow":
+                    return None  # shadow never changes execution
             if observe_now:
                 return None
             with self._lock:
@@ -2966,14 +2979,28 @@ class HermesAdapter:
                 )
         started = time.monotonic()
         outer = getattr(self._invocation, "delegation", None)
+        outer_admitted = getattr(self._invocation, "admitted", None)
         self._invocation.delegation = plan.auth.delegation if plan.auth is not None else None
+        # The mode this call was admitted under, for the inner pre_tool_call (agent loop
+        # order): a stricter mode applied since blocks there instead of authorizing anew.
+        admitted_mode = (
+            "observe"
+            if plan.observe
+            else (plan.auth.effective_mode if plan.auth is not None else None)
+        )
+        self._invocation.admitted = (
+            (_str(plan.meta.get("sid")), _str(plan.meta.get("tool")), meta_call),
+            admitted_mode,
+        )
         try:
             result = next_call()
         except BaseException:
             self._invocation.delegation = outer
+            self._invocation.admitted = outer_admitted
             self._after_execution(plan, None, started, raised=True)
             raise
         self._invocation.delegation = outer
+        self._invocation.admitted = outer_admitted
         self._after_execution(plan, result, started, raised=False)
         return result
 

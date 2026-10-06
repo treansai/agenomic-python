@@ -155,7 +155,9 @@ state) has been applied, even when that answer lands after the gate's stale
 check; the call is blocked and is decided again on retry. The observe path at
 the execution gate, and `pre_tool_call` in every mode, make the same recheck
 (local commands and the raw state, `enforce_blocked` included) before they let
-a call through. A local `pause`,
+a call through. In the agent loop order, a call the middleware admitted in
+observe or shadow is blocked by the inner `pre_tool_call` if enforce applies
+in between: an authorization made there would belong to no execution. A local `pause`,
 `quarantine`, `revoke` or `cancel` is written under the same lock and checked
 again at admission, so one applied while the authorization was in flight
 still stops the call.
