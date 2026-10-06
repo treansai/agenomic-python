@@ -33,6 +33,7 @@ import atexit
 import contextlib
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -785,8 +786,20 @@ class HermesAdapter:
             if exc.status == 0 or exc.status >= 500:
                 self._ack_retries.append((command_id, status, detail))
             return False
+        self._drop_superseded_acks(command_id, status)
         self._emit("command." + status, None, extra={"command_id": command_id, "detail": detail})
         return True
+
+    def _drop_superseded_acks(self, command_id: str, status: str) -> None:
+        rank = _ACK_RANK.get(status, 0)
+        kept = [
+            item
+            for item in self._ack_retries
+            if item[0] != command_id or _ACK_RANK.get(item[1], 0) > rank
+        ]
+        if len(kept) != len(self._ack_retries):
+            self._ack_retries.clear()
+            self._ack_retries.extend(kept)
 
     def _retry_acks(self) -> None:
         for _ in range(len(self._ack_retries)):
@@ -1889,6 +1902,14 @@ class HermesAdapter:
             return _error_result(plan.error or NO_AUTH_MESSAGE)
         if next_call is None:
             return _error_result(NO_AUTH_MESSAGE)
+        # A status left by an earlier invocation with the same identity must not describe
+        # this one: only the post_tool_call of this execution may mark it blocked.
+        meta_call = _str(plan.meta.get("tool_call_id"))
+        if meta_call:
+            with self._lock:
+                self._post_status.pop(
+                    (_str(plan.meta.get("sid")), _str(plan.meta.get("tool")), meta_call), None
+                )
         started = time.monotonic()
         try:
             result = next_call()
@@ -2133,10 +2154,16 @@ def _demo_adapter(answer: Optional[Mapping[str, JsonValue]] = None) -> HermesAda
     )
 
 
+#: Acknowledgement order: a later state supersedes a queued earlier one.
+_ACK_RANK = {"received": 1, "applied": 2, "refused": 2}
+
+
 def _guard_max_age_s() -> float:
     try:
         value = float(os.environ.get("AGENOMIC_HERMES_GUARD_MAX_AGE_S") or DEFAULT_MAX_AGE_S)
     except ValueError:
+        value = DEFAULT_MAX_AGE_S
+    if not math.isfinite(value) or value <= 0:
         value = DEFAULT_MAX_AGE_S
     return max(value, 3.0)
 

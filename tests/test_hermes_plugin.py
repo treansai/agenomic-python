@@ -965,16 +965,16 @@ def test_failed_command_ack_is_retried(
     failures = {"left": 1}
 
     def flaky(command_id: str, status: str, detail: Any) -> Any:
-        if failures["left"]:
+        if status == "applied" and failures["left"]:
             failures["left"] -= 1
             raise HermesApiError("unreachable", "connection refused", 0)
         return real(command_id, status, detail)
 
     monkeypatch.setattr(adapter.client, "ack_command", flaky)
     adapter.handle_command({"id": "c9", "kind": "pause", "target_kind": "instance"})
-    assert [(c, b.get("status")) for c, b in server.acks] == [("c9", "applied")]
+    assert [(c, b.get("status")) for c, b in server.acks] == [("c9", "received")]
     adapter.tick()
-    assert ("c9", "received") in [(c, b.get("status")) for c, b in server.acks]
+    assert ("c9", "applied") in [(c, b.get("status")) for c, b in server.acks]
 
 
 def test_post_status_of_another_session_never_hides_an_execution(
@@ -1001,3 +1001,31 @@ def test_rejected_approval_drops_its_delegation_reservation(
         approval["status"] = "rejected"
     runner.agent_loop("delegate_task", {"tasks": [{"goal": "x"}]}, sid="p", tcid="d1")
     assert not adapter._provisional_delegations, "a rejected action never keeps its reservation"
+
+
+def test_stale_blocked_status_never_describes_a_later_execution(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_reused")
+    adapter.post_tool_call(args={"path": "/tmp/a"}, result="{}", status="blocked", **kw)
+    runner.direct("read_file", {"path": "/tmp/a"}, tcid="call_reused")
+    assert runner.executions == 1
+    assert len(server.reports()) == 1, "the later execution is reported"
+
+
+def test_later_ack_supersedes_a_queued_earlier_one(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    real = adapter.client.ack_command
+
+    def flaky(command_id: str, status: str, detail: Any) -> Any:
+        if status == "received":
+            raise HermesApiError("unreachable", "connection refused", 0)
+        return real(command_id, status, detail)
+
+    monkeypatch.setattr(adapter.client, "ack_command", flaky)
+    adapter.handle_command({"id": "c7", "kind": "pause", "target_kind": "instance"})
+    assert not adapter._ack_retries, "received is dropped once applied was accepted"

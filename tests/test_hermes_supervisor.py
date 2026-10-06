@@ -451,3 +451,24 @@ def test_launch_failure_follows_the_restart_policy(
     assert s.run() == 1, "the supervisor stops with a failure instead of idling forever"
     assert s.restarts == 2
     assert s.gave_up
+
+
+def test_failed_supervisor_ack_is_retried(tmp_path: Path) -> None:
+    api = FakeApi()
+    real = api.ack_command
+    failures = {"left": 2}
+
+    def flaky(command_id: str, status: str, detail: dict[str, Any]) -> dict[str, Any]:
+        if failures["left"]:
+            failures["left"] -= 1
+            raise HermesApiError("unreachable", "connection refused", 0)
+        return real(command_id, status, detail)
+
+    api.ack_command = flaky  # type: ignore[method-assign]
+    api.commands = [{"id": "q9", "kind": "quarantine", "status": "requested"}]
+    s = make_supervisor(tmp_path, api, [sys.executable, "-c", "raise SystemExit(0)"])
+    s.heartbeat()
+    assert api.acks == []
+    api.commands = []
+    s.tick()
+    assert [(c, st) for c, st, _ in api.acks][-1] == ("q9", "applied")

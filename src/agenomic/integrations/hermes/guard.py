@@ -22,6 +22,7 @@ Example:
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -140,7 +141,16 @@ def main(
             return _block(
                 out, "Agenomic guard input is not an object; the action was not executed."
             )
-        max_age = float(env.get("AGENOMIC_HERMES_GUARD_MAX_AGE_S") or DEFAULT_MAX_AGE_S)
+        try:
+            max_age = float(env.get("AGENOMIC_HERMES_GUARD_MAX_AGE_S") or DEFAULT_MAX_AGE_S)
+        except ValueError:
+            max_age = math.nan
+        if not math.isfinite(max_age) or max_age <= 0:
+            return _block(
+                out,
+                "AGENOMIC_HERMES_GUARD_MAX_AGE_S is not a positive finite number; "
+                "the action was not executed.",
+            )
         try:
             status = _read_status(status_path(env))
         except (OSError, ValueError):

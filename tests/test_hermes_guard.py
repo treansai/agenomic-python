@@ -140,3 +140,13 @@ def test_console_script_process(tmp_path: Path) -> None:
 
 def test_status_path_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert guard.status_path({}).parts[-3:] == (".hermes", "agenomic", "status.json")
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-5", "0", "soon"])
+def test_invalid_deadline_override_blocks(tmp_path: Path, value: str) -> None:
+    code, out = run(
+        tmp_path,
+        {"loaded": True, "instance_status": "active", "updated_at": iso()},
+        AGENOMIC_HERMES_GUARD_MAX_AGE_S=value,
+    )
+    assert_block(code, out, "AGENOMIC_HERMES_GUARD_MAX_AGE_S")

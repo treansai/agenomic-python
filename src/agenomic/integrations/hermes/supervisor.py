@@ -38,6 +38,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
@@ -308,6 +309,10 @@ class _SupervisorApi(Protocol):
     def approved_skills(self) -> dict[str, JsonValue]: ...
 
 
+#: Acknowledgement order: a later state supersedes a queued earlier one.
+_ACK_RANK = {"received": 1, "applied": 2, "refused": 2}
+
+
 class SupervisorSettings(BaseModel):
     """Supervisor configuration (from the command line), validated on construction and
     on assignment.
@@ -440,6 +445,8 @@ class Supervisor:
         self.refuse_restart = False
         self._stopping = threading.Event()
         self._seen_commands: set[str] = set()
+        # Acknowledgements that failed in transport, retried on every tick until accepted.
+        self._ack_retries: deque[tuple[str, str, dict[str, JsonValue]]] = deque(maxlen=500)
         self._ticks = 0
         self._launch_failed = False
         self.gave_up = False
@@ -626,6 +633,26 @@ class Supervisor:
             self.client.ack_command(command_id, status, detail)
         except HermesApiError as e:
             logger.warning("supervisor ack %s failed (%s)", status, e.code)
+            if e.status == 0 or e.status >= 500:
+                self._ack_retries.append((command_id, status, detail))
+            return
+        rank = _ACK_RANK.get(status, 0)
+        kept = [
+            item
+            for item in self._ack_retries
+            if item[0] != command_id or _ACK_RANK.get(item[1], 0) > rank
+        ]
+        if len(kept) != len(self._ack_retries):
+            self._ack_retries.clear()
+            self._ack_retries.extend(kept)
+
+    def _retry_acks(self) -> None:
+        for _ in range(len(self._ack_retries)):
+            try:
+                command_id, status, detail = self._ack_retries.popleft()
+            except IndexError:
+                return
+            self._ack(command_id, status, detail)
 
     def handle_command(self, command: Mapping[str, JsonValue]) -> None:
         """``quarantine``/``revoke`` stop and refuse restarts; ``resume`` allows them.
@@ -692,6 +719,7 @@ class Supervisor:
             self.sync_skills()
         self._ticks += 1
         self.heartbeat()
+        self._retry_acks()
 
     def request_stop(self, *_: object) -> None:
         """Signal handler: stop at the next loop iteration.
