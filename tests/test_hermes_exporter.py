@@ -31,6 +31,11 @@ posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX file mode
 SECRETS = ("sk-livesecretvalue123", "agmhr_runtimesecret", "hunter2-password")
 
 
+def _ack(batch: list[dict[str, Any]]) -> dict[str, int]:
+    """The gateway's acknowledgement of every event of ``batch``."""
+    return {"accepted": len(batch), "duplicates": 0}
+
+
 def raw_content() -> dict[str, Any]:
     return {
         "input": {
@@ -154,10 +159,14 @@ def test_spool_is_bounded_redacted_and_replayed(tmp_path: Path) -> None:
     up = threading.Event()
     delivered: list[dict[str, Any]] = []
 
-    def post(batch: list[dict[str, Any]]) -> None:
+    def post_body(batch: list[dict[str, Any]]) -> None:
         if not up.is_set():
             raise ConnectionError("down")
         delivered.extend(batch)
+
+    def post(batch: list[dict[str, Any]]) -> object:
+        post_body(batch)
+        return _ack(batch)
 
     builder = EventBuilder("redacted_preview")
     exporter = EventExporter(
@@ -485,7 +494,7 @@ def test_spool_is_replayed_while_live_traffic_continues(tmp_path: Path) -> None:
     done = threading.Event()
     holder: dict[str, EventExporter] = {}
 
-    def post(batch: list[dict[str, Any]]) -> None:
+    def post_body(batch: list[dict[str, Any]]) -> None:
         if any(e["type"] == "spooled" for e in batch):
             replayed_after.append(live["batches"])
             done.set()
@@ -496,6 +505,10 @@ def test_spool_is_replayed_while_live_traffic_continues(tmp_path: Path) -> None:
             holder["exporter"].submit(builder.build("live"))
         else:
             done.set()
+
+    def post(batch: list[dict[str, Any]]) -> object:
+        post_body(batch)
+        return _ack(batch)
 
     # A long flush interval: only the live batch count can trigger the replay.
     exporter = EventExporter(post, flush_interval_s=30.0, batch_size=1, spool_path=str(spool))
@@ -725,7 +738,7 @@ def test_replayed_records_are_validated_and_redacted_again(tmp_path: Path) -> No
     ]
     spool.write_text("".join(line + "\n" for line in lines))
     sent: list[dict[str, Any]] = []
-    exporter = _spooled_exporter(spool, sent.extend)
+    exporter = _spooled_exporter(spool, lambda batch: (sent.extend(batch), _ack(batch))[1])
     exporter._replay_spool()
     assert [e["event_id"] for e in sent] == [tampered["event_id"]]
     text = json.dumps(sent)
@@ -765,10 +778,14 @@ def test_acknowledged_replay_is_removed_and_concurrent_appends_survive(tmp_path:
     holder: dict[str, EventExporter] = {}
     sent: list[dict[str, Any]] = []
 
-    def post(batch: list[dict[str, Any]]) -> None:
+    def post_body(batch: list[dict[str, Any]]) -> None:
         # Another producer overflows into the spool while the replay is in flight.
         holder["exporter"]._overflow([late], "buffer full")
         sent.extend(batch)
+
+    def post(batch: list[dict[str, Any]]) -> object:
+        post_body(batch)
+        return _ack(batch)
 
     exporter = _spooled_exporter(spool, post)
     holder["exporter"] = exporter
@@ -883,10 +900,14 @@ def test_replayed_spool_batches_stay_under_the_request_body_limit(tmp_path: Path
     batches: list[list[dict[str, Any]]] = []
     done = threading.Event()
 
-    def post(batch: list[dict[str, Any]]) -> None:
+    def post_body(batch: list[dict[str, Any]]) -> None:
         batches.append(list(batch))
         if sum(len(b) for b in batches) >= len(spooled) + 1:
             done.set()
+
+    def post(batch: list[dict[str, Any]]) -> object:
+        post_body(batch)
+        return _ack(batch)
 
     exporter = EventExporter(post, flush_interval_s=0.01, spool_path=str(spool))
     assert done.wait(20.0)
@@ -1000,3 +1021,53 @@ def test_other_standalone_token_families_are_masked(token: str) -> None:
     masked = mask_text(f"value {token} end")
     assert token not in masked
     assert masked.startswith("value ")
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+def test_a_permanent_refusal_is_dropped_not_spooled(tmp_path: Path, status: int) -> None:
+    from agenomic.integrations.hermes.client import HermesApiError
+
+    spool = tmp_path / "spool.jsonl"
+    calls: list[int] = []
+
+    def refuse(batch: list[dict[str, Any]]) -> object:
+        calls.append(len(batch))
+        raise HermesApiError("refused", "permanent", status)
+
+    exporter = EventExporter(refuse, max_retries=3, flush_interval_s=0.02, spool_path=str(spool))
+    exporter.submit(EventBuilder().build("a"))
+    exporter.flush(3.0)
+    assert calls == [1], "a permanent refusal is not retried"
+    assert not spool.exists() or spool.read_text() == "", "nor spooled"
+    assert exporter.stats()["dropped"] == 1
+    exporter.close()
+
+
+def test_a_spooled_batch_refused_for_good_leaves_the_spool(tmp_path: Path) -> None:
+    from agenomic.integrations.hermes.client import HermesApiError
+
+    spool = tmp_path / "spool.jsonl"
+    spool.write_text(json.dumps(EventBuilder().build("old")) + "\n")
+
+    def refuse(batch: list[dict[str, Any]]) -> object:
+        raise HermesApiError("unprocessable", "permanent", 422)
+
+    exporter = _spooled_exporter(spool, refuse)
+    exporter._replay_spool()
+    assert spool.read_text() == "", "the head batch no longer blocks later replays"
+    assert exporter.stats()["dropped"] == 1
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [None, {}, {"rejected": "invalid"}, {"accepted": "1"}, {"accepted": 0}, {"accepted": 5}],
+)
+def test_an_invalid_acknowledgement_never_counts_as_delivered(
+    tmp_path: Path, answer: object
+) -> None:
+    spool = tmp_path / "spool.jsonl"
+    spool.write_text(json.dumps(EventBuilder().build("old")) + "\n")
+    exporter = _spooled_exporter(spool, lambda batch: answer)
+    exporter._replay_spool()
+    assert spool.read_text() != "", "the batch stays on disk"
+    assert exporter.delivered == 0

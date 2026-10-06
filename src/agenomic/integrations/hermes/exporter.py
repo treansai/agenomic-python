@@ -182,13 +182,33 @@ def is_secret_key(key: str) -> bool:
     )
 
 
-def _rejected_events(response: object) -> list[object]:
-    """The ``rejected`` list of an ``/events`` answer (empty when absent or malformed)."""
-    if isinstance(response, Mapping):
-        rejected = response.get("rejected")
-        if isinstance(rejected, list):
-            return rejected
-    return []
+def _acknowledged(response: object, sent: int) -> Optional[list[object]]:
+    """The ``rejected`` list of a consistent ``/events`` acknowledgement, or ``None``.
+
+    ``accepted`` (and ``duplicates``, ``rejected`` when present) must account for every
+    event sent: an answer that does not (``{}``, a malformed field, counts that do not add
+    up) acknowledges nothing, so the batch is never counted as delivered nor removed from
+    the spool on its strength.
+
+    Example:
+        >>> _acknowledged({"accepted": 1, "duplicates": 0, "rejected": []}, 1)
+        []
+        >>> _acknowledged({}, 1) is None
+        True
+    """
+    if not isinstance(response, Mapping):
+        return None
+    accepted = response.get("accepted")
+    duplicates = response.get("duplicates", 0)
+    rejected = response.get("rejected", [])
+    counts_ok = all(
+        isinstance(n, int) and not isinstance(n, bool) and n >= 0 for n in (accepted, duplicates)
+    )
+    if not counts_ok or not isinstance(rejected, list):
+        return None
+    if cast(int, accepted) + cast(int, duplicates) + len(rejected) != sent:
+        return None
+    return rejected
 
 
 def _reason(entry: object) -> str:
@@ -986,11 +1006,20 @@ class EventExporter:
             logger.warning("event spool %s failed: %s", what, type(error).__name__)
 
     def _deliver(self, batch: list[dict[str, Any]], *, spool_on_failure: bool = True) -> bool:
+        """Send ``batch``; ``True`` once it is settled (acknowledged, or refused for good and
+        counted as dropped), so a replayed batch may leave the spool. A transient failure
+        is retried, then spooled (``spool_on_failure``) or left in the spool."""
         for attempt in range(self._max_retries + 1):
             try:
                 response = self._post(batch)
             except Exception as exc:  # the transport's failure is telemetry only
                 self._last_error = f"{type(exc).__name__}: {getattr(exc, 'code', '')}".rstrip(": ")
+                if getattr(exc, "retryable", True) is False:
+                    # A permanent refusal (400, 401, 403, 422...): the same batch would be
+                    # refused again, and spooled it would block every later replay.
+                    self._last_failure_at = time.monotonic()
+                    self._count_drop(f"refused by the gateway ({self._last_error})", len(batch))
+                    return True
                 if attempt < self._max_retries:
                     with self._cond:
                         if self._closed:
@@ -999,10 +1028,22 @@ class EventExporter:
                     continue
                 break
             else:
+                rejected_or_none = _acknowledged(response, len(batch))
+                if rejected_or_none is None:
+                    # Not an acknowledgement of this batch: retried like a failure, never
+                    # counted as delivered.
+                    self._last_error = "invalid_acknowledgement"
+                    if attempt < self._max_retries:
+                        with self._cond:
+                            if self._closed:
+                                break
+                            self._cond.wait(self._backoff * (2**attempt))
+                        continue
+                    break
                 self._last_error = None
                 # Per-event rejections (not an object, invalid id or type, too large) are
                 # permanent: counted as dropped with their reasons, never as delivered.
-                rejected = _rejected_events(response)
+                rejected = rejected_or_none
                 self._delivered += max(0, len(batch) - len(rejected))
                 if rejected:
                     reasons = sorted({_reason(r) for r in rejected})

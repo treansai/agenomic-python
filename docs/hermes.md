@@ -315,9 +315,14 @@ The exporter never blocks the agent: a bounded buffer, one daemon thread,
 batches of at most 500 events and about 1 MiB to `POST /events` (each batch is
 also capped by serialized size, with headroom for the envelope, under the
 documented 1 MiB body limit; a batch always carries at least one event), 3
-retries with backoff,
-deduplication by `event_id`, drop and count on overflow, and an optional
-size capped JSONL spool for undelivered batches. The spool is `0600` even
+retries with backoff for transient failures (transport, timeout, 5xx, 408, 425,
+429), deduplication by `event_id`, drop and count on overflow, and an optional
+size capped JSONL spool for undelivered batches. A permanent refusal (another
+4xx) is dropped and counted at once, never retried nor spooled, so it cannot
+block later replays. A batch counts as delivered only on a consistent
+acknowledgement (`accepted` + `duplicates` + `rejected` covering every event
+sent); any other answer is handled as a transient failure and a replayed batch
+stays in the spool. The spool is `0600` even
 when the file already existed with a wider mode, and a directory the exporter
 creates for it is `0700`. Every open of the spool, reads included, uses
 `O_NOFOLLOW` and an owner check: a spool that is a symbolic link or belongs to
