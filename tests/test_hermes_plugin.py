@@ -2933,3 +2933,53 @@ def test_terminal_ack_queued_during_a_rebuild_is_never_lost(
     adapter._drop_superseded_acks("c1", "applied")
     racer["t"].join(5.0)
     assert [(c, s) for c, s, _ in adapter._ack_retries] == [("c2", "applied")]
+
+
+def test_foreign_hook_label_carrying_a_token_is_masked_in_hello(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    secret = "agmhr_" + "s3cretvalue123456"
+
+    def hook(**kwargs: Any) -> None:
+        return None
+
+    hook.__qualname__ = f"shell_hook[pre_tool_call:check --token {secret}]"
+    adapter.ctx._manager._hooks["pre_tool_call"].append(hook)
+    adapter._ensure_started("cli")
+    hello = server.calls("/hello")[0].body
+    assert len(hello["foreign_mutators"]) == 1
+    assert "s3cretvalue123456" not in json.dumps(hello)
+
+
+@pytest.mark.parametrize("then", ["enforce", "shadow"])
+def test_shadow_fail_open_admission_never_leaves_an_orphan_authorization(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, then: str
+) -> None:
+    server.effective_state = "shadow"
+    server.decide = lambda body: "allow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "shadow"
+    server.authorize_status = 503  # the middleware's authorization fails open in shadow
+    runner = Runner(adapter)
+    real_emit = adapter._emit
+
+    def recover_inside_the_middleware(event_type: str, *a: Any, **k: Any) -> Any:
+        if event_type == "tool.call.requested":  # inner pre_tool_call, after admission
+            server.authorize_status = None
+            if then == "enforce":
+                server.effective_state = "enforce"
+                adapter._set_state("enforce", adapter._state_request())
+        return real_emit(event_type, *a, **k)
+
+    monkeypatch.setattr(adapter, "_emit", recover_inside_the_middleware)
+    out = runner.agent_loop("read_file", {"path": "/tmp/a"})
+    if then == "enforce":
+        assert runner.executions == 0
+        assert "decided in shadow" in json.loads(out)["error"]
+    else:
+        assert runner.executions == 1, "shadow never blocks"
+    assert not [a for a in adapter._auth.values() if a.state == "authorized"], (
+        "no authorization is left reusable"
+    )

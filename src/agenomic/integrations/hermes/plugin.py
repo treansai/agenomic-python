@@ -679,8 +679,10 @@ class HermesAdapter:
                     {
                         "kind": kind,
                         "name": name,
-                        "callback": label[:200],
-                        "module": str(getattr(cb, "__module__", "") or "")[:200],
+                        # Sent in /hello without the event pipeline: a shell hook's label is
+                        # its whole command line, which can carry a token.
+                        "callback": mask_text(label)[:200],
+                        "module": mask_text(str(getattr(cb, "__module__", "") or ""))[:200],
                     }
                 )
         except Exception as exc:  # defensive: the manager internals are not a public API
@@ -2765,6 +2767,10 @@ class HermesAdapter:
                     )
                 if admitted[1] == "observe" and mode_now == "shadow":
                     return None  # shadow never changes execution
+                if not admitted[2] and mode_now != "enforce":
+                    # Admitted without an authorization (shadow fail-open): none is made
+                    # here either, since it would be owned by no plan; shadow never blocks.
+                    return None
             if observe_now:
                 return None
             with self._lock:
@@ -3060,14 +3066,18 @@ class HermesAdapter:
         self._invocation.delegation = plan.auth.delegation if plan.auth is not None else None
         # The mode this call was admitted under, for the inner pre_tool_call (agent loop
         # order): a stricter mode applied since blocks there instead of authorizing anew.
+        # A plan that proceeds without an authorization is never an enforce admission:
+        # it is a non-enforce fail-open (an outage, arguments without a canonical form,
+        # no permit returned in shadow), recorded as shadow.
         admitted_mode = (
             "observe"
             if plan.observe
-            else (plan.auth.effective_mode if plan.auth is not None else None)
+            else (plan.auth.effective_mode if plan.auth is not None else "shadow")
         )
         self._invocation.admitted = (
             (_str(plan.meta.get("sid")), _str(plan.meta.get("tool")), meta_call),
             admitted_mode,
+            plan.auth is not None,
         )
         try:
             result = next_call()
