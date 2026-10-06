@@ -182,6 +182,41 @@ def test_writability_through_a_higher_ancestor(tmp_path: Path) -> None:
         os.chmod(inner, 0o755)
 
 
+@posix_only
+def test_writability_through_a_symlink_target(tmp_path: Path) -> None:
+    safe = tmp_path / "safe"
+    shared = tmp_path / "shared"
+    safe.mkdir()
+    shared.mkdir()
+    target = shared / "config.yaml"
+    target.write_text("x")
+    link = safe / "config.yaml"
+    link.symlink_to(target)
+    os.chmod(target, 0o444)
+    os.chmod(safe, 0o555)
+    other_uid = 65534 if os.getuid() != 65534 else 65533
+    try:
+        os.chmod(shared, 0o755)
+        if tmp_path.stat().st_uid != other_uid:
+            assert not writable_by(link, other_uid, [other_uid])
+        # The link and its directory are read only, but the target's directory is not.
+        os.chmod(shared, 0o757)
+        assert writable_by(link, other_uid, [other_uid])
+        report = isolation_report(
+            {},
+            child_uid=other_uid,
+            child_gids=[other_uid],
+            config_paths=[link],
+            skills_paths=[],
+            forbidden_hosts=[],
+            docker_sockets=[],
+        )
+        assert report["config_readonly"] is False
+    finally:
+        os.chmod(shared, 0o755)
+        os.chmod(safe, 0o755)
+
+
 def test_isolation_report(tmp_path: Path) -> None:
     sock_path = tmp_path / "docker.sock"
     report = isolation_report(

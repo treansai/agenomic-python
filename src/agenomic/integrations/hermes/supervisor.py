@@ -290,7 +290,9 @@ def writable_by(path: Path, uid: int, gids: Iterable[int]) -> bool:
     bit semantics apply: in a sticky directory only the owner of the entry or of the
     directory may remove or rename it. A missing path is writable when its nearest
     existing ancestor is (the child can create the missing directories). A read only
-    mount wins. Root can write anything that is not on a read only mount.
+    mount wins. Root can write anything that is not on a read only mount. A path
+    through symbolic links is checked twice: as written (each link can be replaced in
+    its directory) and resolved (its target, and every directory above the target).
 
     Example:
         >>> import tempfile
@@ -299,7 +301,15 @@ def writable_by(path: Path, uid: int, gids: Iterable[int]) -> bool:
         True
     """
     groups = set(gids)
-    path = Path(os.path.abspath(path))  # every ancestor, without resolving links
+    written = Path(os.path.abspath(path))  # every ancestor, links kept
+    if _writable_chain(written, uid, groups):
+        return True
+    resolved = Path(os.path.realpath(written))
+    return resolved != written and _writable_chain(resolved, uid, groups)
+
+
+def _writable_chain(path: Path, uid: int, groups: set[int]) -> bool:
+    """:func:`writable_by` for one absolute path, walked lexically up to the root."""
     entry = path
     if path.exists():
         if not _readonly_fs(path) and (uid == 0 or _mode_allows_write(path.stat(), uid, groups)):
