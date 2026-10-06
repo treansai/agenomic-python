@@ -533,7 +533,7 @@ def test_leader_exit_stops_its_group_before_a_restart(
         monkeypatch.setattr(s, "start_child", start)
 
         def restarted() -> bool:
-            s.poll()
+            s.tick()  # the replacement starts after the tick's heartbeat and skills sync
             return s.restarts == 1
 
         assert _wait_for(restarted, timeout=20.0)
@@ -591,7 +591,7 @@ def test_no_replacement_while_the_old_group_cannot_be_stopped(
         assert s.proc is first
         assert s.state == "stop_failed"
         stoppable = True
-        s.poll()
+        s.tick()
         assert s.restarts == 1
         assert s.proc is not first
     finally:
@@ -1208,7 +1208,7 @@ def test_link_planted_at_the_old_temporary_name_is_never_followed(
 def test_skill_destination_through_a_symlink_is_not_followed(tmp_path: Path, link: str) -> None:
     out = tmp_path / "skills"
     out.mkdir()
-    victim_dir = out / "other"
+    victim_dir = tmp_path / "other"  # outside the directory the supervisor owns
     victim_dir.mkdir()
     victim = victim_dir / "SKILL.md"
     victim.write_text("precious")
@@ -1615,3 +1615,43 @@ def test_stale_skill_behind_a_linked_directory_keeps_hermes_stopped(tmp_path: Pa
     manifest = json.loads((out / ".agenomic_manifest.json").read_text())
     assert "b/SKILL.md" in manifest["files"], "a later sync keeps trying"
     assert (elsewhere / "SKILL.md").exists(), "nothing followed through the link"
+
+
+@posix_only
+def test_deleted_manifest_reconciles_the_whole_directory(tmp_path: Path) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A"), _skill("b", "B")], out)
+    (out / ".agenomic_manifest.json").unlink()  # the child deletes it to hide b
+    counts = sync_skills([_skill("a", "A")], out)
+    assert counts["removed"] == 1
+    assert not (out / "b" / "SKILL.md").exists()
+    assert json.loads((out / ".agenomic_manifest.json").read_text()) == {"files": ["a/SKILL.md"]}
+
+
+def test_crash_restart_applies_a_queued_quarantine_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_restart_backoff(monkeypatch)
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, [sys.executable, "-c", "import sys; sys.exit(3)"])
+    s.settings.restart = True
+    try:
+        assert s.start_child()
+        assert _wait_for(lambda: s.proc is not None and s.proc.poll() is not None)
+        started: list[bool] = []
+        real_start = s.start_child
+
+        def recording_start() -> bool:
+            ok = real_start()
+            started.append(ok)
+            return ok
+
+        monkeypatch.setattr(s, "start_child", recording_start)
+        # Queued by the gateway while Hermes was crashing.
+        api.commands = [{"id": "q1", "kind": "quarantine", "status": "requested"}]
+        s.tick()
+        assert s.refuse_restart
+        assert True not in started, "no replacement Hermes ran before the quarantine"
+        assert ("q1", "applied") in [(c, st) for c, st, _ in api.acks]
+    finally:
+        s.stop_child()

@@ -380,7 +380,10 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   reconciled (bad digest, unsafe or linked destination, malformed entry), it
   stays stopped and every tick retries the sync, so it never loads skills left
   over from before (possibly revoked since). Pending commands are fetched and
-  applied before the first start.
+  applied before the first start, and a restart after a crash goes through the
+  same tick (heartbeat, then sync, then start), so a quarantine or revoke
+  queued meanwhile applies before any replacement runs. A missing manifest
+  (first sync, or deleted by the agent) reconciles the whole directory.
 - Approved skills (`GET /skills/approved`) are written into `--skills-dir`
   after their digest (`sha256:` or `blake3:`) is checked; targets escaping the
   directory are rejected; files a previous sync wrote and that are no longer

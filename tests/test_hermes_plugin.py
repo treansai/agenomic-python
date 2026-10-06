@@ -2479,3 +2479,42 @@ def test_cancel_racing_a_session_end_is_applied_or_refused_never_stuck(
     statuses = [b.get("status") for c, b in server.acks if c == "k1"]
     assert statuses[-1] in ("applied", "refused")
     assert "s1" not in adapter._cancel_sessions, "no waiter left behind"
+
+
+@pytest.mark.parametrize("newer", ["enforce_blocked", "paused", "quarantined", "revoked"])
+def test_stale_allow_after_a_blocking_heartbeat_is_blocked(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newer: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    original = adapter.client.authorize
+
+    def allow_overtaken(sid: str, body: Any) -> Any:
+        answer = original(sid, body)  # an enforce allow
+        adapter._set_state(newer, adapter._state_request())  # newer blocking heartbeat
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", allow_overtaken)
+    runner = Runner(adapter)
+    out = json.loads(runner.direct("read_file", {"path": "/tmp/a"}))
+    assert runner.executions == 0
+    assert newer in out["error"]
+
+
+def test_cached_permit_is_decided_again_once_enforce_becomes_blocked(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    assert adapter.pre_tool_call(args=args, **kw) is None  # cached enforce permit
+    asked = len(server.authorize_calls())
+    # enforce -> enforce_blocked between the gates (both map to the enforce local mode)
+    server.effective_state = "enforce_blocked"
+    adapter._set_state("enforce_blocked")
+    adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, "never executed under the old permit"
+    assert adapter._auth[("s1", "read_file", "call_1")].state == "done"
+    assert len(server.authorize_calls()) >= asked

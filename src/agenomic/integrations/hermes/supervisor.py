@@ -877,13 +877,14 @@ def _manifest_files(raw: str) -> Optional[set[str]]:
 
 
 def _previous_files(root: Path, manifest_path: Path) -> set[str]:
-    """Files the previous sync wrote. Without a manifest (first sync) nothing; with an
-    unreadable or malformed one, every regular file in the directory, so a skill that is no
-    longer approved is removed rather than kept forever."""
+    """Files the previous sync wrote. Without a manifest (first sync, or a manifest the agent
+    deleted) or with an unreadable or malformed one, every regular file in the directory, so
+    a skill that is no longer approved is removed rather than kept forever (on a genuine
+    first sync the directory is empty)."""
     try:
         raw = manifest_path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return set()
+        return _managed_files(root)
     except (OSError, ValueError) as exc:
         logger.error(
             "skills manifest unreadable (%s); reconciling the whole directory", type(exc).__name__
@@ -908,7 +909,8 @@ def _previous_files_at(root_fd: int) -> set[str]:  # pragma: posix-only
             raise ValueError("skills manifest too large")
         raw = data.decode("utf-8")
     except FileNotFoundError:
-        return set()
+        # Deleted (or first sync): never trusted as "nothing was written before".
+        return _managed_files_at(root_fd)
     except (OSError, ValueError) as exc:
         logger.error(
             "skills manifest unreadable (%s); reconciling the whole directory", type(exc).__name__
@@ -1354,7 +1356,9 @@ class Supervisor:
         # A shutdown requested during the backoff ends it and starts nothing.
         if self._backoff_wait(min(60.0, 2.0**self.restarts)):
             return
-        self.start_child()
+        # Not started here: the same tick first heartbeats (a quarantine or revoke queued
+        # meanwhile applies before any replacement runs) and syncs the approved skills.
+        self._start_after_sync = True
 
     def _backoff_wait(self, seconds: float) -> bool:
         """Wait out the restart backoff; ``True`` when a shutdown was requested meanwhile."""

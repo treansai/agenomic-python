@@ -2156,10 +2156,17 @@ class HermesAdapter:
             self._settle_delegation(provisional, commit=False)
             return _Verdict()
         applied = True
-        if self._effective_state in _ENFORCE_LIKE - {"enforce"}:
-            # A blocking state is kept, but this newer request still orders later answers.
+        blocking = self._effective_state
+        if blocking in _ENFORCE_LIKE - {"enforce"}:
+            # A blocking state (enforce_blocked, paused, quarantined, revoked) is applied:
+            # no answer, allow included, lets the call run under it. The newer request
+            # still orders later answers.
             self._note_state_seq(seq)
-        elif effective_mode in ("shadow", "enforce"):
+            self._settle_delegation(provisional, commit=False)
+            return _Verdict(
+                block=f"Agenomic: the instance is {blocking}; the action was not executed."
+            )
+        if effective_mode in ("shadow", "enforce"):
             # Also when the mode is unchanged: an older heartbeat must not override it.
             applied = self._set_state(effective_mode, seq)
         if not applied and self.local_mode() != effective_mode:
@@ -2681,7 +2688,12 @@ class HermesAdapter:
         has not started executing (the state changed between the gates): the call is then
         authorized again under the current mode. Returns whether it was retired."""
         with self._lock:
-            if auth.state != "authorized" or auth.effective_mode == self.local_mode():
+            if auth.state != "authorized":
+                return False
+            # A blocking raw state (enforce_blocked collapses to the enforce local mode)
+            # also retires it: the gateway decides again under that state.
+            blocked = self._effective_state in _ENFORCE_LIKE - {"enforce"}
+            if not blocked and auth.effective_mode == self.local_mode():
                 return False
             auth.state = "done"
         self._drop_delegation(auth)
