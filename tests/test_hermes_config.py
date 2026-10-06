@@ -272,6 +272,9 @@ def test_renderers_refuse_credential_names_for_the_runtime_token(name: str) -> N
         "https://user@a.example",
         "https://a.example?",
         "https://a.example#",
+        "https://exa mple.com",
+        "https://a.example/\tx",
+        "https://a.example\n",
     ],
 )
 def test_render_hermes_config_refuses_an_endpoint_the_adapter_would_refuse(endpoint: str) -> None:

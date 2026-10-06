@@ -3763,3 +3763,31 @@ def test_a_permanently_refused_report_is_not_requeued(
     item = plugin_mod._ReportRetry("s1", {"logical_call_id": "c1", "attempt": 1, "tool": "t"})
     assert adapter._report(item) is False
     assert len(adapter._report_retries) == 0
+
+
+def test_a_terminal_end_stays_pending_however_long_the_gateway_is_unavailable(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {"id": "k6", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+    real_end = adapter.client.end_session
+    down = {"on": True}
+
+    def end(sid: str, body: dict[str, Any]) -> Any:
+        if down["on"]:
+            raise HermesApiError("timeout", "gateway unavailable", 0)
+        return real_end(sid, body)
+
+    monkeypatch.setattr(adapter.client, "end_session", end)
+    adapter.on_session_finalize(session_id="s1", reason="exit")
+    for _ in range(15):  # past any retry budget
+        adapter.tick()
+    acks = lambda: [(c, b["status"]) for c, b in server.acks]  # noqa: E731
+    assert ("k6", "applied") not in acks()
+    down["on"] = False
+    adapter.tick()
+    assert ("k6", "applied") in acks()

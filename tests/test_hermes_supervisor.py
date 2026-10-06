@@ -1947,3 +1947,10 @@ def test_max_restarts_is_a_supervisor_option(tmp_path: Path) -> None:
 def test_a_skill_path_with_a_nul_byte_is_rejected_not_raised() -> None:
     assert sup._skill_parts("skills/demo/\x00") is None
     assert sup._skill_parts("demo\x00/SKILL.md") is None
+
+
+@pytest.mark.parametrize("name", ["PASSWORD", "TOKEN", "SECRET", "PRIVATE_KEY", "ACCESS_KEY"])
+def test_a_bare_credential_name_is_scrubbed_even_when_allowlisted(name: str) -> None:
+    env = build_child_env({**PARENT_ENV, name: "s3cret"}, allow=[name])
+    assert name not in env, "the credential scrub wins over --allow-env"
+    assert not provider_secrets_absent({name: "s3cret"})

@@ -54,9 +54,8 @@ SUPERVISOR_TOKEN_ENV = "AGENOMIC_HERMES_SUPERVISOR_TOKEN"
 RUNTIME_TOKEN_PREFIX = "agmhr_"
 #: Prefix of every Agenomic supervisor token (the credential the supervisor presents).
 SUPERVISOR_TOKEN_PREFIX = "agmhs_"
-_SECRET_NAME = re.compile(
-    r"(_API_KEY|_TOKEN|_SECRET|_PASSWORD|_ACCESS_KEY|_PRIVATE_KEY)$|^API_KEY$", re.I
-)
+#: Credential-shaped variable names, bare (``TOKEN``, ``PASSWORD``) or suffixed (``X_TOKEN``).
+_SECRET_NAME = re.compile(r"(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|ACCESS_KEY|PRIVATE_KEY)$", re.I)
 _PROVIDER_KEYS = re.compile(
     r"_API_KEY$|^API_KEY$|^AWS_SECRET_ACCESS_KEY$|^GOOGLE_APPLICATION_CREDENTIALS$", re.I
 )
@@ -134,6 +133,10 @@ def check_endpoint(value: str) -> str:
         ...
         ValueError: endpoint must be an absolute http(s) URL
     """
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value):
+        # urlsplit strips tabs and newlines and keeps spaces: the URL actually used would
+        # differ from, or be invalid unlike, the one validated here.
+        raise ValueError("endpoint must be an absolute http(s) URL")
     try:
         parts = urlsplit(value)
         port_ok = parts.port is None or 0 < parts.port < 65536

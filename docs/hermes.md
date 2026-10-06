@@ -72,7 +72,8 @@ print(yaml.safe_dump(render_hermes_config("https://agenomic.example", model="dem
 ```
 
 The endpoint is validated first (absolute http(s) URL, no credentials, no
-query or fragment, not even a bare `?` or `#`), as the adapter, the supervisor and the HTTP clients do, and so are the plugin
+query or fragment, not even a bare `?` or `#`, and no whitespace or control
+character), as the adapter, the supervisor and the HTTP clients do, and so are the plugin
 `settings`: unknown keys and literal values the adapter would refuse are
 rejected, while `${env:VAR}` references are checked when the adapter loads
 (a value made only of references is checked then; a reference mixed with
@@ -373,8 +374,8 @@ turn, or the final end (`on_session_finalize`), of a session with a pending
 cancel (of the session or of its subagent) is reported to Agenomic as `cancelled`, a
 terminal state: the gateway applies a cancel only once its session has ended in the
 control plane, never on the adapter's word alone. A terminal end report that
-fails transiently is retried every heartbeat (up to 10 attempts) and the
-cancels waiting for it are acknowledged only once it is reported. `refused` is
+fails transiently is retried every heartbeat until it is reported (or refused
+for good), and the cancels waiting for it are acknowledged only then. `refused` is
 sent for unknown commands, missing targets and subagents that are not running.
 A cancel naming an Agenomic session id the adapter does not know yet is held
 while an admission is in flight, or while an active session's admission failed

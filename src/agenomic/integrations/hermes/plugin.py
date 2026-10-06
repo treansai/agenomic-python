@@ -183,7 +183,6 @@ class _PendingEnd:
     reason: str
     subagent_id: Optional[str]
     how: str
-    attempts: int = 1
 
 
 @dataclass
@@ -1533,16 +1532,17 @@ class HermesAdapter:
         with self._lock:
             pending = list(self._pending_ends.items())
         for sid, end in pending:
-            end.attempts += 1
-            done = self._end(sid, end.final, end.status, end.reason)
-            if not done and end.attempts < _MAX_REPORT_RETRIES:
+            if not self._end(sid, end.final, end.status, end.reason):
+                # Still transient: the end stays pending (and its cancels waiting) for as
+                # long as it takes; acknowledging them now would claim an end the control
+                # plane has not recorded.
                 continue
             with self._lock:
                 if self._pending_ends.get(sid) is not end:
                     continue  # replaced by a later end of the same session
                 del self._pending_ends[sid]
-            # Reported, refused for good or out of attempts: the cancels are acknowledged
-            # (the gateway checks the session's state itself before applying them).
+            # Reported, or refused for good: the cancels are acknowledged (the gateway
+            # checks the session's state itself before applying them).
             self._observe_terminal(sid, end.subagent_id, end.how)
 
     def on_session_end(self, **kwargs: object) -> None:
