@@ -745,6 +745,11 @@ rule of the engineering rules above.
   1 s, like a failed claim, so a gateway restart never cancels the other
   workers' trials; 401, 403 and other refusals still raise. Only the
   startup hello fails fast.
+- With an idle timeout, the claim `wait_seconds` is the remaining idle time
+  rounded up, so a claim long-polls until the timeout; truncating it sent
+  `wait_seconds: 0` for the last second and every worker polled the gateway
+  in a tight loop (about 70 claims in one second against a real gateway).
+  Each worker sends at most one claim with `0`, once the timeout has passed.
 - Graphs run through `bind_langgraph(binding=, resolution=)` with
   `ainvoke`, so a heartbeat can cancel them. On Python 3.10, `interrupt()`
   fails under `ainvoke` (LangGraph's contextvars), so interrupt cases need

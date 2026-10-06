@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -399,7 +400,7 @@ class _ServeState:
         if self.idle_timeout is None:
             return CLAIM_WAIT_MAX_SECONDS
         remaining = self.idle_timeout - (time.monotonic() - self.last_activity)
-        return int(max(0, min(CLAIM_WAIT_MAX_SECONDS, remaining)))
+        return max(0, min(CLAIM_WAIT_MAX_SECONDS, math.ceil(remaining)))
 
 
 class ExperimentRunner:

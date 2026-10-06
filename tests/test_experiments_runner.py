@@ -1929,3 +1929,15 @@ def test_fixture_miss_policy_comes_from_the_view(
     result = server.trials[trial].result
     assert result["outcome"] == "recorded_fixture_miss"
     assert result["error"]["tool"] == "lookup_order"
+
+
+def test_idle_claims_keep_long_polling_until_the_idle_timeout(server: FakeRunnerServer) -> None:
+    runner = make_runner(server, single_node(render_plan))
+    assert runner.serve(idle_timeout=0.4) == 0
+    waits = [
+        json.loads(request.content)["wait_seconds"]
+        for request in server.requests
+        if request.url.path.endswith("/claims")
+    ]
+    assert waits[0] == 1
+    assert waits.count(0) <= runner.max_concurrency, waits
