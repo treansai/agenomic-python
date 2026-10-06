@@ -3791,3 +3791,32 @@ def test_a_terminal_end_stays_pending_however_long_the_gateway_is_unavailable(
     down["on"] = False
     adapter.tick()
     assert ("k6", "applied") in acks()
+
+
+def test_an_end_a_cancel_waits_for_is_never_evicted(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(plugin_mod, "_MAX_AUTH", 2)
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    for sid in ("s1", "s2", "s3", "s4"):
+        adapter.on_session_start(session_id=sid, platform="cli")
+    adapter.handle_command(
+        {"id": "k7", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+    real_end = adapter.client.end_session
+    down = {"on": True}
+
+    def end(sid: str, body: dict[str, Any]) -> Any:
+        if down["on"]:
+            raise HermesApiError("timeout", "gateway unavailable", 0)
+        return real_end(sid, body)
+
+    monkeypatch.setattr(adapter.client, "end_session", end)
+    for sid in ("s1", "s2", "s3", "s4"):  # more pending ends than the cap
+        adapter.on_session_finalize(session_id=sid, reason="exit")
+    assert "s1" in adapter._pending_ends, "the end the cancel waits for is kept"
+    assert len(adapter._pending_ends) == 2
+    down["on"] = False
+    adapter.tick()
+    assert ("k7", "applied") in [(c, b["status"]) for c, b in server.acks]

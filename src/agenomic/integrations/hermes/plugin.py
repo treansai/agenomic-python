@@ -1526,7 +1526,21 @@ class HermesAdapter:
         with self._lock:
             self._pending_ends[sid] = _PendingEnd(final, status, reason, subagent_id, how)
             while len(self._pending_ends) > _MAX_AUTH:
-                self._pending_ends.popitem(last=False)
+                # Bounded, but never at the expense of a cancel: an end some cancel waits
+                # for is kept (those are bounded by the gateway's commands), the oldest
+                # other one is dropped.
+                victim = next(
+                    (
+                        key
+                        for key, end in self._pending_ends.items()
+                        if key not in self._cancel_sessions
+                        and not (end.subagent_id and end.subagent_id in self._cancel_subagents)
+                    ),
+                    None,
+                )
+                if victim is None:
+                    break
+                del self._pending_ends[victim]
 
     def _retry_ends(self) -> None:
         with self._lock:
