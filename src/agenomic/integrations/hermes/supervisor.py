@@ -836,13 +836,19 @@ def _open_regular_at(name: str, dir_fd: int) -> int:  # pragma: posix-only
 
 
 def _managed_files(root: Path) -> set[str]:
-    """Every regular file under ``root`` (symbolic links and the manifest excluded), relative
-    and with ``/`` separators on every platform, so manifest entries compare equal on Windows."""
+    """Every regular file and every symbolic link (to a file or a directory, never followed)
+    under ``root``, the manifest excluded, relative and with ``/`` separators on every
+    platform, so manifest entries compare equal on Windows. Links are listed so a full
+    reconciliation removes them, or keeps the sync failed, instead of forgetting them."""
     found: set[str] = set()
-    for dirpath, _dirs, files in os.walk(root):
+    for dirpath, dirs, files in os.walk(root):
+        for name in dirs:
+            full = Path(dirpath) / name
+            if full.is_symlink():
+                found.add(full.relative_to(root).as_posix())
         for name in files:
             full = Path(dirpath) / name
-            if name == _MANIFEST or full.is_symlink() or not full.is_file():
+            if name == _MANIFEST or not (full.is_symlink() or full.is_file()):
                 continue
             found.add(full.relative_to(root).as_posix())
     return found
@@ -854,15 +860,16 @@ def _managed_files_at(root_fd: int) -> set[str]:  # pragma: posix-only
     if sys.platform == "win32":
         raise NotImplementedError("directory descriptors are POSIX only")
     found: set[str] = set()
-    for dirpath, _dirs, files, dfd in os.fwalk(".", dir_fd=root_fd):
-        for name in files:
-            if name == _MANIFEST:
+    for dirpath, dirs, files, dfd in os.fwalk(".", dir_fd=root_fd):
+        for name in [*dirs, *files]:
+            if name == _MANIFEST and name in files:
                 continue
             try:
-                if stat.S_ISREG(os.lstat(name, dir_fd=dfd).st_mode):
-                    found.add(posixpath.normpath(posixpath.join(dirpath, name)))
+                mode = os.lstat(name, dir_fd=dfd).st_mode
             except OSError:
                 continue
+            if stat.S_ISLNK(mode) or (stat.S_ISREG(mode) and name in files):
+                found.add(posixpath.normpath(posixpath.join(dirpath, name)))
     return found
 
 
@@ -1266,6 +1273,10 @@ class Supervisor:
         """
         if self.refuse_restart or not self.settings.argv:
             return False
+        if self._stopping.is_set():
+            # A shutdown requested while a heartbeat or skills sync was blocked: nothing
+            # (startup hooks included) runs after it.
+            return False
         leader_gone = self.proc is None or self.proc.poll() is not None
         if self._pgid is not None and leader_gone and not self._release_group():
             # The previous group still runs: a replacement would leave it unsupervised.
@@ -1493,7 +1504,7 @@ class Supervisor:
             self.client.ack_command(command_id, status, detail)
         except HermesApiError as e:
             logger.warning("supervisor ack %s failed (%s)", status, e.code)
-            if e.status == 0 or e.status >= 500:
+            if e.retryable:
                 evicted = (
                     self._ack_retries[0]
                     if len(self._ack_retries) == self._ack_retries.maxlen

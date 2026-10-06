@@ -329,6 +329,9 @@ cancel (of the session or of its subagent) is reported to Agenomic as `cancelled
 terminal state: the gateway applies a cancel only once its session has ended in the
 control plane, never on the adapter's word alone. `refused` is
 sent for unknown commands, missing targets and subagents that are not running.
+An acknowledgement that fails on a transport error, a timeout, a 5xx or a
+transient 4xx (408, 425, 429) is queued and retried on the next heartbeat, by
+the plugin and the supervisor alike.
 
 ## Supervisor
 
@@ -391,7 +394,10 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   applied before the first start, and a restart after a crash goes through the
   same tick (heartbeat, then sync, then start), so a quarantine or revoke
   queued meanwhile applies before any replacement runs. A missing manifest
-  (first sync, or deleted by the agent) reconciles the whole directory.
+  (first sync, or deleted by the agent) reconciles the whole directory,
+  symbolic links included (the link is removed, never what it points to).
+  A SIGTERM or SIGINT received while a heartbeat or sync is blocked means
+  Hermes is not started once it returns.
   A periodic sync that fails or rejects an entry while Hermes runs stops it
   (it is started again once a sync reconciles every entry), so a revoked
   skill that could not be removed is never left loaded.

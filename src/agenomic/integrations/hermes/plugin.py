@@ -997,7 +997,7 @@ class HermesAdapter:
             self.client.ack_command(command_id, status, detail)
         except HermesApiError as exc:
             logger.warning("command %s ack %s failed (%s)", command_id, status, exc.code)
-            if exc.status == 0 or exc.status >= 500:
+            if exc.retryable:
                 _queue_ack_retry(
                     self._ack_retries,
                     self._commands_seen,

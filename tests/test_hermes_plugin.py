@@ -2624,3 +2624,28 @@ def test_blocking_state_applied_after_the_stale_check_stops_admission(
     assert runner.executions == 0, "never executed under the stale permit"
     assert "paused" in json.loads(str(out))["error"]
     assert adapter._auth[("s1", "read_file", "call_1")].state == "done"
+
+
+@pytest.mark.parametrize("status", [408, 425, 429])
+def test_transient_4xx_command_ack_is_retried(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    from agenomic.integrations.hermes.client import HermesApiError
+
+    adapter = make_adapter(server.url, tmp_path)
+    original = adapter.client.ack_command
+    failures = {"n": 1}
+
+    def rate_limited(command_id: str, ack: str, detail: dict[str, Any]) -> Any:
+        if ack == "applied" and failures["n"]:
+            failures["n"] -= 1
+            raise HermesApiError("rate_limited", "slow down", status)
+        return original(command_id, ack, detail)
+
+    monkeypatch.setattr(adapter.client, "ack_command", rate_limited)
+    adapter.handle_command(
+        {"id": "c1", "kind": "pause", "target_kind": "instance", "status": "requested"}
+    )
+    assert [b["status"] for _, b in server.acks] == ["received"]
+    adapter._retry_acks()
+    assert [b["status"] for _, b in server.acks] == ["received", "applied"]

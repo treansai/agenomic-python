@@ -48,6 +48,19 @@ class HermesApiError(CloudError):
         self.message = message
         self.status = status
 
+    @property
+    def retryable(self) -> bool:
+        """``True`` when the same request may succeed later: a transport failure or
+        timeout, a 5xx, or a transient 4xx (408 timeout, 425 too early, 429 rate limited).
+
+        Example:
+            >>> HermesApiError("rate_limited", "slow down", 429).retryable
+            True
+            >>> HermesApiError("not_found", "no such command", 404).retryable
+            False
+        """
+        return self.status == 0 or self.status >= 500 or self.status in (408, 425, 429)
+
 
 def _seg(value: str) -> str:
     return quote(value, safe="")

@@ -1221,7 +1221,13 @@ def test_skill_destination_through_a_symlink_is_not_followed(tmp_path: Path, lin
     assert counts["written"] == 0
     assert counts["rejected"] == 1
     assert victim.read_text() == "precious"
-    assert (out / "a" / "SKILL.md").is_symlink() or (out / "a").is_symlink()
+    # Without a manifest the link is a stale path: removed, never followed; the next sync
+    # writes the approved skill in its place.
+    assert not (out / "a" / "SKILL.md").is_symlink()
+    assert not (out / "a").is_symlink()
+    assert sync_skills([_skill("a", "A")], out)["rejected"] == 0
+    assert (out / "a" / "SKILL.md").read_bytes() == b"A"
+    assert victim.read_text() == "precious"
 
 
 @posix_only
@@ -1697,3 +1703,53 @@ def test_periodic_sync_failure_stops_hermes_until_reconciled(
         assert s.state == "running", "restarted once a sync reconciles everything"
     finally:
         s.stop_child()
+
+
+def test_rate_limited_command_ack_is_retried(tmp_path: Path) -> None:
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, SLEEPER)
+    original = api.ack_command
+    failures = {"n": 1}
+
+    def rate_limited(command_id: str, status: str, detail: dict[str, Any]) -> dict[str, Any]:
+        if status == "applied" and failures["n"]:
+            failures["n"] -= 1
+            raise HermesApiError("rate_limited", "slow down", 429)
+        return original(command_id, status, detail)
+
+    api.ack_command = rate_limited  # type: ignore[method-assign]
+    s.handle_command({"id": "q1", "kind": "quarantine", "status": "requested"})
+    assert [st for _, st, _ in api.acks] == ["received"]
+    s._retry_acks()
+    assert [st for _, st, _ in api.acks] == ["received", "applied"]
+
+
+def test_shutdown_requested_during_a_sync_never_starts_hermes(tmp_path: Path) -> None:
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, SLEEPER)
+    s.request_stop(15, None)  # arrives while the heartbeat or skills sync was blocked
+    s._start_when_synced(dict(SYNCED))
+    assert s.proc is None, "nothing runs after a shutdown request"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symbolic links need privileges")
+@pytest.mark.parametrize("target_kind", ["file", "directory"])
+def test_missing_manifest_reconciles_symbolic_links(tmp_path: Path, target_kind: str) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A"), _skill("b", "B")], out)
+    (out / ".agenomic_manifest.json").unlink()  # the child deletes it...
+    revoked = tmp_path / "revoked"
+    if target_kind == "file":
+        revoked.write_text("revoked skill")
+        (out / "b" / "SKILL.md").unlink()
+        (out / "b" / "SKILL.md").symlink_to(revoked)  # ...and links b to a revoked skill
+    else:
+        revoked.mkdir()
+        (revoked / "SKILL.md").write_text("revoked skill")
+        (out / "c").symlink_to(revoked, target_is_directory=True)
+    counts = sync_skills([_skill("a", "A")], out)
+    assert counts["rejected"] == 0
+    assert not (out / "b" / "SKILL.md").is_symlink()
+    assert not (out / "c").is_symlink()
+    assert revoked.exists(), "the link is removed, never what it points to"
+    assert json.loads((out / ".agenomic_manifest.json").read_text()) == {"files": ["a/SKILL.md"]}
