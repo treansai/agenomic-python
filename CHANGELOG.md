@@ -71,9 +71,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose scopes are not reported) raises `privileged_credential` unless
   `allow_privileged_credential=True`. During a registry outage a thread
   whose binding is cached resumes on it, after a process restart too when
-  the client has a `workspace_id` and a disk cache, and
-  `AgentFactory(build, checkpointer=saver)` lets execution-scope threads
-  resume after a restart.
+  the client has a `workspace_id` and a disk cache. While the registry
+  answers, `AgentFactory(build, checkpointer=saver)` lets an
+  execution-scope thread resume after a restart.
 - Prompt experiments (`agenomic.experiments`, Agenomic Cloud only):
   `client.experiments` with `create`, `update`, `preflight`, `launch`,
   `cancel`, `get`, `results` and `events`, each with an `a*` twin. `launch`
@@ -94,9 +94,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once per call id however often the report is resent; once a trial has
   ended, every later tool call fails before any request. After its first
   hello, `serve` keeps running through gateway outages and failing trials,
-  an idle runner long-polls for work until `idle_timeout` instead of
-  polling in a loop, and records of the `agenomic.experiments` logger,
-  tracebacks included, are redacted like results.
+  an idle runner long-polls for work until `idle_timeout`, and records of
+  the `agenomic.experiments` logger, tracebacks included, are redacted like
+  failure messages.
 - `agenomic-py experiment serve` and `agenomic-py experiment snapshot`;
   `snapshot_case` freezes the state of a production thread into a
   counterfactual `node_state` case. `local_assignment` and
