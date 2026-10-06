@@ -3722,3 +3722,44 @@ def test_an_authorize_decision_contradicting_its_status_blocks(
     out = json.loads(runner.agent_loop("write_file", {"path": "/tmp/a"}))
     assert "invalid_response" in out["error"]
     assert runner.executions == 0
+
+
+def test_a_cancel_is_acknowledged_only_once_the_terminal_end_is_reported(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {"id": "k5", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+    real_end = adapter.client.end_session
+    failures = {"left": 1}
+
+    def end_fails_once(sid: str, body: dict[str, Any]) -> Any:
+        if failures["left"]:
+            failures["left"] -= 1
+            raise HermesApiError("transport_error", "connection reset", 0)
+        return real_end(sid, body)
+
+    monkeypatch.setattr(adapter.client, "end_session", end_fails_once)
+    adapter.on_session_finalize(session_id="s1", reason="exit")
+    acks = lambda: [(c, b["status"]) for c, b in server.acks]  # noqa: E731
+    assert ("k5", "applied") not in acks(), "the gateway does not know the end yet"
+    adapter.tick()
+    assert ("k5", "applied") in acks(), "acknowledged once the retried end is reported"
+
+
+@pytest.mark.parametrize("status", [401, 405, 410, 413, 415])
+def test_a_permanently_refused_report_is_not_requeued(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+
+    def refuse(sid: str, body: Any) -> Any:
+        raise HermesApiError("refused", "permanent", status)
+
+    monkeypatch.setattr(adapter.client, "report", refuse)
+    item = plugin_mod._ReportRetry("s1", {"logical_call_id": "c1", "attempt": 1, "tool": "t"})
+    assert adapter._report(item) is False
+    assert len(adapter._report_retries) == 0

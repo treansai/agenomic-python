@@ -212,8 +212,9 @@ skip the frame and execute: fail open); it returns
   executes once, then posts `/actions/report` with the permit, `is_error`,
   `duration_ms` and `result_hash` (`result_preview` only with
   `redacted_preview`). A failed report emits `action.report_failed` with
-  `external_state: unknown` and is retried by the heartbeat; the action is
-  never executed again.
+  `external_state: unknown`; a transient failure (transport, timeout, 5xx,
+  408, 425, 429) is retried by the heartbeat, a permanent one (any other 4xx,
+  or an invalid permit) is not. The action is never executed again.
 - `deny`: `Agenomic denied <tool>: <explanation> (decision <id>)`.
 - `require_approval`: `Agenomic approval <id> required; the action was not
   executed. Retry the same call after approval.` The adapter remembers the
@@ -371,7 +372,9 @@ session blocks its tools and waits for Hermes to end the session. An interrupted
 turn, or the final end (`on_session_finalize`), of a session with a pending
 cancel (of the session or of its subagent) is reported to Agenomic as `cancelled`, a
 terminal state: the gateway applies a cancel only once its session has ended in the
-control plane, never on the adapter's word alone. `refused` is
+control plane, never on the adapter's word alone. A terminal end report that
+fails transiently is retried every heartbeat (up to 10 attempts) and the
+cancels waiting for it are acknowledged only once it is reported. `refused` is
 sent for unknown commands, missing targets and subagents that are not running.
 A cancel naming an Agenomic session id the adapter does not know yet is held
 while an admission is in flight, or while an active session's admission failed

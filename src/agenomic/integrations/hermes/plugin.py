@@ -177,6 +177,16 @@ class _Authorization:
 
 
 @dataclass
+class _PendingEnd:
+    final: bool
+    status: str
+    reason: str
+    subagent_id: Optional[str]
+    how: str
+    attempts: int = 1
+
+
+@dataclass
 class _Pending:
     logical_call_id: str
     attempt: int
@@ -529,6 +539,9 @@ class HermesAdapter:
         # the session and lost the answer): a cancel naming an unknown Agenomic id may be
         # theirs, so it stays unresolved until they are admitted or end.
         self._unadmitted: set[str] = set()
+        # Terminal session ends whose report failed transiently, retried every heartbeat;
+        # the cancels waiting for them are acknowledged once they are reported.
+        self._pending_ends: OrderedDict[str, _PendingEnd] = OrderedDict()
         self._children: dict[str, tuple[str, Optional[str]]] = {}
         self._delegations: dict[str, deque[list[Any]]] = {}
         # Hermes builds a delegate_task's children on the thread running that tool, inside
@@ -1111,6 +1124,7 @@ class HermesAdapter:
         except HermesApiError as exc:
             logger.warning("Agenomic heartbeat failed (%s)", exc.code)
         finally:
+            self._retry_ends()
             self._retry_acks()
             self._retry_reports()
             self._write_status()
@@ -1482,7 +1496,8 @@ class HermesAdapter:
         except Exception as exc:
             logger.debug("on_session_start failed: %s", type(exc).__name__)
 
-    def _end(self, sid: str, final: bool, status: str, reason: str = "") -> None:
+    def _end(self, sid: str, final: bool, status: str, reason: str = "") -> bool:
+        """Report a session end; ``False`` only on a failure worth retrying."""
         body: dict[str, Any] = {"final": final, "status": status}
         if reason:
             # Sent to the gateway directly, not through the event pipeline: masked here.
@@ -1491,6 +1506,44 @@ class HermesAdapter:
             self.client.end_session(sid, body)
         except HermesApiError as exc:
             logger.warning("session end not reported (%s)", exc.code)
+            return not exc.retryable
+        return True
+
+    def _end_terminal(
+        self,
+        sid: str,
+        final: bool,
+        status: str,
+        reason: str,
+        subagent_id: Optional[str],
+        how: str,
+    ) -> None:
+        """Report a terminal end, then acknowledge the cancels waiting for it. The gateway
+        applies a cancel only once the session is terminal in the control plane: while the
+        report fails transiently it is retried every heartbeat and the cancels wait."""
+        if self._end(sid, final, status, reason):
+            self._observe_terminal(sid, subagent_id, how)
+            return
+        with self._lock:
+            self._pending_ends[sid] = _PendingEnd(final, status, reason, subagent_id, how)
+            while len(self._pending_ends) > _MAX_AUTH:
+                self._pending_ends.popitem(last=False)
+
+    def _retry_ends(self) -> None:
+        with self._lock:
+            pending = list(self._pending_ends.items())
+        for sid, end in pending:
+            end.attempts += 1
+            done = self._end(sid, end.final, end.status, end.reason)
+            if not done and end.attempts < _MAX_REPORT_RETRIES:
+                continue
+            with self._lock:
+                if self._pending_ends.get(sid) is not end:
+                    continue  # replaced by a later end of the same session
+                del self._pending_ends[sid]
+            # Reported, refused for good or out of attempts: the cancels are acknowledged
+            # (the gateway checks the session's state itself before applying them).
+            self._observe_terminal(sid, end.subagent_id, end.how)
 
     def on_session_end(self, **kwargs: object) -> None:
         """Per TURN end (not final). ``interrupted`` applies a pending cancel.
@@ -1513,9 +1566,9 @@ class HermesAdapter:
                 # The interrupt is the cancel Agenomic asked for: report the session as
                 # cancelled, a terminal state the gateway records before applying the command.
                 status = "cancelled"
-            self._end(
-                sid, False, status, _str(kwargs.get("turn_exit_reason") or kwargs.get("reason"))
-            )
+            reason = _str(kwargs.get("turn_exit_reason") or kwargs.get("reason"))
+            if not interrupted:
+                self._end(sid, False, status, reason)
             self._emit(
                 "session.turn_ended",
                 sid,
@@ -1525,8 +1578,13 @@ class HermesAdapter:
             )
             if interrupted:
                 session = self._sessions.get(sid)
-                self._observe_terminal(
-                    sid, session.subagent_id if session else None, "on_session_end interrupted"
+                self._end_terminal(
+                    sid,
+                    False,
+                    status,
+                    reason,
+                    session.subagent_id if session else None,
+                    "on_session_end interrupted",
                 )
         except Exception as exc:
             logger.debug("on_session_end failed: %s", type(exc).__name__)
@@ -1554,12 +1612,11 @@ class HermesAdapter:
             # A pending cancel (of the session or of its subagent) ends here: report it as
             # cancelled, the terminal state the gateway checks before applying the command.
             status = "cancelled" if self._cancel_pending(sid) else "completed"
-            self._end(sid, True, status, reason)
             with self._lock:
                 if session is not None:
                     session.active = False
             self._forget_unadmitted(sid)
-            self._observe_terminal(sid, subagent_id, "on_session_finalize")
+            self._end_terminal(sid, True, status, reason, subagent_id, "on_session_finalize")
         except Exception as exc:
             logger.debug("on_session_finalize failed: %s", type(exc).__name__)
 
@@ -1641,13 +1698,14 @@ class HermesAdapter:
                 extra={"child_session_id": child, "child_subagent_id": subagent_id},
             )
             if child:
-                self._end(child, True, status, "subagent_stop")
                 with self._lock:
                     session = self._sessions.get(child)
                     if session is not None:
                         session.active = False
                 self._forget_unadmitted(child)
-                self._observe_terminal(child, subagent_id, "subagent_stop")
+                self._end_terminal(
+                    child, True, status, "subagent_stop", subagent_id, "subagent_stop"
+                )
         except Exception as exc:
             logger.debug("subagent_stop failed: %s", type(exc).__name__)
 
@@ -3461,7 +3519,8 @@ class HermesAdapter:
                     "attempts": item.attempts,
                 },
             )
-            if exc.code == "permit_invalid" or exc.status in (400, 403, 404, 409, 422):
+            if exc.code == "permit_invalid" or not exc.retryable:
+                # Permanent (any 4xx but 408, 425, 429): resending can only fail the same way.
                 return False
             if item.attempts < _MAX_REPORT_RETRIES:
                 evicted: Optional[_ReportRetry] = None
