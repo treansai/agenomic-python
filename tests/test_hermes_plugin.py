@@ -2568,6 +2568,41 @@ def test_enforce_applied_after_the_stale_check_stops_a_shadow_admission(
     assert adapter._auth[("s1", "write_file", "call_1")].state == "done"
 
 
+@pytest.mark.parametrize("command", ["pause", "quarantine", "revoke", "cancel_session"])
+def test_local_command_applied_after_the_first_check_stops_admission(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    assert adapter.pre_tool_call(args=args, **kw) is None  # cached enforce permit
+    real_retire = adapter._retire_stale
+
+    def command_right_after_the_check(auth: Any) -> bool:
+        retired = real_retire(auth)
+        if command == "cancel_session":
+            cmd = {"id": "k1", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+        else:
+            cmd = {"id": "k1", "kind": command, "target_kind": "instance"}
+        adapter.handle_command({**cmd, "status": "requested"})  # lands before admission
+        return retired
+
+    monkeypatch.setattr(adapter, "_retire_stale", command_right_after_the_check)
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, "never executed once the local command applied"
+    message = json.loads(str(out))["error"]
+    assert "not executed" in message
+    assert adapter._auth[("s1", "read_file", "call_1")].state == "done"
+    adapter.exporter.flush(3.0)
+    recorded = _local_decisions(server, message)
+    assert len(recorded) == 1
+    reason = "cancel_pending" if command == "cancel_session" else "instance_stopped"
+    assert recorded[0]["extra"]["reason_codes"] == [reason]
+
+
 def test_blocking_state_applied_after_the_stale_check_stops_admission(
     server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

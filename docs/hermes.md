@@ -152,7 +152,10 @@ local `pause`, `quarantine` or `revoke`, with reason code `instance_stopped`.
 Admission at the execution gate is atomic with server state updates: an
 observe or shadow decision is never executed once enforce (or a blocking
 state) has been applied, even when that answer lands after the gate's stale
-check; the call is blocked and is decided again on retry.
+check; the call is blocked and is decided again on retry. A local `pause`,
+`quarantine`, `revoke` or `cancel` is written under the same lock and checked
+again at admission, so one applied while the authorization was in flight
+still stops the call.
 
 ## How a tool call is controlled
 

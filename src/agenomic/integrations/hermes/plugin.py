@@ -1052,16 +1052,19 @@ class HermesAdapter:
         if _str(command.get("status")) in ("requested", ""):
             self._ack(command_id, "received", {"executor": "plugin"})
         if target_kind == "instance" and kind in ("pause", "revoke"):
-            self._local_status = "paused" if kind == "pause" else "revoked"
+            with self._lock:  # atomic with the final admission of a tool call
+                self._local_status = "paused" if kind == "pause" else "revoked"
             self._write_status()
             self._ack(command_id, "applied", {"local_state": self._local_status})
         elif target_kind == "instance" and kind == "resume":
-            self._local_status = None
+            with self._lock:
+                self._local_status = None
             self._write_status()
             self._ack(command_id, "applied", {"local_state": "active"})
         elif target_kind == "instance" and kind == "quarantine":
             # Quarantine is a process stop by the supervisor; the plugin only blocks locally.
-            self._local_status = "quarantined"
+            with self._lock:
+                self._local_status = "quarantined"
             self._write_status()
         elif kind == "cancel" and target_kind == "subagent":
             self._cancel_subagent(command_id, target)
@@ -2568,16 +2571,39 @@ class HermesAdapter:
         session or of its subagent, blocks in every mode, an authorization cached by the
         other gate included (the command is asynchronous: a tool call racing with it must
         not run). The block is recorded as a local ``tool.call.decision``."""
+        blocker = self._local_blocker(sid)
+        if blocker is None:
+            return None
+        self._emit_local_block(sid, tool, tool_call_id, args, blocker)
+        return blocker[0]
+
+    def _local_blocker(self, sid: str) -> Optional[tuple[str, str]]:
+        """``(message, reason code)`` of a local pause, quarantine or revoke, or of a pending
+        cancel of this session or of its subagent; ``None`` when nothing blocks. Both are
+        written under ``_lock``: a caller holding it sees a consistent answer."""
         status = self._local_status
         if status in _BLOCKING_STATUS:
-            message = f"Agenomic: this instance is {status}; the action was not executed."
-            reason = INSTANCE_STOPPED_REASON
-        else:
-            kind = self._cancel_kind(sid)
-            if kind is None:
-                return None
-            message = f"Agenomic cancelled this {kind}; the action was not executed."
-            reason = CANCEL_PENDING_REASON
+            return (
+                f"Agenomic: this instance is {status}; the action was not executed.",
+                INSTANCE_STOPPED_REASON,
+            )
+        kind = self._cancel_kind(sid)
+        if kind is None:
+            return None
+        return (
+            f"Agenomic cancelled this {kind}; the action was not executed.",
+            CANCEL_PENDING_REASON,
+        )
+
+    def _emit_local_block(
+        self,
+        sid: str,
+        tool: str,
+        tool_call_id: str,
+        args: Mapping[str, object],
+        blocker: tuple[str, str],
+    ) -> None:
+        message, reason = blocker
         self._emit_decision(
             sid,
             tool,
@@ -2591,7 +2617,6 @@ class HermesAdapter:
                 "reason_codes": [reason],
             },
         )
-        return message
 
     def pre_tool_call(self, **kwargs: object) -> Optional[dict[str, str]]:
         """Authorization gate. ``None`` lets Hermes proceed; a block directive vetoes the call.
@@ -2794,6 +2819,7 @@ class HermesAdapter:
             if blocked is not None:
                 return _ExecutionPlan(False, error=blocked["message"], meta=meta)
         blocked_by: Optional[str] = None
+        local_block: Optional[tuple[str, str]] = None
         # Admission is atomic with server state updates (lock order: _lock, then
         # _state_lock; _set_state never takes _lock): a blocking state applied after the
         # earlier checks is seen here, before the call is marked executing.
@@ -2803,7 +2829,12 @@ class HermesAdapter:
                 if auth.effective_mode == "shadow":
                     return _ExecutionPlan(True, meta=meta)
                 return _ExecutionPlan(False, error=NO_AUTH_MESSAGE, meta=meta)
-            if self._effective_state in _ENFORCE_LIKE - {"enforce"}:
+            # A local pause, quarantine, revoke or cancel applied after the first check
+            # (while the authorization was in flight) is seen here: written under _lock.
+            local_block = self._local_blocker(sid)
+            if local_block is not None:
+                auth.state = "done"
+            elif self._effective_state in _ENFORCE_LIKE - {"enforce"}:
                 blocked_by = self._effective_state
                 auth.state = "done"
             elif auth.effective_mode != "enforce" and self.local_mode() == "enforce":
@@ -2812,6 +2843,10 @@ class HermesAdapter:
                 auth.state = "done"
             else:
                 auth.state = "executing"
+        if local_block is not None:
+            self._drop_delegation(auth)
+            self._emit_local_block(sid, tool, tool_call_id, args, local_block)
+            return _ExecutionPlan(False, error=local_block[0], meta=meta)
         if blocked_by == "enforce":
             self._drop_delegation(auth)
             return _ExecutionPlan(
