@@ -947,3 +947,9 @@ def test_fine_grained_github_tokens_are_masked() -> None:
         + "11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRS"
     )
     assert token not in mask_text(f"use {token} here")
+
+
+def test_event_type_carrying_a_credential_is_masked() -> None:
+    secret = "agmhr_" + "s3cretvalue123456"
+    event = EventBuilder().build(f"custom.{secret}")
+    assert "s3cretvalue123456" not in json.dumps(event)

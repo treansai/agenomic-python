@@ -3139,3 +3139,90 @@ def test_full_report_retry_queue_reports_the_evicted_action(
     dropped = [e for e in server.events if e["type"] == "action.report_dropped"]
     assert [e["action_id"] for e in dropped] == ["act-0"]
     assert dropped[0]["extra"]["external_state"] == "unknown"
+
+
+def test_reload_with_a_non_utf8_config_shuts_the_previous_adapter_down(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hh"))
+    monkeypatch.delenv("AGENOMIC_HERMES_CONFIG", raising=False)
+    monkeypatch.setenv("AGENOMIC_HERMES_RUNTIME_TOKEN", "agmhr_entry")
+    plugin_mod.register(FakeCtx({"endpoint": server.url}))
+    previous = plugin_mod.current_adapter()
+    assert previous is not None
+    bad = tmp_path / "adapter.yaml"
+    bad.write_bytes(b"endpoint: \xff\xfe\n")
+    monkeypatch.setenv("AGENOMIC_HERMES_CONFIG", str(bad))
+    try:
+        with pytest.raises(ConfigError, match="UTF-8"):
+            plugin_mod.register(FakeCtx({"endpoint": server.url}))
+        assert previous._shut_down
+        assert plugin_mod.current_adapter() is None
+    finally:
+        previous.shutdown()
+
+
+def test_staged_skill_whose_target_carries_a_credential_is_never_proposed(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    name = "agmhr_" + "s3cretvalue123456"
+    record = {
+        "id": "ab12cd34",
+        "summary": "new skill",
+        "payload": {"action": "create", "name": name, "content": "---\nname: x\n---\nbody"},
+    }
+    fake = types.ModuleType("tools.write_approval")
+    fake.list_pending = lambda subsystem: [record] if subsystem == "skills" else []  # type: ignore[attr-defined]
+    fake.skill_pending_diff = lambda r: r["payload"]["content"]  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools.write_approval", fake)
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.post_tool_call(
+        tool_name="skill_manage",
+        args={"action": "create", "name": name},
+        result=json.dumps({"success": True, "staged": True, "pending_id": "ab12cd34"}),
+        session_id="s1",
+        tool_call_id="call_s",
+        status="ok",
+    )
+    assert server.calls("/proposals") == []
+
+
+def test_concurrent_report_evictions_are_all_accounted_for(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+    from collections import deque
+
+    from agenomic.integrations.hermes.client import HermesApiError
+
+    adapter = make_adapter(server.url, tmp_path)
+
+    def gateway_down(sid: str, body: dict[str, Any]) -> Any:
+        raise HermesApiError("unavailable", "down", 503)
+
+    monkeypatch.setattr(adapter.client, "report", gateway_down)
+    racer: dict[str, threading.Thread] = {}
+
+    def item(n: int) -> Any:
+        return plugin_mod._ReportRetry("s1", {"logical_call_id": f"act-{n}", "tool": "t"})
+
+    class RacingDeque(deque):  # type: ignore[type-arg]
+        def popleft(self) -> Any:
+            out = super().popleft()
+            if "t" not in racer:
+                # Another tool thread fails its report while this one is evicting.
+                racer["t"] = threading.Thread(target=adapter._report, args=(item(2),))
+                racer["t"].start()
+                racer["t"].join(0.3)
+            return out
+
+    adapter._report_retries = RacingDeque([item(0)], maxlen=1)
+    adapter._report(item(1))
+    racer["t"].join(5.0)
+    adapter.exporter.flush(3.0)
+    dropped = [e["action_id"] for e in server.events if e["type"] == "action.report_dropped"]
+    kept = [i.body["logical_call_id"] for i in adapter._report_retries]
+    assert len(dropped) + len(kept) == 3, "every report is either queued or reported dropped"

@@ -258,6 +258,8 @@ def _load_file(path: Path) -> dict[str, Any]:
         text = path.read_text(encoding="utf-8")
     except OSError as e:
         raise ConfigError(f"{CONFIG_ENV} file {path} cannot be read: {e.strerror}") from e
+    except UnicodeDecodeError as e:
+        raise ConfigError(f"{CONFIG_ENV} file {path} is not valid UTF-8") from e
     if path.suffix.lower() == ".json":
         try:
             data = json.loads(text)

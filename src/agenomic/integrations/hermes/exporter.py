@@ -398,7 +398,7 @@ class EventBuilder:
         event: dict[str, Any] = {
             "schema_version": EVENT_SCHEMA,
             "event_id": ulid.new().str,
-            "type": event_type,
+            "type": mask_text(event_type),
             "seq": seq,
             "occurred_at": now_iso(),
         }

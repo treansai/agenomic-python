@@ -528,6 +528,7 @@ class HermesAdapter:
         # Which gate recorded a call's local checks in observe (same pattern).
         self._observed_local: OrderedDict[tuple[str, str, str], str] = OrderedDict()
         self._report_retries: deque[_ReportRetry] = deque(maxlen=1000)
+        self._report_lock = threading.Lock()
         self._commands_seen: set[str] = set()
         # Acknowledgements that failed in transport; retried on every tick until accepted.
         self._ack_retries: deque[tuple[str, str, dict[str, Any]]] = deque(maxlen=500)
@@ -3236,12 +3237,16 @@ class HermesAdapter:
             if exc.code == "permit_invalid" or exc.status in (400, 403, 404, 409, 422):
                 return False
             if item.attempts < _MAX_REPORT_RETRIES:
-                retries = self._report_retries
-                if retries.maxlen is not None and len(retries) == retries.maxlen:
-                    # Full: the oldest report is evicted explicitly, never silently. The
-                    # event (spooled by the exporter) tells the gateway its result is unknown.
-                    self._report_dropped(retries.popleft())
-                retries.append(item)
+                evicted: Optional[_ReportRetry] = None
+                with self._report_lock:  # tool threads and the heartbeat share the queue
+                    retries = self._report_retries
+                    if retries.maxlen is not None and len(retries) == retries.maxlen:
+                        # Full: the oldest report is evicted explicitly, never silently. The
+                        # event (spooled by the exporter) tells the gateway it is unknown.
+                        evicted = retries.popleft()
+                    retries.append(item)
+                if evicted is not None:
+                    self._report_dropped(evicted)
             return False
 
     def _report_dropped(self, item: _ReportRetry) -> None:
@@ -3259,11 +3264,14 @@ class HermesAdapter:
         )
 
     def _retry_reports(self) -> None:
-        for _ in range(len(self._report_retries)):
-            try:
-                item = self._report_retries.popleft()
-            except IndexError:
-                return
+        with self._report_lock:
+            pending = len(self._report_retries)
+        for _ in range(pending):
+            with self._report_lock:
+                try:
+                    item = self._report_retries.popleft()
+                except IndexError:
+                    return
             self._report(item)
 
     def post_tool_call(self, **kwargs: object) -> None:
@@ -3374,7 +3382,8 @@ class HermesAdapter:
         content_key = "file_content" if action == "write_file" else "content"
         content = _str(payload.get(content_key))
         diff = _str(skill_pending_diff(record))
-        if mask_text(content) != content or mask_text(diff) != diff:
+        target = f"skills/{name}/{file_path}"
+        if mask_text(content) != content or mask_text(diff) != diff or mask_text(target) != target:
             # The proposal body leaves the process without the event redaction pipeline,
             # and a masked skill is not what was staged: a reviewer would approve content
             # Hermes never wrote. A credential-bearing proposal is not sent at all.
@@ -3389,7 +3398,7 @@ class HermesAdapter:
             return
         body = {
             "kind": "skill",
-            "target": mask_text(f"skills/{name}/{file_path}")[:500],
+            "target": target[:500],
             "content": content or diff,
             "diff": diff,
             "rationale": mask_text(
@@ -3506,6 +3515,10 @@ def register(ctx: object) -> None:
     except ConfigError as exc:
         failed("config_error")
         logger.error("Agenomic adapter not loaded: %s", exc)
+        raise
+    except Exception as exc:  # any unexpected configuration failure is a failed reload too
+        failed("config_error")
+        logger.error("Agenomic adapter not loaded: %s", type(exc).__name__)
         raise
     assert token is not None
     previous, _ADAPTER = _ADAPTER, None
