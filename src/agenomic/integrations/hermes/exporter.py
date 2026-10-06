@@ -127,10 +127,13 @@ _BEARER_SECRET = re.compile(r"(?i)(?<![\w-])(bearer[ \t]+)([A-Za-z0-9._~+/\-]+=*
 #: ``key=value`` / ``key: value`` pairs whose key names a credential (``api_key``,
 #: ``x-api-key``, ``password``, ``auth_token``, ``client_secret``, AWS ``Credential`` and
 #: ``Signature``...). The key must be followed by ``:`` or ``=``, so prose such as
-#: "the token budget" or ``max_tokens=512`` stays readable.
+#: "the token budget" or ``max_tokens=512`` stays readable. The short aliases of
+#: :data:`SECRET_KEY_ALIASES` (``auth=``, ``pwd:``...) only match as the whole key, so
+#: ``author=`` or ``bypass=`` stay readable.
 _KEY_VALUE_SECRET = re.compile(
     r"(?i)(?<![\w-])([\w-]*?(?:api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key"
-    r"|token|password|passwd|secret|credentials?|signature))"
+    r"|token|password|passwd|passphrase|secret|credentials?|signature)"
+    r"|(?:auth|pass|pwd|bearer|jwt|otp|totp|csrf|xsrf)(?![\w-]))"
     r"([\"']?[ \t]*[:=][ \t]*)"
     r"(\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s\"'&,;<>=][^\s\"'&,;<>]*)"
 )

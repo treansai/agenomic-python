@@ -283,6 +283,30 @@ def test_password_named_policy_keys_stay_masked() -> None:
     assert is_secret_key("password_policy")
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "auth=plainsecret",
+        "?user=bob&auth=plainsecret",
+        "pwd: plainsecret",
+        "PASS='plainsecret'",
+        '"jwt": "plainsecret"',
+        "otp=plainsecret",
+        "passphrase=plainsecret",
+    ],
+)
+def test_exact_credential_key_aliases_are_masked_in_text(text: str) -> None:
+    assert "plainsecret" not in mask_text(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["author=plainvalue", "bypass=plainvalue", "passed=plainvalue", "auth_method=plainvalue"],
+)
+def test_ordinary_keys_near_credential_aliases_are_kept_in_text(text: str) -> None:
+    assert mask_text(text) == text
+
+
 def test_free_form_fields_are_redacted_in_metadata_mode() -> None:
     event = EventBuilder("metadata").build(
         "api.request.failed",
