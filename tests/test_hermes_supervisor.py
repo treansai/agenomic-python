@@ -1954,3 +1954,17 @@ def test_a_bare_credential_name_is_scrubbed_even_when_allowlisted(name: str) -> 
     env = build_child_env({**PARENT_ENV, name: "s3cret"}, allow=[name])
     assert name not in env, "the credential scrub wins over --allow-env"
     assert not provider_secrets_absent({name: "s3cret"})
+
+
+def test_only_the_root_manifest_is_left_out_of_the_inventory(tmp_path: Path) -> None:
+    (tmp_path / sup._MANIFEST).write_text("{}")
+    (tmp_path / "demo").mkdir()
+    (tmp_path / "demo" / sup._MANIFEST).write_text("revoked skill content")
+    expected = {f"demo/{sup._MANIFEST}"}
+    assert sup._managed_files(tmp_path) == expected
+    if sys.platform != "win32":
+        fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            assert sup._managed_files_at(fd) == expected
+        finally:
+            os.close(fd)

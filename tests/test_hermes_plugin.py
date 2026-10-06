@@ -3997,3 +3997,50 @@ def test_a_delegation_reserved_under_observe_never_runs_under_an_enforce_permit(
     out = json.loads(runner.direct("delegate_task", {"tasks": [{"goal": "a"}]}))
     assert "mode changed" in out["error"]
     assert runner.executions == 0
+
+
+def test_the_heartbeat_retries_a_failed_admission_of_an_idle_session(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+    created: dict[str, Any] = {}
+
+    def committed_then_lost(body: dict[str, Any]) -> Any:
+        created.update(real_create(body))
+        raise HermesApiError("transport_error", "connection reset", 0)
+
+    monkeypatch.setattr(adapter.client, "create_session", committed_then_lost)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {
+            "id": "k11",
+            "kind": "cancel",
+            "target_kind": "session",
+            "target_ref": created["session"]["id"],
+        }
+    )
+    monkeypatch.setattr(adapter.client, "create_session", real_create)
+    adapter.tick()  # the session made no tool call since
+    assert adapter._sessions["s1"].admitted
+    assert "k11" in adapter._cancel_sessions.get("s1", []), "the cancel now waits on s1"
+
+
+def test_a_credential_shaped_model_id_is_masked_in_the_admission(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+    bodies: list[dict[str, Any]] = []
+
+    def capture(body: dict[str, Any]) -> Any:
+        bodies.append(dict(body))
+        return real_create(body)
+
+    monkeypatch.setattr(adapter.client, "create_session", capture)
+    secret = "sk-" + "abcdefghijklmnop"
+    adapter.on_session_start(session_id="s1", platform="cli", model=f"custom/{secret}")
+    assert bodies
+    assert secret not in json.dumps(bodies)

@@ -1125,6 +1125,7 @@ class HermesAdapter:
         except HermesApiError as exc:
             logger.warning("Agenomic heartbeat failed (%s)", exc.code)
         finally:
+            self._retry_admissions()
             self._retry_ends()
             self._retry_acks()
             self._retry_reports()
@@ -1413,7 +1414,8 @@ class HermesAdapter:
             "platform": session.platform or self._platform or "cli",
         }
         if session.model:
-            body["model"] = session.model
+            # Sent outside the event pipeline: a custom model id can carry a credential.
+            body["model"] = mask_text(session.model)
         if session.parent:
             body["parent_hermes_session_id"] = session.parent
         if session.subagent_id:
@@ -1442,6 +1444,22 @@ class HermesAdapter:
             return
         session.admitted = True
         self._set_state(resp.get("effective_state"), seq)
+
+    def _retry_admissions(self) -> None:
+        """Retry the admission of active sessions whose admission failed, independently of
+        their tool calls: an idle session would otherwise never publish its id, and a
+        cancel naming it would wait unresolved until the session ends."""
+        with self._lock:
+            pending = [
+                self._sessions[sid]
+                for sid in self._unadmitted
+                if sid in self._sessions and self._sessions[sid].active
+            ]
+        for session in pending:
+            try:
+                self._admit(session)
+            except Exception as exc:  # the heartbeat never fails on a retry
+                logger.debug("admission retry failed: %s", type(exc).__name__)
 
     def _finish_admission(
         self, session: _Session, resp: Optional[Mapping[str, Any]]

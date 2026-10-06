@@ -859,8 +859,8 @@ def _managed_files(root: Path) -> set[str]:
                 found.add(full.relative_to(root).as_posix())
         for name in files:
             full = Path(dirpath) / name
-            if name == _MANIFEST:
-                continue
+            if name == _MANIFEST and Path(dirpath) == root:
+                continue  # only the root manifest; a nested file of that name is a skill
             found.add(full.relative_to(root).as_posix())
     return found
 
@@ -873,8 +873,8 @@ def _managed_files_at(root_fd: int) -> set[str]:  # pragma: posix-only
     found: set[str] = set()
     for dirpath, dirs, files, dfd in os.fwalk(".", dir_fd=root_fd, onerror=_raise_walk_error):
         for name in [*dirs, *files]:
-            if name == _MANIFEST and name in files:
-                continue
+            if name == _MANIFEST and name in files and dirpath == ".":
+                continue  # only the root manifest; a nested file of that name is a skill
             # An entry that cannot be inspected (renamed or removed meanwhile, unreadable)
             # fails the inventory like an unreadable directory: its new name may be
             # missing from this snapshot, so the reconciliation would not be complete.
