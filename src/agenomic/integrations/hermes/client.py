@@ -26,6 +26,7 @@ from pydantic import JsonValue
 
 from agenomic._version import __version__
 from agenomic.exceptions import CloudError
+from agenomic.integrations.hermes.config import check_endpoint
 
 logger = logging.getLogger("agenomic.integrations.hermes.client")
 
@@ -92,7 +93,9 @@ class _ApiClient:
     ) -> None:
         if not token:
             raise ValueError("token is required")
-        self._base = endpoint.rstrip("/") + base_path
+        # The rule the adapter and the supervisor apply: credentials in the URL would make
+        # HTTPX send Basic authentication in place of the bearer token.
+        self._base = check_endpoint(endpoint) + base_path
         self._connect_s = connect_s
         self.decision_s = decision_s
         self.report_s = report_s

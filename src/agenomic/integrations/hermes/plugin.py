@@ -133,6 +133,7 @@ APPROVAL_IN_USE_MESSAGE = (
     "Agenomic approval {approval_id} authorizes a single execution and another call is "
     "using it; the action was not executed."
 )
+_SESSION_HEADER = "X-Agenomic-Hermes-Session"
 NO_AUTH_MESSAGE = "Agenomic: no valid authorization for this action"
 #: Reason recorded when a call's arguments have no canonical form (``agenomic.canon/v1``).
 NOT_CANONICAL_REASON = "arguments_not_canonical"
@@ -1812,9 +1813,20 @@ class HermesAdapter:
                 return None
             headers = request.get("extra_headers")
             new_headers = dict(headers) if isinstance(headers, dict) else {}
-            if new_headers.get("X-Agenomic-Hermes-Session") == sid:
+            # Header names are case-insensitive: any other spelling of the session header
+            # is replaced, never sent next to the authoritative one.
+            variants = [
+                k
+                for k in new_headers
+                if isinstance(k, str)
+                and k.lower() == _SESSION_HEADER.lower()
+                and k != _SESSION_HEADER
+            ]
+            if not variants and new_headers.get(_SESSION_HEADER) == sid:
                 return None
-            new_headers["X-Agenomic-Hermes-Session"] = sid
+            for key in variants:
+                del new_headers[key]
+            new_headers[_SESSION_HEADER] = sid
             new_request = dict(request)
             new_request["extra_headers"] = new_headers
             return {"request": new_request, "source": "agenomic", "reason": "session correlation"}

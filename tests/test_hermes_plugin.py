@@ -3475,3 +3475,25 @@ def test_observe_after_enforce_with_changed_arguments_reports_no_stale_permit(
     assert server.reports() == [], "no permit-backed report for arguments that did not run"
     adapter.exporter.flush(3.0)
     assert "authorization.argument_mismatch" in server.event_types()
+
+
+def test_llm_request_replaces_the_session_header_case_insensitively(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    request = {"model": "m", "extra_headers": {"x-agenomic-hermes-session": "other", "A": "b"}}
+    out = adapter.llm_request(request=request, session_id="s1", base_url=server.model_base_url)
+    assert out is not None
+    assert out["request"]["extra_headers"] == {"A": "b", "X-Agenomic-Hermes-Session": "s1"}  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["https://user:pw@a.example", "https://user@a.example", "ftp://a.example", "a.example"],
+)
+@pytest.mark.parametrize("cls", ["RuntimeClient", "SupervisorClient"])
+def test_api_clients_refuse_an_endpoint_the_adapter_would_refuse(endpoint: str, cls: str) -> None:
+    from agenomic.integrations.hermes import client as client_module
+
+    with pytest.raises(ValueError, match="endpoint"):
+        getattr(client_module, cls)(endpoint, "agmhr_x")
