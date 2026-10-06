@@ -939,3 +939,11 @@ def test_events_rejected_by_the_gateway_are_dropped_not_delivered() -> None:
     assert exporter.delivered == 2
     assert exporter.stats()["dropped"] == 1
     exporter.close()
+
+
+def test_fine_grained_github_tokens_are_masked() -> None:
+    token = (
+        "github_pat_"
+        + "11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRS"
+    )
+    assert token not in mask_text(f"use {token} here")

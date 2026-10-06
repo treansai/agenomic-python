@@ -1836,3 +1836,15 @@ def test_skill_content_that_is_not_utf8_is_rejected_not_raised(tmp_path: Path) -
     assert counts["rejected"] == 1
     assert counts["written"] == 1
     assert not (out / "bad" / "SKILL.md").exists()
+
+
+def test_manifest_alias_of_an_approved_skill_never_removes_it(tmp_path: Path) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A")], out)
+    manifest = out / ".agenomic_manifest.json"
+    manifest.write_text(json.dumps({"files": ["a/SKILL.md", "x/../a/SKILL.md"]}))
+    counts = sync_skills([_skill("a", "A")], out)
+    assert counts["removed"] == 0
+    assert counts["rejected"] == 0
+    assert (out / "a" / "SKILL.md").read_text() == "A"
+    assert json.loads(manifest.read_text()) == {"files": ["a/SKILL.md"]}

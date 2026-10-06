@@ -1388,7 +1388,8 @@ class HermesAdapter:
     def _end(self, sid: str, final: bool, status: str, reason: str = "") -> None:
         body: dict[str, Any] = {"final": final, "status": status}
         if reason:
-            body["reason"] = reason[:200]
+            # Sent to the gateway directly, not through the event pipeline: masked here.
+            body["reason"] = mask_text(reason)[:200]
         try:
             self.client.end_session(sid, body)
         except HermesApiError as exc:
@@ -3235,8 +3236,27 @@ class HermesAdapter:
             if exc.code == "permit_invalid" or exc.status in (400, 403, 404, 409, 422):
                 return False
             if item.attempts < _MAX_REPORT_RETRIES:
-                self._report_retries.append(item)
+                retries = self._report_retries
+                if retries.maxlen is not None and len(retries) == retries.maxlen:
+                    # Full: the oldest report is evicted explicitly, never silently. The
+                    # event (spooled by the exporter) tells the gateway its result is unknown.
+                    self._report_dropped(retries.popleft())
+                retries.append(item)
             return False
+
+    def _report_dropped(self, item: _ReportRetry) -> None:
+        logger.error("action report dropped after %d attempt(s): retry queue full", item.attempts)
+        self._emit(
+            "action.report_dropped",
+            item.session_id or None,
+            action_id=_str(item.body.get("logical_call_id")) or None,
+            attempt_id=item.body.get("attempt")
+            if isinstance(item.body.get("attempt"), int)
+            else None,
+            tool={"name": _str(item.body.get("tool"))},
+            reason="report retry queue full",
+            extra={"external_state": "unknown", "attempts": item.attempts},
+        )
 
     def _retry_reports(self) -> None:
         for _ in range(len(self._report_retries)):

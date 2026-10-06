@@ -1061,6 +1061,9 @@ def _sync_skills_at(
         stale_parts = _skill_parts(stale)
         if stale_parts is None or stale_parts == (_MANIFEST,):
             continue
+        if "/".join(stale_parts) in current:
+            # A non-canonical alias (``x/../a/SKILL.md``) of an approved file: never removed.
+            continue
         try:
             dir_fd = _open_dir_at(root_fd, stale_parts[:-1], create=False)
         except UnsafeSkillsPathError:
@@ -1164,6 +1167,9 @@ def _sync_skills_portable(
     unreconciled: set[str] = set()
     for stale in sorted(previous - current):
         lexical = Path(os.path.normpath(root / stale))
+        with contextlib.suppress(ValueError):
+            if lexical.relative_to(root).as_posix() in current:
+                continue  # a non-canonical alias of an approved file: never removed
         path = lexical.resolve()
         if path != lexical:
             logger.warning("stale skill %s kept: its path goes through a symbolic link", stale)

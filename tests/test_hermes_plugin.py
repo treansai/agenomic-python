@@ -3102,3 +3102,40 @@ def test_tool_execution_failure_fallback_rechecks_before_executing(
     out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
     assert runner.executions == 0, f"{applied} applied during the fallback stops the call"
     assert "error" in json.loads(str(out))
+
+
+def test_session_end_reason_is_masked_before_it_is_sent(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="s", platform="cli")
+    secret = "agmhr_" + "s3cretvalue123456"
+    adapter.on_session_finalize(session_id="s", reason=f"exit with token {secret}")
+    ends = server.calls("/end")
+    assert ends
+    assert "s3cretvalue123456" not in json.dumps([c.body for c in ends])
+
+
+def test_full_report_retry_queue_reports_the_evicted_action(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from collections import deque
+
+    from agenomic.integrations.hermes.client import HermesApiError
+
+    adapter = make_adapter(server.url, tmp_path)
+
+    def gateway_down(sid: str, body: dict[str, Any]) -> Any:
+        raise HermesApiError("unavailable", "down", 503)
+
+    monkeypatch.setattr(adapter.client, "report", gateway_down)
+    adapter._report_retries = deque(maxlen=2)
+    for n in range(3):
+        adapter._report(
+            plugin_mod._ReportRetry("s1", {"logical_call_id": f"act-{n}", "tool": "read_file"})
+        )
+    assert [i.body["logical_call_id"] for i in adapter._report_retries] == ["act-1", "act-2"]
+    adapter.exporter.flush(3.0)
+    dropped = [e for e in server.events if e["type"] == "action.report_dropped"]
+    assert [e["action_id"] for e in dropped] == ["act-0"]
+    assert dropped[0]["extra"]["external_state"] == "unknown"

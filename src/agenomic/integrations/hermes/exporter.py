@@ -106,6 +106,7 @@ _SECRET_PATTERNS = re.compile(
     r"(agmh[rs]_[A-Za-z0-9_\-]+"
     r"|sk-[A-Za-z0-9_\-]{8,}"
     r"|gh[pousr]_[A-Za-z0-9]{16,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
     r"|AKIA[0-9A-Z]{16}"
     r"|xox[abprs]-[A-Za-z0-9\-]+)"
 )
