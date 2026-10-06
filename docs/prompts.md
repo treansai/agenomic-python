@@ -877,9 +877,9 @@ Unknown codes stay a plain `ApiError`. Calls that need Agenomic Cloud raise
 `bindings.counterfactual`, `child_selectors`, `whoami`,
 `prompts.export_bundle` (use `client.prompts.local.export_bundle` with a
 signer), the import calls (`import_report`, `apply_import`,
-`plan_declarations`, `apply_declarations`, `register_runtime`) and
-`bindings.report_usage`. `client.prompts.local` raises it on a cloud
-client.
+`plan_declarations`, `apply_declarations`, `register_runtime`),
+`bindings.report_usage` and every `client.experiments` call.
+`client.prompts.local` raises it on a cloud client.
 
 ## Async
 
@@ -958,11 +958,21 @@ gives nodes their pinned prompts. See
 [LangGraph managed prompts](integrations.md#langgraph-managed-prompts) and
 the [LangGraph version matrix](langgraph-matrix.md).
 
+## Experiments
+
+`client.experiments` launches prompt experiments in Agenomic Cloud, and
+`ExperimentRunner` runs their trials on your own machines with the pinned
+prompts of each arm. `agenomic-py experiment snapshot` freezes the state of a
+production thread into a counterfactual case. See
+[Prompt experiments](experiments.md).
+
 ## Not in this release
 
 These parts of managed prompts are not in this SDK release yet:
 
-- experiments;
+- the experiment surfaces listed in
+  [Prompt experiments](experiments.md#not-in-this-release), such as
+  datasets, runner administration and evidence reads;
 - reading an agent's slot declarations and its candidate agent versions;
 - reading or listing stored import plans, and registering a prompt family
   in one call;

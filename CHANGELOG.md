@@ -55,6 +55,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channel. `scope_config`, `managed_prompt`, `AgentFactory` and the offline
   `LocalBindingStore` complete the adapter, and examples 12 to 16 run it
   offline.
+- Prompt experiments (`agenomic.experiments`, Agenomic Cloud only):
+  `client.experiments` with `create`, `update`, `preflight`, `launch`,
+  `cancel`, `get`, `results` and `events`, each with an `a*` twin. `launch`
+  cites the preflight `spec_digest`, and every frozen spec read is checked
+  against its digest (`experiment_spec_digest_mismatch`).
+- `ExperimentRunner` and `GraphTarget`, the runner that executes trials on
+  your machines with a runner token (`AGENOMIC_RUNNER_TOKEN`): each trial
+  runs on a fresh thread, checkpointer and store with the pinned prompts of
+  its arm, tools go through `ctx.wrap_tools`, secrets are resolved on the
+  runner only (`EnvSecretResolver`), the trial budgets are enforced, and the
+  redacted result, with its isolation record, is accepted once per lease.
+  Node experiments run one graph node (`GraphNodeEntryPoint`) or a function
+  (`CallableEntryPoint`); custom evaluators and model judges run on the
+  runner.
+- `agenomic-py experiment serve` and `agenomic-py experiment snapshot`;
+  `snapshot_case` freezes the state of a production thread into a
+  counterfactual `node_state` case. `local_assignment` and
+  `ExperimentRunner.run_trial` run a trial offline, and example 17 runs a
+  counterfactual offline.
+- `client.rmp.start(candidate_release_id=...)` links an RMP session to a
+  candidate release.
 
 ### Changed
 

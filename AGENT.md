@@ -347,6 +347,28 @@ from agenomic.integrations import (bind_langgraph, prompts_for,
                                    AgentFactory, LocalBindingStore)
 ```
 
+Prompt experiments (`docs/experiments.md`). `client.experiments` needs no
+extra; the runner names load LangGraph and LangChain on first use and need
+`agenomic[langgraph]`:
+
+```python
+from agenomic.experiments import (ExperimentRunner, GraphTarget,
+                                  GraphNodeEntryPoint, CallableEntryPoint,
+                                  RunnerEvaluator, TrialContext, TrialRun,
+                                  NamespacedStore, local_assignment,
+                                  snapshot_case, SnapshotRefusedError)
+from agenomic.experiments import (EnvSecretResolver, SecretResolver,
+                                  SecretValues, ExperimentCase,
+                                  TrialAssignment, RunnerView, classify,
+                                  spec_digest)
+from agenomic.experiments import (RunnerConfigurationError,
+                                  IsolationViolation, SecretResolutionError,
+                                  InfrastructureError, LeaseLost,
+                                  TrialBudgetExceeded, RecordedFixtureMiss,
+                                  RecordedFixtureAmbiguous)
+from agenomic.experiments.resources import ExperimentsResource
+```
+
 The top-level package intentionally exports only `Client` and
 `__version__`; everything else is imported from its subpackage.
 
@@ -413,8 +435,9 @@ The top-level package intentionally exports only `Client` and
 
 ## Environment variables
 
-In the library itself only `Client.from_env()` reads the environment; the
-CLI, the providers and the examples read the rest:
+In the library itself only `Client.from_env()`, `ExperimentRunner` (for a
+token or endpoint it was not given) and `EnvSecretResolver` read the
+environment; the CLI, the providers and the examples read the rest:
 
 | variable | consumer |
 | -------- | -------- |
@@ -423,6 +446,9 @@ CLI, the providers and the examples read the rest:
 | `AGENOMIC_PROMPT_CACHE_DIR` | `Client.from_env()` (disk prompt cache) |
 | `AGENOMIC_ENDPOINT`, `AGENOMIC_API_KEY` | `agenomic-py prompts` |
 | `AGENOMIC_BASE_URL`, `AGENOMIC_API_KEY` | `agenomic-py benchmark serve` |
+| `AGENOMIC_ENDPOINT`, `AGENOMIC_RUNNER_TOKEN` | `ExperimentRunner` |
+| `AGENOMIC_ENDPOINT`, `AGENOMIC_RUNNER_TOKEN` | `experiment serve` (CLI) |
+| the names in `allow` | `EnvSecretResolver` (trial secrets) |
 | `HUGGINGFACE_API_TOKEN`, else `HF_TOKEN` | `HuggingFaceConfig.from_env()` |
 | `HUGGINGFACE_ENDPOINT_URL` | `HuggingFaceConfig.from_env()` |
 | `HUGGINGFACE_ORG` | `HuggingFaceConfig.from_env()` |
@@ -450,4 +476,5 @@ or to `Client.from_env()` through the variables above.
 | CLI | `docs/cli.md` |
 | Errors & logging | `docs/errors.md` |
 | Managed prompts | `docs/prompts.md` |
+| Prompt experiments and the runner | `docs/experiments.md` |
 | Runnable code | `examples/01`–`09` (offline ones run with zero setup) |

@@ -67,7 +67,8 @@ Full index at [docs/](docs/README.md).
 - [Tracing](docs/tracing.md) · [Decorator](docs/decorator.md) · [Exporters](docs/exporters.md)
 - [Canonical v0.3 runs](docs/canonical.md) ·
   [Online tracking](docs/tracking.md) · [RMP](docs/rmp.md)
-- [Managed prompts](docs/prompts.md)
+- [Managed prompts](docs/prompts.md) ·
+  [Prompt experiments](docs/experiments.md)
 - [ATEP](docs/atep.md) · [Keys & signing](docs/keys-and-signing.md) · [Redaction](docs/redaction.md)
 - [Integrations](docs/integrations.md) · [Cloud upload](docs/cloud-upload.md)
 - [Workflow & system manifests](docs/orchestration.md)
@@ -227,6 +228,23 @@ needs `agenomic[yaml]`), and `client.prompts.register_runtime` plans the
 import of live LangChain templates. See [docs/prompts.md](docs/prompts.md)
 for references, rendering, bundles, the cache, outage behaviour and
 imports.
+
+Prompt experiments compare a baseline release of an agent with candidate
+releases on a frozen dataset. Agenomic Cloud plans the trials and computes
+paired statistics, while `ExperimentRunner` (`agenomic[langgraph]`) runs each
+trial on your own machines, in isolation, with your model credentials:
+
+```bash
+export AGENOMIC_ENDPOINT=https://agenomic.example
+export AGENOMIC_RUNNER_TOKEN=agr_...
+agenomic-py experiment serve --target support_agent.runner:runner
+agenomic-py experiment snapshot --graph support_agent.graph:graph \
+  --agent "$AGENT_ID" --thread customer-7 --checkpoint-id "$CHECKPOINT_ID"
+```
+
+`client.experiments` creates, preflights, launches and reads experiments, and
+`experiment snapshot` freezes a production thread into a counterfactual case.
+See [docs/experiments.md](docs/experiments.md).
 
 ## Examples
 

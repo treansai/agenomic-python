@@ -292,8 +292,9 @@ rule of the engineering rules above.
   (use `client.prompts.local.export_bundle` with a signer) raise
   `cloud_required`, and so does `client.prompts.local` on a cloud client.
 - `docs/prompts.md` documents only what this package ships, and its "Not in
-  this release" list names what is still missing; shorten that list as
-  experiments and the remaining registry reads land.
+  this release" list names what is still missing; shorten that list as the
+  remaining registry reads land. Experiments have their own page and list,
+  `docs/experiments.md`, which `docs/prompts.md` points to.
   Its Python blocks are meant to run in order: the local ones as written, the
   cloud ones against `FakePromptServer` (`tests/prompt_fakes.py`) with
   `transport=` added to the `Client`. No test executes them, so run them again
@@ -307,6 +308,23 @@ rule of the engineering rules above.
   and the YAML block as `prompts.yaml`. `ImportServer` does not complete the
   file-local fragment pin of a prompts file (`{ prompt_id }` without a
   version) as the registry does, so the run completes it before writing.
+- The Python blocks of `docs/experiments.md` also run in order, in one
+  module namespace registered in `sys.modules` (LangGraph resolves the
+  `State` annotations through it). The graph, offline trial, snapshot and
+  node trial blocks run as written. The launch block runs against
+  `FakeExperimentApi` (`tests/experiment_fakes.py`) with `transport=` added
+  to the `Client`, and with `tool_plan_hashes: {}` added to the fake's
+  preflight answer, which the registry always sends. The serving block runs
+  against `FakeRunnerServer` built over the engine and the two releases of
+  the offline block, with two queued trials, `transport=` added to the
+  runner, `AGENOMIC_RUNNER_TOKEN` and `AGENT_RUNTIME_DIGEST` set, and
+  `idle_timeout=1` because the fake answers an empty claim at once. The two
+  CLI commands of the page run through `agenomic.cli.__main__.main` on
+  modules registered in `sys.modules`. The trial result shown on the page is
+  trimmed from a real offline `run_trial`. No test executes these blocks
+  either, so run them again after an API change; the page documents the
+  shipped code where it departs from the design (the snapshot `--graph`
+  flag, the result members, the runner-side codes).
 - The Markdown files touched for managed prompts pass `markdownlint-cli` with
   its default rules (80 columns, tables and code blocks included) and contain
   no em dash. Their code samples carry no new comments. The umbrella leak
