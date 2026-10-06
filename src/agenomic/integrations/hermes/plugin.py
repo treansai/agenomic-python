@@ -531,6 +531,9 @@ class HermesAdapter:
         self._commands_seen: set[str] = set()
         # Acknowledgements that failed in transport; retried on every tick until accepted.
         self._ack_retries: deque[tuple[str, str, dict[str, Any]]] = deque(maxlen=500)
+        # Serializes every read-modify-write of the ack retry queue (heartbeat thread and
+        # terminal callbacks): a queued terminal ack is never lost to a concurrent rebuild.
+        self._ack_lock = threading.Lock()
         # Terminal results whose acknowledgement was dropped from the full retry queue.
         self._terminal_acks: OrderedDict[str, tuple[str, dict[str, Any]]] = OrderedDict()
         # Every cancel command waiting for the end of a session or subagent, oldest first:
@@ -1042,6 +1045,10 @@ class HermesAdapter:
                     self.discover_tools()
                 except HermesApiError as exc:
                     logger.warning("tool discovery failed (%s)", exc.code)
+                except Exception as exc:
+                    # A third party registry failing must never stop the heartbeat: queued
+                    # pause and cancel commands are fetched below. Retried next tick.
+                    logger.warning("tool discovery failed: %s", type(exc).__name__)
             with self._lock:
                 active: list[JsonValue] = [
                     s.hermes_session_id for s in self._sessions.values() if s.active
@@ -1069,12 +1076,13 @@ class HermesAdapter:
         except HermesApiError as exc:
             logger.warning("command %s ack %s failed (%s)", command_id, status, exc.code)
             if exc.retryable:
-                _queue_ack_retry(
-                    self._ack_retries,
-                    self._commands_seen,
-                    self._terminal_acks,
-                    (command_id, status, detail),
-                )
+                with self._ack_lock:
+                    _queue_ack_retry(
+                        self._ack_retries,
+                        self._commands_seen,
+                        self._terminal_acks,
+                        (command_id, status, detail),
+                    )
             return False
         self._drop_superseded_acks(command_id, status)
         self._emit("command." + status, None, extra={"command_id": command_id, "detail": detail})
@@ -1082,21 +1090,25 @@ class HermesAdapter:
 
     def _drop_superseded_acks(self, command_id: str, status: str) -> None:
         rank = _ACK_RANK.get(status, 0)
-        kept = [
-            item
-            for item in self._ack_retries
-            if item[0] != command_id or _ACK_RANK.get(item[1], 0) > rank
-        ]
-        if len(kept) != len(self._ack_retries):
-            self._ack_retries.clear()
-            self._ack_retries.extend(kept)
+        with self._ack_lock:
+            kept = [
+                item
+                for item in self._ack_retries
+                if item[0] != command_id or _ACK_RANK.get(item[1], 0) > rank
+            ]
+            if len(kept) != len(self._ack_retries):
+                self._ack_retries.clear()
+                self._ack_retries.extend(kept)
 
     def _retry_acks(self) -> None:
-        for _ in range(len(self._ack_retries)):
-            try:
-                command_id, status, detail = self._ack_retries.popleft()
-            except IndexError:
-                return
+        with self._ack_lock:
+            pending = len(self._ack_retries)
+        for _ in range(pending):
+            with self._ack_lock:
+                try:
+                    command_id, status, detail = self._ack_retries.popleft()
+                except IndexError:
+                    return
             self._ack(command_id, status, detail)
 
     def handle_command(self, command: Mapping[str, JsonValue]) -> None:

@@ -135,7 +135,8 @@ The server computes the effective state on every admission and returns it in
 The first `/hello` and the tool discovery happen when the plugin starts; a
 failure there (gateway unreachable, an exception from a third party registry)
 is never fatal: the heartbeat thread still starts and retries both on every
-tick, so the guard status and command polling stay alive.
+tick, and a discovery failure never skips that tick's heartbeat, so the guard
+status and command polling stay alive.
 
 | Effective state | Adapter behaviour |
 | --- | --- |

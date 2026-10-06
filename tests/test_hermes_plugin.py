@@ -2883,3 +2883,53 @@ def test_compound_command_mentioning_the_guard_is_a_foreign_mutator(
     adapter.ctx._manager._hooks["pre_tool_call"] += [guard, wrapper]
     found = adapter.foreign_mutators()
     assert [f["callback"] for f in found] == [wrapper.__qualname__]
+
+
+def test_failing_tool_registry_never_stops_the_heartbeat(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+
+    def broken_registry() -> int:
+        raise RuntimeError("third-party registry failed")
+
+    monkeypatch.setattr(adapter, "discover_tools", broken_registry)
+    adapter._tools_sent = False
+    beats = len(server.calls("/heartbeat"))
+    adapter.tick()
+    adapter.tick()
+    assert len(server.calls("/heartbeat")) == beats + 2, "commands are still polled"
+
+
+def test_terminal_ack_queued_during_a_rebuild_is_never_lost(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+    from collections import deque
+
+    from agenomic.integrations.hermes.client import HermesApiError
+
+    adapter = make_adapter(server.url, tmp_path)
+
+    def gateway_down_for_c2(command_id: str, status: str, detail: dict[str, Any]) -> Any:
+        if command_id == "c2":
+            raise HermesApiError("unavailable", "down", 503)
+        return {}
+
+    monkeypatch.setattr(adapter.client, "ack_command", gateway_down_for_c2)
+    racer: dict[str, threading.Thread] = {}
+
+    class RacingDeque(deque):  # type: ignore[type-arg]
+        def clear(self) -> None:
+            if "t" not in racer:
+                # A terminal callback fails its ack while the heartbeat rebuilds the queue.
+                racer["t"] = threading.Thread(target=adapter._ack, args=("c2", "applied", {}))
+                racer["t"].start()
+                racer["t"].join(0.3)
+            super().clear()
+
+    adapter._ack_retries = RacingDeque([("c1", "received", {})], maxlen=500)
+    adapter._drop_superseded_acks("c1", "applied")
+    racer["t"].join(5.0)
+    assert [(c, s) for c, s, _ in adapter._ack_retries] == [("c2", "applied")]
