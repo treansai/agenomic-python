@@ -2731,3 +2731,24 @@ def test_inner_gate_rechecks_observe_before_letting_the_call_run(
     out = runner.agent_loop("read_file", {"path": "/tmp/a"})
     assert runner.executions == 0, f"{applied} applied inside the middleware stops the call"
     assert "error" in json.loads(out)
+
+
+@pytest.mark.parametrize("state", ["enforce_blocked", "paused"])
+def test_inner_gate_rejects_a_cached_permit_once_a_blocking_state_applies(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    runner = Runner(adapter)
+    real_emit = adapter._emit
+
+    def heartbeat_inside_the_middleware(event_type: str, *a: Any, **k: Any) -> Any:
+        if event_type == "tool.call.requested":  # inner pre_tool_call, after admission
+            adapter._set_state(state, adapter._state_request())
+        return real_emit(event_type, *a, **k)
+
+    monkeypatch.setattr(adapter, "_emit", heartbeat_inside_the_middleware)
+    out = runner.agent_loop("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 0, f"{state} applied inside the middleware stops the call"
+    assert state in json.loads(out)["error"]

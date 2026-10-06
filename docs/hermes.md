@@ -154,7 +154,8 @@ observe or shadow decision is never executed once enforce (or a blocking
 state) has been applied, even when that answer lands after the gate's stale
 check; the call is blocked and is decided again on retry. The observe path at
 the execution gate, and `pre_tool_call` in every mode, make the same recheck
-before they let a call through. A local `pause`,
+(local commands and the raw state, `enforce_blocked` included) before they let
+a call through. A local `pause`,
 `quarantine`, `revoke` or `cancel` is written under the same lock and checked
 again at admission, so one applied while the authorization was in flight
 still stops the call.

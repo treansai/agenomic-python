@@ -2665,9 +2665,16 @@ class HermesAdapter:
             with self._lock, self._state_lock:
                 local_block = self._local_blocker(sid)
                 observe_now = self.local_mode() == "observe"
+                # local_mode() folds enforce_blocked into enforce: the raw state is read too,
+                # so a permit cached before a blocking heartbeat is never reused.
+                raw_state = self._effective_state
             if local_block is not None:
                 self._emit_local_block(sid, tool, tool_call_id, args, local_block)
                 return _block(local_block[0])
+            if raw_state in _ENFORCE_LIKE - {"enforce"}:
+                return _block(
+                    f"Agenomic: the instance is {raw_state}; the action was not executed."
+                )
             if observe_now:
                 return None
             with self._lock:
