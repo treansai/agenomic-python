@@ -53,6 +53,7 @@ from agenomic.integrations.hermes.config import (
     _PROVIDER_KEYS,
     _SECRET_NAME,
     DEFAULT_TOKEN_ENV,
+    RUNTIME_TOKEN_PREFIX,
     SUPERVISOR_TOKEN_ENV,
     runtime_token_env_problem,
 )
@@ -88,8 +89,6 @@ DEFAULT_ENV_ALLOWLIST = (
 )
 DEFAULT_FORBIDDEN_HOSTS = ("api.openai.com:443", "api.anthropic.com:443", "openrouter.ai:443")
 DOCKER_SOCKETS = ("/var/run/docker.sock", "/run/docker.sock")
-#: Prefix of every Agenomic runtime token (the credential the Hermes plugin presents).
-RUNTIME_TOKEN_PREFIX = "agmhr_"
 
 
 def runtime_token_problem(
@@ -430,14 +429,19 @@ def skills_dir_problem(path: Path) -> Optional[str]:
     """Why the supervisor must not write into ``path``, or ``None``.
 
     On POSIX the directory must not be a symbolic link and must belong to the
-    supervisor's effective uid; Windows has no such ownership check. A missing
-    directory has no problem (the supervisor creates it).
+    supervisor's effective uid, and its ancestors must pass :func:`_open_trusted_dir`;
+    Windows has no such checks. A missing directory has no problem (the supervisor
+    creates it).
 
     Example:
         >>> import tempfile
         >>> skills_dir_problem(Path(tempfile.mkdtemp())) is None
         True
     """
+    if sys.platform != "win32":
+        problem = _ancestors_problem(path)
+        if problem is not None:
+            return problem
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -553,31 +557,142 @@ def _skill_parts(rel: str) -> Optional[tuple[str, ...]]:
     return tuple(norm.split("/"))
 
 
+#: Symbolic links followed while opening the skills directory's ancestors (trusted ones only).
+_MAX_TRUSTED_LINKS = 40
+
+
+def _ancestor_problem(st: os.stat_result) -> Optional[str]:  # pragma: posix-only
+    """Why an ancestor directory with status ``st`` is not trusted, or ``None``."""
+    if sys.platform == "win32":
+        raise NotImplementedError("ownership checks are POSIX only")
+    if st.st_uid not in (os.geteuid(), 0):
+        return "belongs to another user"
+    if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
+        return "is writable by others without the sticky bit"
+    return None
+
+
+def _trusted_link(root_fd: int, name: str) -> Optional[str]:  # pragma: posix-only
+    """The target of the link ``name`` directly under ``/`` (open as ``root_fd``) when
+    root owns it and ``/`` (system layout links such as ``/var`` -> ``private/var`` on
+    macOS), else ``None``."""
+    if sys.platform == "win32":
+        raise NotImplementedError("directory descriptors are POSIX only")
+    try:
+        link = os.lstat(name, dir_fd=root_fd)
+    except OSError:
+        return None
+    parent = os.fstat(root_fd)
+    if (
+        not stat.S_ISLNK(link.st_mode)
+        or link.st_uid != 0
+        or parent.st_uid != 0
+        or parent.st_mode & 0o022
+    ):
+        return None
+    return os.readlink(name, dir_fd=root_fd)
+
+
+def _open_trusted_dir(path: Path, *, create: bool) -> Optional[int]:  # pragma: posix-only
+    """A descriptor of the absolute directory ``path``, opened from ``/`` one component at
+    a time with ``O_NOFOLLOW`` (POSIX); missing components are created (mode ``0755``)
+    when ``create`` is true, else ``None`` is returned.
+
+    Every directory on the way must belong to root or the supervisor's euid and, when
+    group or other may write it, carry the sticky bit (like ``/tmp``), so nobody else can
+    rename or replace a component. A symbolic link is followed only directly under
+    ``/``, owned by root, with ``/`` owned by root and writable by nobody else (system
+    layout links such as macOS ``/var`` and ``/tmp``); any other link, a ``..``
+    component, or a component that is not a directory raises
+    :class:`UnsafeSkillsPathError`.
+    """
+    if sys.platform == "win32":
+        raise NotImplementedError("directory descriptors are POSIX only")
+    if not path.is_absolute():
+        raise UnsafeSkillsPathError("is not an absolute path")
+    pending = list(path.parts[1:])
+    links = 0
+    at_root = True
+    fd = os.open("/", _DIR_FLAGS)
+    try:
+        while pending:
+            part = pending.pop(0)
+            if part in ("", "."):
+                continue
+            if part == "..":
+                raise UnsafeSkillsPathError("has a '..' component")
+            try:
+                child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    os.close(fd)
+                    return None
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, 0o755, dir_fd=fd)
+                pending.insert(0, part)
+                continue
+            except OSError as e:
+                if e.errno not in _LINK_ERRNOS:
+                    raise
+                target = _trusted_link(fd, part) if at_root else None
+                links += 1
+                if target is None or links > _MAX_TRUSTED_LINKS:
+                    raise UnsafeSkillsPathError(
+                        f"has an ancestor {part} that is a symbolic link or not a directory"
+                    ) from e
+                if target.startswith("/"):
+                    os.close(fd)
+                    fd = os.open("/", _DIR_FLAGS)
+                    at_root = True
+                pending[:0] = [p for p in target.split("/") if p]
+                continue
+            os.close(fd)
+            fd = child
+            at_root = False
+            problem = _ancestor_problem(os.fstat(fd))
+            if problem is not None:
+                raise UnsafeSkillsPathError(f"has an ancestor {part} that {problem}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _ancestors_problem(skills_dir: Path) -> Optional[str]:  # pragma: posix-only
+    """Why the ancestors of ``skills_dir`` are not trusted (:func:`_open_trusted_dir`,
+    nothing created), or ``None``."""
+    if ".." in skills_dir.parts:
+        return "has a '..' component"
+    try:
+        fd = _open_trusted_dir(Path(os.path.abspath(skills_dir)).parent, create=False)
+    except UnsafeSkillsPathError as e:
+        return str(e)
+    if fd is not None:
+        os.close(fd)
+    return None
+
+
 def _open_skills_root(skills_dir: Path) -> int:  # pragma: posix-only
     """A descriptor of ``skills_dir`` created or opened without following a link (POSIX).
 
-    The parent directory is opened with ``O_NOFOLLOW`` and must belong to the
-    supervisor's euid or root; the directory itself is created relative to it, then
-    opened with ``O_NOFOLLOW`` and must belong to the supervisor. A link or a directory
-    of another user swapped in between the checks is refused
+    The parent directory is opened by :func:`_open_trusted_dir` (from ``/``, component
+    by component, no untrusted link, every ancestor owned by the supervisor's euid or
+    root and not writable by others unless sticky); the directory itself is created
+    relative to it, then opened with ``O_NOFOLLOW`` and must belong to the supervisor.
+    A link or a directory of another user swapped in between the checks is refused
     (:class:`UnsafeSkillsPathError`), never followed.
     """
     if sys.platform == "win32":
         raise NotImplementedError("directory descriptors are POSIX only")
+    if ".." in skills_dir.parts:
+        raise UnsafeSkillsPathError("has a '..' component")
     path = Path(os.path.abspath(skills_dir))
     name = path.name
     if not name:
         raise UnsafeSkillsPathError("is a filesystem root")
-    path.parent.mkdir(parents=True, exist_ok=True)
+    parent_fd = _open_trusted_dir(path.parent, create=True)
+    assert parent_fd is not None
     try:
-        parent_fd = os.open(path.parent, _DIR_FLAGS)
-    except OSError as e:
-        if e.errno in _LINK_ERRNOS:
-            raise UnsafeSkillsPathError("has a parent that is a symbolic link") from e
-        raise
-    try:
-        if os.fstat(parent_fd).st_uid not in (os.geteuid(), 0):
-            raise UnsafeSkillsPathError("has a parent that belongs to another user")
         with contextlib.suppress(FileExistsError):
             os.mkdir(name, 0o755, dir_fd=parent_fd)
         try:
@@ -950,6 +1065,53 @@ def _sync_skills_portable(
     return counts
 
 
+_GROUP_KILL_WAIT_S = 5.0
+
+
+def _group_alive(pgid: int) -> bool:  # pragma: posix-only
+    """Whether process group ``pgid`` still has a member; zombies we may reap are reaped."""
+    if sys.platform == "win32":
+        raise NotImplementedError("process groups are POSIX only")
+    # A supervisor that is the subreaper (PID 1 in a container) inherits orphaned members:
+    # their zombies would keep the group alive until reaped.
+    with contextlib.suppress(ChildProcessError, OSError):
+        while os.waitpid(-pgid, os.WNOHANG)[0] != 0:
+            pass
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_group(pgid: int, deadline: float) -> bool:  # pragma: posix-only
+    while _group_alive(pgid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def _stop_group(pgid: int, deadline: float) -> bool:  # pragma: posix-only
+    """Stop every remaining member of ``pgid`` once its leader is reaped; true when empty.
+
+    Members get SIGTERM and the rest of the grace period (``deadline``), then SIGKILL.
+    """
+    if sys.platform == "win32":
+        raise NotImplementedError("process groups are POSIX only")
+    if not _group_alive(pgid):
+        return True
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, signal.SIGTERM)
+    if _wait_group(pgid, deadline):
+        return True
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(pgid, _KILL_SIGNAL)
+    return _wait_group(pgid, time.monotonic() + _GROUP_KILL_WAIT_S)
+
+
 class Supervisor:
     """Runs one Hermes child under Agenomic control.
 
@@ -977,6 +1139,9 @@ class Supervisor:
         # The attested home and the home Hermes loads must be the same directory.
         self.child_env["HERMES_HOME"] = str(settings.hermes_home)
         self.proc: Optional[subprocess.Popen[bytes]] = None
+        # The child's process group (POSIX: ``start_new_session`` makes it the leader's pid),
+        # tracked apart from the leader so descendants outliving it are still stopped.
+        self._pgid: Optional[int] = None
         self.state = "stopped"
         self.exit_code: Optional[int] = None
         self.restarts = 0
@@ -1022,6 +1187,7 @@ class Supervisor:
             self._launch_failed = True
             return False
         self._launch_failed = False
+        self._pgid = None if sys.platform == "win32" else self.proc.pid
         self.state = "running"
         self.exit_code = None
         logger.info("Hermes started (pid %d)", self.proc.pid)
@@ -1066,6 +1232,10 @@ class Supervisor:
     def stop_child(self) -> Optional[int]:
         """SIGTERM the child's process group, SIGKILL after ``grace_s``. Returns the exit code.
 
+        On POSIX the whole process group is stopped, not only the leader: members that
+        outlive the leader are sent SIGKILL. ``state`` is ``stopped`` only once the group
+        is empty, otherwise ``stop_failed``.
+
         Example:
             >>> sup = _demo_supervisor(["sleep", "5"])
             >>> sup.start_child()
@@ -1077,6 +1247,7 @@ class Supervisor:
         if proc is None:
             self.state = "stopped"
             return self.exit_code
+        deadline = time.monotonic() + self.settings.grace_s
         if proc.poll() is None:
             self._signal(proc, signal.SIGTERM)
             try:
@@ -1085,17 +1256,20 @@ class Supervisor:
                 self._signal(proc, _KILL_SIGNAL)
                 proc.wait()
         self.exit_code = proc.returncode
+        if self._pgid is not None and not _stop_group(self._pgid, deadline):
+            logger.error("Hermes process group %d did not stop", self._pgid)
+            self.state = "stop_failed"
+            return self.exit_code
         self.state = "stopped"
         return self.exit_code
 
-    @staticmethod
-    def _signal(proc: subprocess.Popen[bytes], sig: signal.Signals) -> None:
+    def _signal(self, proc: subprocess.Popen[bytes], sig: signal.Signals) -> None:
         if sys.platform == "win32":
             with contextlib.suppress(ProcessLookupError):
                 proc.send_signal(sig)
             return
         try:
-            os.killpg(os.getpgid(proc.pid), sig)
+            os.killpg(self._pgid if self._pgid is not None else os.getpgid(proc.pid), sig)
         except (ProcessLookupError, PermissionError):
             with contextlib.suppress(ProcessLookupError):
                 proc.send_signal(sig)
@@ -1221,6 +1395,11 @@ class Supervisor:
         if kind in ("quarantine", "revoke"):
             self.refuse_restart = True
             code = self.stop_child()
+            if self.state != "stopped":
+                # Code from the child's process group still runs: not applied. The command
+                # is executed again when the gateway delivers it again.
+                self._seen_commands.discard(command_id)
+                return
             self._ack(command_id, "applied", {"process_state": self.state, "exit_code": code})
         elif kind == "resume":
             self.refuse_restart = False
@@ -1313,6 +1492,8 @@ class Supervisor:
             failed = True
         finally:
             code = self.stop_child()
+            if self.state == "stop_failed":
+                failed = True
         try:
             # Report only: a command executed now (a ``resume`` would start Hermes again)
             # would act on a process nothing supervises once ``run`` returns.

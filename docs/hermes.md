@@ -114,7 +114,7 @@ file, that file (its keys win). Unknown keys are rejected.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `endpoint` | required | Agenomic base URL |
-| `runtime_token` | `${env:AGENOMIC_HERMES_RUNTIME_TOKEN}` | must be an `${env:VAR}` reference; a missing variable is a `ConfigError` naming the variable, never its value |
+| `runtime_token` | `${env:AGENOMIC_HERMES_RUNTIME_TOKEN}` | must be an `${env:VAR}` reference to a variable that is not the supervisor token, a provider key or another credential shaped name (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, ... unless `AGENOMIC_`); its value must be a runtime token (`agmhr_...`). A refused name, a missing variable or another value is a `ConfigError` naming the variable, never its value |
 | `mode_hint` | none | informational; the server decides the mode |
 | `timeouts` | `connect_s: 3`, `decision_s: 5`, `report_s: 10` | HTTP budgets |
 | `buffer` | `max_events: 10000`, `max_bytes: 16 MiB`, `flush_interval_s: 1`, `batch_size: 500`, `spool_path: none`, `spool_max_bytes: 64 MiB` | event exporter bounds and optional JSONL spool |
@@ -346,7 +346,13 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   supervisor's own network namespace and filesystem view, which is the
   child's when both run in the same container.
 - `quarantine` and `revoke`: SIGTERM to the child's process group, SIGKILL
-  after `--grace-s`, restarts refused, `applied` with the exit code. `resume`
+  after `--grace-s`, restarts refused, `applied` with the exit code. The
+  process group is tracked apart from the Hermes process: members that
+  outlive it (a descendant ignoring SIGTERM) get SIGKILL once the grace
+  period ends, and the command is `applied` only when the group is empty.
+  Otherwise the process state is `stop_failed`, the command is not
+  acknowledged as applied and is executed again when the gateway delivers it
+  again; a supervisor leaving with such a group exits 1. `resume`
   allows restarts again and starts the child.
 - Approved skills (`GET /skills/approved`) are written into `--skills-dir`
   after their digest (`sha256:` or `blake3:`) is checked; targets escaping the
@@ -357,16 +363,26 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   so an interrupted sync never forgets a file. The temporary file has an
   unpredictable name and is created exclusively (`O_EXCL`, `O_NOFOLLOW`, mode
   `0600` until complete). On POSIX the skills directory is created and opened
-  once without following a link: its parent is opened with `O_NOFOLLOW` and
-  must belong to the supervisor's euid or root, the directory is created
-  relative to that descriptor, then opened with `O_DIRECTORY|O_NOFOLLOW` and
-  must belong to the supervisor's euid. Everything else (subdirectories, each
+  once without following a link: its parent is opened from `/` one component
+  at a time (`O_DIRECTORY|O_NOFOLLOW`, each relative to the previous
+  descriptor; a relative `--skills-dir` is made absolute against the current
+  directory first, and a `..` component is refused). Every directory on the
+  way must belong to the supervisor's euid or root and, when group or other
+  may write it, carry the sticky bit (like `/tmp`), so nobody else can rename
+  or replace a component; missing components are created (mode `0755`). The
+  only links followed on the way are system layout links directly under `/`
+  that root owns, with `/` itself owned by root and writable by nobody else
+  (macOS `/var` and `/tmp`, merged `/usr` links). The directory is created
+  relative to the parent's descriptor, then opened with
+  `O_DIRECTORY|O_NOFOLLOW` and must belong to the supervisor's euid. Everything else (subdirectories, each
   opened or created with `O_NOFOLLOW` and owner checked, reads, atomic writes,
   removals, the manifest) is relative to that descriptor and never goes
   through a path resolved again, so a link the agent swaps in at any moment
   is never followed. Windows has no directory descriptors and keeps explicit
   link checks. Symbolic links are never followed: a skills directory that is
-  a link, has a parent that is a link, or belongs to another user is refused
+  a link, has an ancestor that is a link (other than the system layout links
+  above), an ancestor of another user or an ancestor writable by others
+  without the sticky bit, or belongs to another user is refused
   as a whole (logged as an error, nothing written, `skills_readonly` false),
   a skill whose path
   goes through a link (the file or a directory) is rejected, and a stale file

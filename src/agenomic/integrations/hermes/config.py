@@ -50,6 +50,8 @@ CONFIG_SCHEMA = "agenomic.hermes.adapter_config/v1"
 CONFIG_ENV = "AGENOMIC_HERMES_CONFIG"
 DEFAULT_TOKEN_ENV = "AGENOMIC_HERMES_RUNTIME_TOKEN"
 SUPERVISOR_TOKEN_ENV = "AGENOMIC_HERMES_SUPERVISOR_TOKEN"
+#: Prefix of every Agenomic runtime token (the credential the Hermes plugin presents).
+RUNTIME_TOKEN_PREFIX = "agmhr_"
 _SECRET_NAME = re.compile(
     r"(_API_KEY|_TOKEN|_SECRET|_PASSWORD|_ACCESS_KEY|_PRIVATE_KEY)$|^API_KEY$", re.I
 )
@@ -162,6 +164,12 @@ class AdapterConfig(BaseModel):
                 "(Hermes expands ${...} in plugin settings, so set the reference in the "
                 f"{CONFIG_ENV} file or keep the default)"
             )
+        name = _ENV_REF.match(value)
+        assert name is not None
+        problem = runtime_token_env_problem(name.group(1))
+        if problem is not None:
+            # RuntimeClient would send this variable's value as a Bearer token to Agenomic.
+            raise ValueError(f"runtime_token: {problem}")
         return value
 
     @property
@@ -180,18 +188,28 @@ class AdapterConfig(BaseModel):
         """Read the runtime token from the environment.
 
         Raises :class:`ConfigError` naming the variable (never its value) when
-        it is unset or empty.
+        it is unset or empty, or when its value is not an Agenomic runtime
+        token (``agmhr_...``): another credential is never sent to Agenomic.
 
         Example:
             >>> cfg = AdapterConfig.model_validate({"endpoint": "https://a.example"})
             >>> cfg.resolve_token({"AGENOMIC_HERMES_RUNTIME_TOKEN": "agmhr_x"}).get_secret_value()
             'agmhr_x'
+            >>> cfg.resolve_token({"AGENOMIC_HERMES_RUNTIME_TOKEN": "sk-x"})
+            Traceback (most recent call last):
+            ...
+            agenomic.integrations.hermes.config.ConfigError: AGENOMIC_HERMES_RUNTIME_TOKEN does not hold an Agenomic runtime token (agmhr_...)
         """
         env = os.environ if environ is None else environ
         value = env.get(self.token_env)
         if not value:
             raise ConfigError(
                 f"runtime_token references environment variable {self.token_env}, which is not set"
+            )
+        if not value.startswith(RUNTIME_TOKEN_PREFIX):
+            raise ConfigError(
+                f"{self.token_env} does not hold an Agenomic runtime token "
+                f"({RUNTIME_TOKEN_PREFIX}...)"
             )
         return SecretStr(value)
 

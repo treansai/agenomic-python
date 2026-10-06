@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
+import signal
 import socket
 import sys
 import time
@@ -306,6 +308,102 @@ def test_sigkill_after_grace(tmp_path: Path) -> None:
 
     time.sleep(0.5)
     assert s.stop_child() == -9
+
+
+def _wait_for(predicate: Any, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def _pid_gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+# The leader starts a grandchild in its process group that ignores SIGTERM, then waits;
+# the leader itself dies on SIGTERM.
+GROUP_LEADER = (
+    "import subprocess, sys, time\n"
+    "subprocess.Popen([sys.executable, '-c', "
+    "'import os, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+    'open(sys.argv[1] + ".tmp", "w").write(str(os.getpid())); '
+    'os.replace(sys.argv[1] + ".tmp", sys.argv[1]); time.sleep(120)\', sys.argv[1]])\n'
+    "time.sleep(120)\n"
+)
+
+
+@posix_only
+def test_quarantine_stops_group_members_that_outlive_the_leader(tmp_path: Path) -> None:
+    api = FakeApi()
+    pid_file = tmp_path / "grandchild.pid"
+    s = make_supervisor(tmp_path, api, [sys.executable, "-c", GROUP_LEADER, str(pid_file)])
+    s.settings.grace_s = 0.5
+    grandchild: int | None = None
+    try:
+        assert s.start_child()
+        assert _wait_for(pid_file.exists)
+        grandchild = int(pid_file.read_text())
+        assert not _pid_gone(grandchild)
+        api.commands = [{"id": "q1", "kind": "quarantine", "status": "requested"}]
+        s.heartbeat()
+        assert s.state == "stopped"
+        assert [(c, st) for c, st, _ in api.acks] == [("q1", "received"), ("q1", "applied")]
+        assert api.acks[-1][2]["process_state"] == "stopped"
+        assert _wait_for(lambda: _pid_gone(grandchild), timeout=5.0)
+    finally:
+        if grandchild is None and pid_file.exists():
+            grandchild = int(pid_file.read_text())
+        if grandchild is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(grandchild, signal.SIGKILL)
+        if s.proc is not None and s.proc.poll() is None:
+            s.proc.kill()
+            s.proc.wait()
+
+
+@posix_only
+def test_quarantine_is_not_applied_while_the_group_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, SLEEPER)
+    assert s.start_child()
+    results = iter([False, True])
+    real = sup._stop_group
+    monkeypatch.setattr(
+        sup, "_stop_group", lambda pgid, deadline: next(results) and real(pgid, deadline)
+    )
+    api.commands = [{"id": "q1", "kind": "quarantine", "status": "requested"}]
+    s.heartbeat()
+    assert s.state == "stop_failed"
+    assert s.refuse_restart
+    assert [(c, st) for c, st, _ in api.acks] == [("q1", "received")]
+    s.heartbeat()
+    assert api.heartbeats[-1]["process"]["state"] == "stop_failed"
+    # Delivered again: executed again, applied once the group is empty.
+    api.commands = [{"id": "q1", "kind": "quarantine", "status": "received"}]
+    s.heartbeat()
+    assert s.state == "stopped"
+    assert [(c, st) for c, st, _ in api.acks] == [("q1", "received"), ("q1", "applied")]
+
+
+@posix_only
+def test_run_fails_when_the_group_cannot_be_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(sup, "_stop_group", lambda pgid, deadline: False)
+    monkeypatch.setattr(sup.signal, "signal", lambda *a: None)
+    assert s.run() == 1
+    assert s.state == "stop_failed"
 
 
 def test_tick_poll_and_skill_sync(tmp_path: Path) -> None:
@@ -910,3 +1008,87 @@ def test_skills_dir_whose_parent_is_a_link_is_refused(tmp_path: Path) -> None:
     assert counts["rejected"] == 1
     assert counts["written"] == 0
     assert list(real.iterdir()) == []
+
+
+@posix_only
+def test_skills_dir_below_a_linked_ancestor_is_refused(tmp_path: Path) -> None:
+    # The agent swaps an intermediate component for a link into a supervisor owned tree.
+    real = tmp_path / "real"
+    (real / "sub").mkdir(parents=True)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "link").symlink_to(real)
+    skills_dir = shared / "link" / "sub" / "skills"
+    counts = sync_skills([_skill("a", "A")], skills_dir)
+    assert counts == {"written": 0, "unchanged": 0, "removed": 0, "rejected": 1}
+    assert list((real / "sub").iterdir()) == [], "nothing is written in the link's target"
+    assert sup.skills_dir_problem(skills_dir) is not None
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, SLEEPER)
+    s.settings.skills_dir = skills_dir
+    assert s.isolation()["skills_readonly"] is False
+    with pytest.raises(sup.UnsafeSkillsPathError, match="ancestor link"):
+        sup._open_skills_root(skills_dir)
+
+
+@posix_only
+def test_nested_and_relative_skills_dirs_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    nested = tmp_path / "a" / "b" / "c" / "skills"
+    assert sync_skills([_skill("x", "X")], nested)["written"] == 1
+    assert (nested / "x" / "SKILL.md").read_text() == "X"
+    monkeypatch.chdir(tmp_path)
+    assert sync_skills([_skill("y", "Y")], Path("rel") / "skills")["written"] == 1
+    assert (tmp_path / "rel" / "skills" / "y" / "SKILL.md").read_text() == "Y"
+    dotdot = Path("a") / ".." / "rel" / "skills"
+    assert sync_skills([_skill("z", "Z")], dotdot)["rejected"] == 1
+    assert sup.skills_dir_problem(dotdot) == "has a '..' component"
+    with pytest.raises(sup.UnsafeSkillsPathError, match=r"'\.\.'"):
+        sup._open_skills_root(dotdot)
+    with pytest.raises(sup.UnsafeSkillsPathError, match="absolute"):
+        sup._open_trusted_dir(Path("rel"), create=False)
+
+
+@posix_only
+def test_ancestor_writable_by_others_needs_the_sticky_bit(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    skills_dir = shared / "skills"
+    assert sync_skills([_skill("a", "A")], skills_dir)["rejected"] == 1
+    assert not skills_dir.exists()
+    assert "sticky" in str(sup.skills_dir_problem(skills_dir))
+    shared.chmod(0o1777)
+    assert sync_skills([_skill("a", "A")], skills_dir)["written"] == 1
+    assert sup.skills_dir_problem(skills_dir) is None
+
+
+@posix_only
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() != 0, reason="needs chown")
+def test_ancestor_owned_by_another_user_is_refused(tmp_path: Path) -> None:
+    theirs = tmp_path / "theirs"
+    theirs.mkdir()
+    os.chown(theirs, 65534, 65534)
+    assert sync_skills([_skill("a", "A")], theirs / "skills")["rejected"] == 1
+    assert list(theirs.iterdir()) == []
+    assert "another user" in str(sup.skills_dir_problem(theirs / "skills"))
+
+
+@posix_only
+def test_system_layout_links_under_the_root_are_followed() -> None:
+    links = [
+        p
+        for p in Path("/").iterdir()
+        if p.is_symlink() and p.is_dir() and p.lstat().st_uid == 0 and p.stat().st_uid == 0
+    ]
+    if not links or Path("/").stat().st_mode & 0o022:
+        pytest.skip("no root owned directory link under /")
+    fd = sup._open_trusted_dir(links[0], create=False)
+    assert fd is not None
+    try:
+        assert os.path.samestat(os.fstat(fd), links[0].stat())
+    finally:
+        os.close(fd)
+    # A missing component is reported, not created.
+    assert sup._open_trusted_dir(links[0] / "agenomic-missing-dir", create=False) is None

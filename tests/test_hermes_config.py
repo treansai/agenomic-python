@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from agenomic.integrations.hermes.config import (
     AdapterConfig,
@@ -40,11 +41,11 @@ def test_missing_token_variable_names_var_never_value(
     caplog.set_level(logging.DEBUG)
     path = tmp_path / "adapter.json"
     path.write_text(
-        json.dumps({"endpoint": "https://a.example", "runtime_token": "${env:MY_HERMES_TOKEN}"})
+        json.dumps({"endpoint": "https://a.example", "runtime_token": "${env:AGENOMIC_MY_RT}"})
     )
     with pytest.raises(ConfigError) as err:
         build_config({}, environ={"AGENOMIC_HERMES_CONFIG": str(path), "OTHER": SECRET})
-    assert "MY_HERMES_TOKEN" in str(err.value)
+    assert "AGENOMIC_MY_RT" in str(err.value)
     assert SECRET not in str(err.value)
     assert SECRET not in caplog.text
 
@@ -60,6 +61,42 @@ def test_literal_token_is_refused_without_echo(
     assert "runtime_token must be an ${env:VAR} reference" in str(err.value)
     assert SECRET not in str(err.value)
     assert SECRET not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["OPENAI_API_KEY", "AGENOMIC_HERMES_SUPERVISOR_TOKEN", "GITHUB_TOKEN", "DB_PASSWORD"],
+)
+def test_file_runtime_token_cannot_reference_another_credential(
+    name: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # RuntimeClient would otherwise send the provider/supervisor credential to Agenomic.
+    caplog.set_level(logging.DEBUG)
+    path = tmp_path / "adapter.yaml"
+    path.write_text(f"endpoint: https://a.example\nruntime_token: ${{env:{name}}}\n")
+    env = {"AGENOMIC_HERMES_CONFIG": str(path), name: SECRET}
+    with pytest.raises(ConfigError, match=f"runtime_token.*{name}") as err:
+        build_config({}, environ=env)
+    assert SECRET not in str(err.value)
+    assert SECRET not in caplog.text
+    with pytest.raises(ValidationError):
+        AdapterConfig.model_validate(
+            {"endpoint": "https://a.example", "runtime_token": f"${{env:{name}}}"}
+        )
+
+
+@pytest.mark.parametrize("value", ["sk-openai-key", "agmhs_supervisor", "ghp_x", " agmhr_x"])
+def test_resolved_runtime_token_must_be_an_agenomic_runtime_token(value: str) -> None:
+    with pytest.raises(ConfigError, match="AGENOMIC_HERMES_RUNTIME_TOKEN does not hold") as err:
+        build_config(
+            {"endpoint": "https://a.example"}, environ={"AGENOMIC_HERMES_RUNTIME_TOKEN": value}
+        )
+    assert value not in str(err.value)
+    _, token = build_config(
+        {"endpoint": "https://a.example"}, environ={"AGENOMIC_HERMES_RUNTIME_TOKEN": "agmhr_ok"}
+    )
+    assert token is not None
+    assert token.get_secret_value() == "agmhr_ok"
 
 
 def test_token_in_plugin_settings_is_refused() -> None:
