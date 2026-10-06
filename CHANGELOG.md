@@ -118,6 +118,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   managed prompts adapter. `docs/langgraph-matrix.md` lists the tested
   points, and any other version emits one `AgenomicUntestedVersionWarning`
   per process.
+- `agenomic.integrations.hermes` (`agenomic-hermes-adapter` 1.0.0): Hermes Agent
+  integration verified against Hermes v2026.9.24 (commit `f97608f`, 0.21.5).
+  A Hermes plugin (entry point `hermes_agent.plugins: agenomic`) reports the
+  instance, sessions, subagents, model and tool calls as
+  `agenomic.hermes.event/v1` events (hashes by default, redacted previews on
+  opt in), and in shadow or enforce asks the Agenomic runtime API before
+  covered tool actions: `pre_tool_call` and the `tool_execution` middleware
+  share one decision per `tool_call_id`, the middleware never raises before
+  `next_call`, results are reported with the signed permit, approvals are
+  resumed by retrying the same call with the pending identity, and any
+  missing, late or invalid decision blocks in enforce. The `llm_request`
+  middleware only adds `X-Agenomic-Hermes-Session` on Model Gateway
+  requests. Includes the versioned adapter config
+  `agenomic.hermes.adapter_config/v1` with `render_hermes_config`, arguments
+  hashing that matches the gateway (`agenomic.canon/v1`, vectors generated
+  from agenomic-cloud), a bounded batching event exporter with an optional
+  spool, the `agenomic-hermes-guard` fail closed shell hook and the
+  `agenomic-hermes-supervisor` process (child environment allowlist,
+  isolation self check, quarantine by signal, approved skills sync). The
+  plugin is cooperative and not a security boundary; see `docs/hermes.md`.
+  New `hermes` extra (PyYAML). Hermes itself is not a dependency: it installs
+  only as an editable clone.
+- `examples/12_hermes_agent/live_demo/`: end to end demonstration against a
+  running agenomic-cloud gateway with Hermes under the supervisor in a Linux
+  network and mount namespace (`live_demo.py`), and the runtime API latency
+  benchmark (`bench.py`).
+
+### Changed
+
+- `cryptography` is accepted up to `<51` (was `<46`) so the SDK installs in
+  the same environment as Hermes Agent, which pins `cryptography==50.0.0`.
+  The full suite passes with 50.0.0.
+- `agenomic-hermes-supervisor --no-restart` exits when its child exits, and
+  the isolation self check honours sticky directories (an entry owned by
+  another user in a sticky directory cannot be replaced).
 
 ## [0.1.2] - 2026-09-20
 

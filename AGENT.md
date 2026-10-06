@@ -477,4 +477,5 @@ or to `Client.from_env()` through the variables above.
 | Errors & logging | `docs/errors.md` |
 | Managed prompts | `docs/prompts.md` |
 | Prompt experiments and the runner | `docs/experiments.md` |
+| Hermes Agent adapter | `docs/hermes.md` |
 | Runnable code | `examples/01`–`09` (offline ones run with zero setup) |

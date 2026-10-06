@@ -902,3 +902,42 @@ rule of the engineering rules above.
   `tests/experiment_fakes.py` is a strict in-process runner tier (unknown
   members refused, lease fencing, the duplicate, conflict and stale table, a
   minimal tool proxy) built on those views.
+## Hermes
+
+- `agenomic.integrations.hermes` targets Hermes v2026.9.24 (0.21.5, commit
+  `f97608f`). Every upstream behaviour it relies on was read in that source;
+  re-verify `COMPATIBLE_HERMES` and the call orders below before widening the
+  table. `__init__.py` imports nothing from Hermes; Hermes modules are
+  imported inside functions and every such import tolerates their absence.
+- In the agent loop the `tool_execution` middleware wraps `pre_tool_call`
+  (`agent/tool_executor.py`); in `model_tools.handle_function_call` the order
+  is reversed. So whichever callback runs first for a `tool_call_id` asks the
+  gateway and the other reuses that decision. A middleware frame that raises
+  before `next_call` is skipped by Hermes (the tool runs), which is why
+  `tool_execution` never raises before `next_call` and returns an error string
+  instead.
+- No server answer yet means enforce semantics. `mode_hint` is never used to
+  decide; only server answers set the mode.
+- Shadow and observe never change execution. The only local reasons that block
+  in every mode are a pending `cancel` (of the session, or of the subagent the
+  session runs as, resolved through `_children` when the child has no
+  `_Session` yet) and a local `pause`/`quarantine`/`revoke` status (which makes
+  `local_mode()` enforce). Every other local check
+  (canonicalization, protected paths, compatibility, mutators, delegation,
+  pending approvals) blocks only in enforce and is recorded as a local
+  `tool.call.decision` otherwise.
+- Hermes expands `${...}` in plugin settings, so `runtime_token` is refused
+  there and only accepted as an `${env:VAR}` reference from the
+  `AGENOMIC_HERMES_CONFIG` file or the default variable.
+- The arguments hash reproduces `agenomic_tool_execution::canonical::hash_value`
+  (serde_json number formatting), not `agenomic.canonical.canonical_json`
+  (`JSON.stringify` numbers); the vectors in
+  `tests/fixtures/hermes_canonical_vectors.json` were produced by that Rust
+  code. Regenerate them, do not hand edit them.
+- Hermes classifies entry point plugins by scanning the first 8 KiB of the
+  module source for memory/cron/model provider markers;
+  `test_plugin_source_has_no_kind_markers` keeps `plugin.py` free of them.
+- `applied` is acknowledged for a cancel only after Hermes reports a terminal
+  state (`on_session_end` interrupted, `subagent_stop`, `on_session_finalize`).
+- `tests/test_hermes_integration.py` runs only in a venv with the pinned Hermes
+  installed editable (`python -m pytest -m hermes`); it is skipped otherwise.
