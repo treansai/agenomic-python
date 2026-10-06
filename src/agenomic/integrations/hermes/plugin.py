@@ -914,6 +914,14 @@ class HermesAdapter:
         # Root sessions expose no interrupt handle to plugins: further tool calls are blocked and
         # the command is applied once Hermes reports the session's end.
 
+    def _cancel_pending(self, sid: str) -> bool:
+        with self._lock:
+            session = self._sessions.get(sid)
+        subagent_id = session.subagent_id if session else None
+        return sid in self._cancel_sessions or bool(
+            subagent_id and subagent_id in self._cancel_subagents
+        )
+
     def _observe_terminal(self, sid: str, subagent_id: Optional[str], how: str) -> None:
         command_id = self._cancel_sessions.pop(sid, None) if sid else None
         if subagent_id:
@@ -1067,6 +1075,10 @@ class HermesAdapter:
                 if interrupted
                 else ("failed" if kwargs.get("failed") else "completed")
             )
+            if interrupted and self._cancel_pending(sid):
+                # The interrupt is the cancel Agenomic asked for: report the session as
+                # cancelled, a terminal state the gateway records before applying the command.
+                status = "cancelled"
             self._end(
                 sid, False, status, _str(kwargs.get("turn_exit_reason") or kwargs.get("reason"))
             )

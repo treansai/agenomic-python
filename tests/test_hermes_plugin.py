@@ -737,6 +737,20 @@ def test_cancel_root_session_blocks_tools_until_terminal(
     assert [b["status"] for _, b in server.acks] == ["received"]
     adapter.on_session_end(session_id="root", completed=False, interrupted=True)
     assert [b["status"] for _, b in server.acks] == ["received", "applied"]
+    # The cancel-driven interrupt is reported as "cancelled", a terminal state for the
+    # gateway, before the ack: the gateway only applies a cancel whose session ended.
+    ends = [c.body["status"] for c in server.calls("/end")]
+    assert ends == ["completed", "cancelled"]
+
+
+def test_interrupt_without_a_pending_cancel_stays_interrupted(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="s", platform="cli")
+    adapter.on_session_end(session_id="s", completed=False, interrupted=True)
+    ends = [c.body["status"] for c in server.calls("/end")]
+    assert ends == ["interrupted"]
 
 
 def test_observer_hooks_emit_events_and_never_raise(server: FakeAgenomic, tmp_path: Path) -> None:

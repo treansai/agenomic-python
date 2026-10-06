@@ -221,7 +221,10 @@ side when they are made, so dropped events never change a decision.
 | `quarantine` | local status set; the process stop is the supervisor's | by the supervisor |
 
 A root session exposes no interrupt handle to plugins, so a cancel of a root
-session blocks its tools and waits for Hermes to end the session. `refused` is
+session blocks its tools and waits for Hermes to end the session. An interrupted
+turn of a session with a pending cancel is reported to Agenomic as `cancelled`, a
+terminal state: the gateway applies a cancel only once its session has ended in the
+control plane, never on the adapter's word alone. `refused` is
 sent for unknown commands, missing targets and subagents that are not running.
 
 ## Supervisor
