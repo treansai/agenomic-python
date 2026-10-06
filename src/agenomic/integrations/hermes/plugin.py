@@ -2356,7 +2356,14 @@ class HermesAdapter:
             raise HermesApiError(
                 "invalid_response", "authorize answer without a valid decision", status
             )
-        if decision == "observe" or effective_mode == "observe":
+        if (decision == "observe") != (effective_mode == "observe"):
+            # The gateway answers observe exactly when its effective mode is observe: an
+            # observe decision under a stricter mode (or the reverse) is not trusted to
+            # downgrade enforcement.
+            raise HermesApiError(
+                "invalid_response", "authorize answer with an inconsistent mode", status
+            )
+        if decision == "observe":
             current = self._effective_state
             if _is_blocking_state(current):
                 # A newer heartbeat already set a blocking state (enforce_blocked, paused,

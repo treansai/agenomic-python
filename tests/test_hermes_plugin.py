@@ -3623,3 +3623,26 @@ def test_credential_values_in_arguments_never_reach_the_gateway(
         assert pat not in dumped
     assert call.body["arguments"]["url"] == "https://api.example/v1"
     assert report.body["arguments"] == call.body["arguments"], "the permit's copy is reported"
+
+
+@pytest.mark.parametrize(("decision", "mode"), [("observe", "enforce"), ("observe", "shadow")])
+def test_an_observe_decision_under_a_stricter_mode_never_downgrades(
+    server: FakeAgenomic,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    decision: str,
+    mode: str,
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    monkeypatch.setattr(
+        adapter.client,
+        "authorize",
+        lambda sid, body: (200, {"decision": decision, "effective_mode": mode}),
+    )
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("write_file", {"path": "/tmp/a"}))
+    assert "invalid_response" in out["error"]
+    assert runner.executions == 0
+    assert adapter.local_mode() == "enforce", "the global state is not set to observe"

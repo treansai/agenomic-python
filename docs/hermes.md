@@ -71,7 +71,7 @@ from agenomic.integrations.hermes.config import render_hermes_config
 print(yaml.safe_dump(render_hermes_config("https://agenomic.example", model="demo-model")))
 ```
 
-The endpoint is validated first (absolute http(s) URL, no credentials, query
+The endpoint is validated first (absolute http(s) URL, no credentials, query, fragment or bare `?`/`#`
 or fragment), as the adapter, the supervisor and the HTTP clients do, and so are the plugin
 `settings`: unknown keys and literal values the adapter would refuse are
 rejected, while `${env:VAR}` references are checked when the adapter loads
@@ -156,7 +156,7 @@ before they are sent.
 | --- | --- |
 | `observe` | events only, `authorize` is never called (also when a `/hello` sent during an authorization switches to observe: the call proceeds without asking, and an authorization outage never blocks); local checks (protected paths, incompatible Hermes, argument mutators the gateway has not confirmed) emit one local `tool.call.decision` per call (`deny`, `local_mode: observe`, with a counterfactual) and the call proceeds; an approval required in enforce for the same action (session, tool, arguments hash) and still held locally is recorded the same way as `require_approval` (reason `approval_pending`, its `approval_id` in `extra`), without claiming, consuming or dropping it and without asking its status, so a later enforce retry still resumes under it; delegations are not reserved (a delegation refusal is only known by asking the gateway, so nothing is recorded for it) |
 | `shadow` | `authorize` is called and recorded as counterfactual, nothing is blocked; an authorization outage emits `authorization.unavailable` and the call proceeds; local checks (protected paths, incompatible Hermes, unconfirmed mutators, refused delegation, arguments without a canonical form) emit a local `tool.call.decision` and the call proceeds; an approval still pending from an earlier enforce is not consulted (the call is asked afresh) |
-| `enforce` | `allow` executes; `deny` and `require_approval` block; any error, timeout or invalid answer blocks |
+| `enforce` | `allow` executes; `deny` and `require_approval` block; any error, timeout or invalid answer blocks, including an `observe` decision whose `effective_mode` is not observe (or the reverse): it never downgrades enforcement |
 | `enforce_blocked`, `paused`, `quarantined`, `revoked` | treated as enforce; the server denies |
 | unknown (no answer yet) | treated as enforce: no valid decision, no execution |
 

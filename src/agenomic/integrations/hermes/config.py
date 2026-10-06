@@ -144,7 +144,8 @@ def check_endpoint(value: str) -> str:
     if parts.username is not None or parts.password is not None:
         # HTTPX would send them as Basic credentials in place of the bearer token.
         raise ValueError("endpoint must not carry credentials (user:password@)")
-    if parts.query or parts.fragment:
+    if parts.query or parts.fragment or "?" in value or "#" in value:
+        # Also an empty one: the API path appended to ``https://gw?`` would be a query.
         raise ValueError("endpoint must not carry a query or fragment")
     if parts.scheme == "http" and parts.hostname not in _LOOPBACK:
         logger.warning("Agenomic endpoint uses plain http outside loopback (%s)", parts.hostname)
