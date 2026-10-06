@@ -541,6 +541,7 @@ class HermesAdapter:
         # Terminal session ends whose report failed transiently, retried every heartbeat;
         # the cancels waiting for them are acknowledged once they are reported.
         self._pending_ends: OrderedDict[str, _PendingEnd] = OrderedDict()
+        self._end_locks = [threading.Lock() for _ in range(64)]
         self._children: dict[str, tuple[str, Optional[str]]] = {}
         self._delegations: dict[str, deque[list[Any]]] = {}
         # Hermes builds a delegate_task's children on the thread running that tool, inside
@@ -1295,9 +1296,13 @@ class HermesAdapter:
             return "subagent"
         return None
 
-    def _observe_terminal(self, sid: str, subagent_id: Optional[str], how: str) -> None:
+    def _observe_terminal(
+        self, sid: str, subagent_id: Optional[str], how: str, *, delivered: bool = True
+    ) -> None:
         """Every cancel waiting for this end (of the session and of the subagent it runs
-        as, possibly distinct commands) is acknowledged as applied, each exactly once."""
+        as, possibly distinct commands) is settled, each exactly once: ``applied`` when the
+        terminal end reached the control plane, ``refused`` when the gateway refused that
+        report for good (the session ended here, but no applied cancel can be claimed)."""
         command_ids: list[str] = []
         with self._lock:
             pending = (
@@ -1309,7 +1314,14 @@ class HermesAdapter:
                 if command_id not in command_ids:
                     command_ids.append(command_id)
         for command_id in command_ids:
-            self._ack(command_id, "applied", {"observed": how, "hermes_session_id": sid})
+            if delivered:
+                self._ack(command_id, "applied", {"observed": how, "hermes_session_id": sid})
+            else:
+                self._ack(
+                    command_id,
+                    "refused",
+                    {"reason": "session_end_refused", "observed": how, "hermes_session_id": sid},
+                )
 
     # ------------------------------------------------------------------
     # events
@@ -1495,12 +1507,9 @@ class HermesAdapter:
         except Exception as exc:
             logger.debug("on_session_start failed: %s", type(exc).__name__)
 
-    def _end(
-        self, sid: str, final: bool, status: str, reason: str = "", *, supersede: bool = True
-    ) -> bool:
-        """Report a session end; ``False`` only on a failure worth retrying. A newer end
-        that is delivered (``supersede``) replaces a pending older one, which is then
-        never replayed after it."""
+    def _end(self, sid: str, final: bool, status: str, reason: str = "") -> str:
+        """Report a session end: ``delivered``, ``transient`` (worth retrying) or
+        ``refused`` (for good). Callers hold :meth:`_end_lock` for ``sid``."""
         body: dict[str, Any] = {"final": final, "status": status}
         if reason:
             # Sent to the gateway directly, not through the event pipeline: masked here.
@@ -1509,13 +1518,21 @@ class HermesAdapter:
             self.client.end_session(sid, body)
         except HermesApiError as exc:
             logger.warning("session end not reported (%s)", exc.code)
-            return not exc.retryable
-        if supersede:
-            # Its cancels keep waiting for the next terminal end (``_observe_terminal``
-            # takes every cancel of the session, whichever end it observes).
-            with self._lock:
-                self._pending_ends.pop(sid, None)
-        return True
+            return "transient" if exc.retryable else "refused"
+        return "delivered"
+
+    def _end_lock(self, sid: str) -> threading.Lock:
+        """Serializes the end reports of one session (striped): a retried older end and a
+        newer one are never in flight together, so their delivery order is never reversed."""
+        return self._end_locks[hash(sid) % len(self._end_locks)]
+
+    def _end_turn(self, sid: str, status: str, reason: str) -> None:
+        """A non-terminal turn end. Once delivered it supersedes a pending older end, which
+        is then never replayed after it (its cancels wait for the next terminal end)."""
+        with self._end_lock(sid):
+            if self._end(sid, False, status, reason) == "delivered":
+                with self._lock:
+                    self._pending_ends.pop(sid, None)
 
     def _end_terminal(
         self,
@@ -1526,47 +1543,56 @@ class HermesAdapter:
         subagent_id: Optional[str],
         how: str,
     ) -> None:
-        """Report a terminal end, then acknowledge the cancels waiting for it. The gateway
+        """Report a terminal end, then settle the cancels waiting for it. The gateway
         applies a cancel only once the session is terminal in the control plane: while the
         report fails transiently it is retried every heartbeat and the cancels wait."""
-        if self._end(sid, final, status, reason):
-            self._observe_terminal(sid, subagent_id, how)
-            return
-        with self._lock:
-            self._pending_ends[sid] = _PendingEnd(final, status, reason, subagent_id, how)
-            while len(self._pending_ends) > _MAX_AUTH:
-                # Bounded, but never at the expense of a cancel: an end some cancel waits
-                # for is kept (those are bounded by the gateway's commands), the oldest
-                # other one is dropped.
-                victim = next(
-                    (
-                        key
-                        for key, end in self._pending_ends.items()
-                        if key not in self._cancel_sessions
-                        and not (end.subagent_id and end.subagent_id in self._cancel_subagents)
-                    ),
-                    None,
-                )
-                if victim is None:
-                    break
-                del self._pending_ends[victim]
+        with self._end_lock(sid):
+            outcome = self._end(sid, final, status, reason)
+            with self._lock:
+                if outcome != "transient":
+                    self._pending_ends.pop(sid, None)  # superseded by this newer end
+                else:
+                    self._pending_ends[sid] = _PendingEnd(final, status, reason, subagent_id, how)
+                    self._bound_pending_ends()
+        if outcome != "transient":
+            self._observe_terminal(sid, subagent_id, how, delivered=outcome == "delivered")
+
+    def _bound_pending_ends(self) -> None:
+        """Called under ``_lock``. Bounded, but never at the expense of a cancel: an end
+        some cancel waits for is kept (those are bounded by the gateway's commands), the
+        oldest other one is dropped."""
+        while len(self._pending_ends) > _MAX_AUTH:
+            victim = next(
+                (
+                    key
+                    for key, end in self._pending_ends.items()
+                    if key not in self._cancel_sessions
+                    and not (end.subagent_id and end.subagent_id in self._cancel_subagents)
+                ),
+                None,
+            )
+            if victim is None:
+                break
+            del self._pending_ends[victim]
 
     def _retry_ends(self) -> None:
         with self._lock:
             pending = list(self._pending_ends.items())
         for sid, end in pending:
-            if not self._end(sid, end.final, end.status, end.reason, supersede=False):
-                # Still transient: the end stays pending (and its cancels waiting) for as
-                # long as it takes; acknowledging them now would claim an end the control
-                # plane has not recorded.
-                continue
-            with self._lock:
-                if self._pending_ends.get(sid) is not end:
-                    continue  # replaced by a later end of the same session
-                del self._pending_ends[sid]
-            # Reported, or refused for good: the cancels are acknowledged (the gateway
-            # checks the session's state itself before applying them).
-            self._observe_terminal(sid, end.subagent_id, end.how)
+            with self._end_lock(sid):
+                with self._lock:
+                    if self._pending_ends.get(sid) is not end:
+                        continue  # superseded by a newer end meanwhile: never replayed
+                outcome = self._end(sid, end.final, end.status, end.reason)
+                if outcome == "transient":
+                    # The end stays pending (and its cancels waiting) for as long as it
+                    # takes: acknowledging them now would claim an end the control plane
+                    # has not recorded.
+                    continue
+                with self._lock:
+                    if self._pending_ends.get(sid) is end:
+                        del self._pending_ends[sid]
+            self._observe_terminal(sid, end.subagent_id, end.how, delivered=outcome == "delivered")
 
     def on_session_end(self, **kwargs: object) -> None:
         """Per TURN end (not final). ``interrupted`` applies a pending cancel.
@@ -1591,7 +1617,7 @@ class HermesAdapter:
                 status = "cancelled"
             reason = _str(kwargs.get("turn_exit_reason") or kwargs.get("reason"))
             if not interrupted:
-                self._end(sid, False, status, reason)
+                self._end_turn(sid, status, reason)
             self._emit(
                 "session.turn_ended",
                 sid,

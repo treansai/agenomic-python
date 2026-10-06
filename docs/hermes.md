@@ -374,11 +374,14 @@ turn, or the final end (`on_session_finalize`), of a session with a pending
 cancel (of the session or of its subagent) is reported to Agenomic as `cancelled`, a
 terminal state: the gateway applies a cancel only once its session has ended in the
 control plane, never on the adapter's word alone. A terminal end report that
-fails transiently is retried every heartbeat until it is reported (or refused
-for good), and the cancels waiting for it are acknowledged only then. Pending
-ends are bounded, but an end a cancel waits for is never the one dropped. A
-newer end of the same session that is delivered replaces a pending older one,
-which is then never replayed after it. `refused` is
+fails transiently is retried every heartbeat until it is reported, and the
+cancels waiting for it are acknowledged `applied` only then; if the gateway
+refuses the report for good they are acknowledged `refused`
+(`session_end_refused`), never `applied`. Pending ends are bounded, but an end
+a cancel waits for is never the one dropped. The end reports of one session
+are serialized: a newer end that is delivered replaces a pending older one,
+which is then never replayed after it, and a replay already in flight always
+completes before a newer end is sent. `refused` is
 sent for unknown commands, missing targets and subagents that are not running.
 A cancel naming an Agenomic session id the adapter does not know yet is held
 while an admission is in flight, or while an active session's admission failed

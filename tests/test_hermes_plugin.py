@@ -3849,3 +3849,70 @@ def test_a_delivered_newer_end_supersedes_a_pending_older_one(
     adapter.tick()
     assert [b["final"] for b in sent] == [True], "the obsolete non-final end is never replayed"
     assert ("k8", "applied") in [(c, b["status"]) for c, b in server.acks]
+
+
+def test_a_retried_end_and_a_newer_end_are_never_delivered_out_of_order(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    real_end = adapter.client.end_session
+    delivered: list[bool] = []
+    state = {"fail": True}
+    in_retry = threading.Event()
+    release = threading.Event()
+    final_sent = threading.Event()
+
+    def end(sid: str, body: dict[str, Any]) -> Any:
+        if state["fail"]:
+            state["fail"] = False
+            raise HermesApiError("timeout", "gateway unavailable", 0)
+        if not body["final"] and not in_retry.is_set():
+            in_retry.set()  # the heartbeat replay of the old end is in flight
+            assert release.wait(5)
+        resp = real_end(sid, body)
+        delivered.append(bool(body["final"]))
+        if body["final"]:
+            final_sent.set()
+        return resp
+
+    monkeypatch.setattr(adapter.client, "end_session", end)
+    adapter.on_session_end(session_id="s1", interrupted=True)  # non-final, pending
+    retry = threading.Thread(target=adapter._retry_ends)
+    retry.start()
+    assert in_retry.wait(5)
+    final = threading.Thread(
+        target=lambda: adapter.on_session_finalize(session_id="s1", reason="exit")
+    )
+    final.start()
+    # Unserialized, the final end would be delivered while the replay is held: give it
+    # the time to, then let the replay finish.
+    final_sent.wait(1.0)
+    release.set()
+    retry.join(5)
+    final.join(5)
+    assert delivered[-1] is True, "the final end is never followed by the older one"
+
+
+def test_a_refused_terminal_end_refuses_the_cancel_instead_of_applying_it(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {"id": "k9", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+
+    def refused(sid: str, body: dict[str, Any]) -> Any:
+        raise HermesApiError("invalid_transition", "refused", 422)
+
+    monkeypatch.setattr(adapter.client, "end_session", refused)
+    adapter.on_session_finalize(session_id="s1", reason="exit")
+    acks = [(c, b["status"]) for c, b in server.acks]
+    assert ("k9", "applied") not in acks
+    assert ("k9", "refused") in acks
+    assert "s1" not in adapter._pending_ends
