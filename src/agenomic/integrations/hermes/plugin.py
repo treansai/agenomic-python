@@ -2839,9 +2839,9 @@ class HermesAdapter:
             reason=f"arguments changed after authorization ({where})",
             extra={"authorized_hash": auth.local_hash, "server_hash": auth.server_hash},
         )
-        if auth.effective_mode == "shadow" or self.local_mode() == "shadow":
-            # Shadow never changes execution, also when it became active after enforce
-            # authorized the call: the mismatch is recorded only.
+        if auth.effective_mode == "shadow" or self.local_mode() in ("shadow", "observe"):
+            # Shadow and observe never change execution, also when they became active
+            # after enforce authorized the call: the mismatch is recorded only.
             return None
         return _block(
             f"Agenomic: arguments of {auth.tool} changed after authorization; the action was not executed."
@@ -3017,26 +3017,55 @@ class HermesAdapter:
         # Admission is atomic with server state updates (lock order: _lock, then
         # _state_lock; _set_state never takes _lock): a blocking state applied after the
         # earlier checks is seen here, before the call is marked executing.
+        rerun: Optional[_ExecutionPlan] = None
         with self._lock, self._state_lock:
             if auth.state == "executing":
-                # A second chain run for the same tool_call_id while the first is executing.
-                if auth.effective_mode == "shadow":
-                    return _ExecutionPlan(True, meta=meta)
-                return _ExecutionPlan(False, error=NO_AUTH_MESSAGE, meta=meta)
-            # A local pause, quarantine, revoke or cancel applied after the first check
-            # (while the authorization was in flight) is seen here: written under _lock.
-            local_block = self._local_blocker(sid)
-            if local_block is not None:
-                auth.state = "done"
-            elif self._effective_state in _ENFORCE_LIKE - {"enforce"}:
-                blocked_by = self._effective_state
-                auth.state = "done"
-            elif auth.effective_mode != "enforce" and self.local_mode() == "enforce":
-                # An observe or shadow decision is never executed once enforcement applies.
-                blocked_by = "enforce"
-                auth.state = "done"
+                # A second chain run for the same tool_call_id while the first is executing:
+                # a shadow decision is reused only if nothing applied since forbids it.
+                if auth.effective_mode != "shadow":
+                    return _ExecutionPlan(False, error=NO_AUTH_MESSAGE, meta=meta)
+                local_block = self._local_blocker(sid)
+                raw_state = self._effective_state
+                if local_block is None:
+                    if raw_state in _ENFORCE_LIKE - {"enforce"}:
+                        rerun = _ExecutionPlan(
+                            False,
+                            error=f"Agenomic: the instance is {raw_state}; "
+                            "the action was not executed.",
+                            meta=meta,
+                        )
+                    elif self.local_mode() == "enforce":
+                        rerun = _ExecutionPlan(
+                            False,
+                            error="Agenomic: the mode changed while this call was decided; "
+                            "the action was not executed.",
+                            meta=meta,
+                        )
+                    else:
+                        rerun = _ExecutionPlan(True, meta=meta)
+                else:
+                    rerun = _ExecutionPlan(False, error=local_block[0], meta=meta)
             else:
-                auth.state = "executing"
+                # A local pause, quarantine, revoke or cancel applied after the first check
+                # (while the authorization was in flight) is seen here: written under _lock.
+                local_block = self._local_blocker(sid)
+                if local_block is not None:
+                    auth.state = "done"
+                elif self._effective_state in _ENFORCE_LIKE - {"enforce"}:
+                    blocked_by = self._effective_state
+                    auth.state = "done"
+                elif auth.effective_mode != "enforce" and self.local_mode() == "enforce":
+                    # An observe or shadow decision is never executed once enforcement
+                    # applies.
+                    blocked_by = "enforce"
+                    auth.state = "done"
+                else:
+                    auth.state = "executing"
+        if rerun is not None:
+            # The shadow rerun shares the first chain's authorization: nothing to drop.
+            if local_block is not None:
+                self._emit_local_block(sid, tool, tool_call_id, args, local_block)
+            return rerun
         if local_block is not None:
             self._drop_delegation(auth)
             self._emit_local_block(sid, tool, tool_call_id, args, local_block)

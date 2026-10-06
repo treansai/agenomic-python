@@ -3296,3 +3296,50 @@ def test_staged_skill_with_an_oversized_target_is_refused_not_truncated(
         status="ok",
     )
     assert server.calls("/proposals") == []
+
+
+def test_argument_change_never_blocks_once_observe_is_active(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    real = adapter.pre_tool_call
+
+    def observe_then_gate(**kwargs: Any) -> Any:
+        server.effective_state = "observe"
+        adapter._set_state("observe", adapter._state_request())
+        return real(**{**kwargs, "args": {"path": "/tmp/b"}})
+
+    monkeypatch.setattr(adapter, "pre_tool_call", observe_then_gate)
+    runner = Runner(adapter)
+    runner.agent_loop("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 1, "observe never changes execution"
+
+
+@pytest.mark.parametrize("applied", ["pause", "enforce"])
+def test_shadow_rerun_of_an_executing_call_rechecks_state(
+    server: FakeAgenomic, tmp_path: Path, applied: str
+) -> None:
+    server.effective_state = "shadow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    second: dict[str, Any] = {}
+
+    def first_execution(*_: Any) -> Any:
+        if applied == "pause":
+            adapter.handle_command({"id": "k1", "kind": "pause", "target_kind": "instance"})
+        else:
+            adapter._set_state("enforce", adapter._state_request())
+        # A second chain for the same call while the first one executes.
+        second["out"] = adapter.tool_execution(
+            args=args, next_call=lambda *_: runner._execute(args, None), **kw
+        )
+        return runner._execute(args, None)
+
+    adapter.tool_execution(args=args, next_call=first_execution, **kw)
+    assert runner.executions == 1, "the rerun never executes under the stale shadow decision"
+    assert "error" in json.loads(str(second["out"]))

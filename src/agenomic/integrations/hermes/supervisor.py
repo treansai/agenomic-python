@@ -45,6 +45,7 @@ from collections import OrderedDict, deque
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator
 
@@ -1872,6 +1873,12 @@ def main(
     token = env.get(SUPERVISOR_TOKEN_ENV)
     if not endpoint:
         logger.error("endpoint missing: pass --endpoint or set %s", ENDPOINT_ENV)
+        return 2
+    parsed = urlsplit(endpoint)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        # A client that can never reach the gateway would start Hermes with no way to
+        # receive a quarantine or revoke.
+        logger.error("endpoint must be an absolute http(s) URL")
         return 2
     if not token:
         logger.error("supervisor credential missing: set %s", SUPERVISOR_TOKEN_ENV)

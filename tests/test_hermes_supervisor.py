@@ -1848,3 +1848,19 @@ def test_manifest_alias_of_an_approved_skill_never_removes_it(tmp_path: Path) ->
     assert counts["rejected"] == 0
     assert (out / "a" / "SKILL.md").read_text() == "A"
     assert json.loads(manifest.read_text()) == {"files": ["a/SKILL.md"]}
+
+
+@pytest.mark.parametrize("endpoint", ["ftp://gw.example", "gw.example", "https://"])
+def test_main_refuses_an_endpoint_that_is_not_an_http_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, endpoint: str
+) -> None:
+    def no_client(*args: object, **kwargs: object) -> None:
+        raise AssertionError("SupervisorClient must not be built for a malformed endpoint")
+
+    monkeypatch.setattr(sup, "SupervisorClient", no_client)
+    monkeypatch.setattr(sup.sys, "platform", "linux")
+    code = sup.main(
+        ["--endpoint", endpoint, "--hermes-home", str(tmp_path), "--", "hermes"],
+        environ={"AGENOMIC_HERMES_SUPERVISOR_TOKEN": "agmhs_test", "PATH": "/bin"},
+    )
+    assert code == 2
