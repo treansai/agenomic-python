@@ -3820,3 +3820,32 @@ def test_an_end_a_cancel_waits_for_is_never_evicted(
     down["on"] = False
     adapter.tick()
     assert ("k7", "applied") in [(c, b["status"]) for c, b in server.acks]
+
+
+def test_a_delivered_newer_end_supersedes_a_pending_older_one(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {"id": "k8", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+    real_end = adapter.client.end_session
+    sent: list[dict[str, Any]] = []
+    failures = {"left": 1}
+
+    def end(sid: str, body: dict[str, Any]) -> Any:
+        if failures["left"]:
+            failures["left"] -= 1
+            raise HermesApiError("timeout", "gateway unavailable", 0)
+        sent.append(dict(body))
+        return real_end(sid, body)
+
+    monkeypatch.setattr(adapter.client, "end_session", end)
+    adapter.on_session_end(session_id="s1", interrupted=True)  # non-final, fails
+    assert "s1" in adapter._pending_ends
+    adapter.on_session_finalize(session_id="s1", reason="exit")  # final, delivered
+    adapter.tick()
+    assert [b["final"] for b in sent] == [True], "the obsolete non-final end is never replayed"
+    assert ("k8", "applied") in [(c, b["status"]) for c, b in server.acks]

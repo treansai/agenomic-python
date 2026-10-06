@@ -376,7 +376,9 @@ terminal state: the gateway applies a cancel only once its session has ended in 
 control plane, never on the adapter's word alone. A terminal end report that
 fails transiently is retried every heartbeat until it is reported (or refused
 for good), and the cancels waiting for it are acknowledged only then. Pending
-ends are bounded, but an end a cancel waits for is never the one dropped. `refused` is
+ends are bounded, but an end a cancel waits for is never the one dropped. A
+newer end of the same session that is delivered replaces a pending older one,
+which is then never replayed after it. `refused` is
 sent for unknown commands, missing targets and subagents that are not running.
 A cancel naming an Agenomic session id the adapter does not know yet is held
 while an admission is in flight, or while an active session's admission failed

@@ -1495,8 +1495,12 @@ class HermesAdapter:
         except Exception as exc:
             logger.debug("on_session_start failed: %s", type(exc).__name__)
 
-    def _end(self, sid: str, final: bool, status: str, reason: str = "") -> bool:
-        """Report a session end; ``False`` only on a failure worth retrying."""
+    def _end(
+        self, sid: str, final: bool, status: str, reason: str = "", *, supersede: bool = True
+    ) -> bool:
+        """Report a session end; ``False`` only on a failure worth retrying. A newer end
+        that is delivered (``supersede``) replaces a pending older one, which is then
+        never replayed after it."""
         body: dict[str, Any] = {"final": final, "status": status}
         if reason:
             # Sent to the gateway directly, not through the event pipeline: masked here.
@@ -1506,6 +1510,11 @@ class HermesAdapter:
         except HermesApiError as exc:
             logger.warning("session end not reported (%s)", exc.code)
             return not exc.retryable
+        if supersede:
+            # Its cancels keep waiting for the next terminal end (``_observe_terminal``
+            # takes every cancel of the session, whichever end it observes).
+            with self._lock:
+                self._pending_ends.pop(sid, None)
         return True
 
     def _end_terminal(
@@ -1546,7 +1555,7 @@ class HermesAdapter:
         with self._lock:
             pending = list(self._pending_ends.items())
         for sid, end in pending:
-            if not self._end(sid, end.final, end.status, end.reason):
+            if not self._end(sid, end.final, end.status, end.reason, supersede=False):
                 # Still transient: the end stays pending (and its cancels waiting) for as
                 # long as it takes; acknowledging them now would claim an end the control
                 # plane has not recorded.
