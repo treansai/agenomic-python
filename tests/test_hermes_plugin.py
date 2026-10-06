@@ -2281,11 +2281,39 @@ def test_dropped_acknowledgement_lets_the_command_be_delivered_again(
     # Each command queues two acknowledgements (received, applied): the oldest are dropped.
     for i in range(limit):
         adapter.handle_command({"id": f"c{i}", "kind": "pause", "target_kind": "instance"})
-    assert "c0" not in adapter._commands_seen, "its acknowledgements were dropped"
-    assert f"c{limit - 1}" in adapter._commands_seen
+    # c0's terminal acknowledgement was dropped: its result is kept as a tombstone.
+    assert adapter._terminal_acks["c0"][0] == "applied"
     monkeypatch.setattr(adapter.client, "ack_command", real)
     adapter.handle_command({"id": "c0", "kind": "pause", "target_kind": "instance"})
     assert ("c0", "applied") in [(c, b.get("status")) for c, b in server.acks]
+    assert "c0" not in adapter._terminal_acks
+
+
+def test_redelivered_cancel_whose_applied_ack_was_dropped_is_answered_applied(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    monkeypatch.setattr(adapter, "_interrupt_subagent", lambda sid: True)
+    real = adapter.client.ack_command
+
+    def ack_endpoint_down(command_id: str, status: str, detail: Any) -> Any:
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(adapter.client, "ack_command", ack_endpoint_down)
+    adapter.subagent_start(parent_session_id="p", child_session_id="c", child_subagent_id="sa-1")
+    adapter.on_session_start(session_id="c", platform="subagent", model="m")
+    cancel = {"id": "k1", "kind": "cancel", "target_kind": "session", "target_ref": "c"}
+    adapter.handle_command({**cancel, "status": "requested"})
+    adapter.subagent_stop(parent_session_id="p", child_session_id="c", child_status="interrupted")
+    limit = adapter._ack_retries.maxlen
+    assert limit is not None
+    for i in range(limit):  # the outage drops k1's acknowledgements
+        adapter.handle_command({"id": f"x{i}", "kind": "pause", "target_kind": "instance"})
+    monkeypatch.setattr(adapter.client, "ack_command", real)
+    # The session ended long ago: re-executing the cancel would answer refused.
+    adapter.handle_command({**cancel, "status": "received"})
+    k1 = [b.get("status") for c, b in server.acks if c == "k1"]
+    assert k1 == ["applied"], "the observed result is delivered, not a refusal"
 
 
 @pytest.mark.parametrize("request_kind", ["hello", "create_session"])
@@ -2311,3 +2339,50 @@ def test_delayed_state_response_never_replaces_a_newer_heartbeat_state(
         adapter.on_session_start(session_id="s-late", platform="cli")
     assert adapter._effective_state == "enforce", "the stale observe answer is ignored"
     assert adapter.local_mode() == "enforce"
+
+
+@pytest.mark.parametrize("newer", ["shadow", "observe"])
+def test_delayed_enforce_verdict_is_read_in_the_newer_nonblocking_mode(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newer: str
+) -> None:
+    server.decide = lambda body: "deny"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    original = adapter.client.authorize
+
+    def enforce_deny_overtaken(sid: str, body: Any) -> Any:
+        answer = original(sid, body)  # an enforce deny
+        adapter._set_state(newer, adapter._state_request())  # newer heartbeat
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", enforce_deny_overtaken)
+    runner = Runner(adapter)
+    runner.direct("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 1, f"{newer} never blocks on a stale enforce deny"
+    assert adapter._effective_state == newer
+
+
+def test_failed_mutator_hello_blocks_when_enforce_starts_meanwhile(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server.effective_state = "shadow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "shadow"
+
+    def other_plugin(**kwargs: Any) -> dict[str, Any]:
+        return {"action": "modify", "args": {}}
+
+    adapter.ctx._manager._hooks["pre_tool_call"].append(other_plugin)
+
+    def hello_fails_while_enforce_starts(body: Any) -> Any:
+        server.effective_state = "enforce"
+        adapter._set_state("enforce", adapter._state_request())  # concurrent heartbeat
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(adapter.client, "hello", hello_fails_while_enforce_starts)
+    runner = Runner(adapter)
+    out = json.loads(runner.direct("read_file", {"path": "/tmp/a"}))
+    assert runner.executions == 0
+    assert "has not confirmed them" in out["error"]

@@ -220,19 +220,35 @@ class _ExecutionPlan:
     meta: dict[str, Any] = field(default_factory=dict)
 
 
+_MAX_TERMINAL_ACKS = 10_000
+
+
 def _queue_ack_retry(
     retries: deque[tuple[str, str, dict[str, Any]]],
     seen: set[str],
+    terminal: OrderedDict[str, tuple[str, dict[str, Any]]],
     item: tuple[str, str, dict[str, Any]],
 ) -> None:
-    """Queue a failed acknowledgement. When the bounded queue is full, the oldest one is
-    dropped and its command is no longer marked seen (unless another acknowledgement of
-    it is still queued), so the gateway's redelivery is executed and acknowledged again
-    instead of being ignored forever."""
+    """Queue a failed acknowledgement. When the bounded queue is full the oldest one is
+    dropped, unless another acknowledgement of the same command is still queued:
+
+    * a terminal one (``applied``, ``refused``) is kept as a tombstone, so the gateway's
+      redelivery is answered with that result instead of executing the command again
+      (a cancel cannot be applied again once its session ended);
+    * a ``received`` one makes the command no longer seen, so its redelivery is executed.
+    """
     evicted = retries[0] if retries.maxlen is not None and len(retries) == retries.maxlen else None
     retries.append(item)
-    if evicted is not None and all(queued[0] != evicted[0] for queued in retries):
-        seen.discard(evicted[0])
+    if evicted is None or any(queued[0] == evicted[0] for queued in retries):
+        return
+    command_id, status, detail = evicted
+    if _ACK_RANK.get(status, 0) >= _ACK_RANK["applied"]:
+        terminal[command_id] = (status, detail)
+        while len(terminal) > _MAX_TERMINAL_ACKS:
+            oldest, _ = terminal.popitem(last=False)
+            seen.discard(oldest)
+    else:
+        seen.discard(command_id)
 
 
 def _add_once(waiting: dict[str, list[str]], target: str, command_id: str) -> None:
@@ -471,6 +487,8 @@ class HermesAdapter:
         self._commands_seen: set[str] = set()
         # Acknowledgements that failed in transport; retried on every tick until accepted.
         self._ack_retries: deque[tuple[str, str, dict[str, Any]]] = deque(maxlen=500)
+        # Terminal results whose acknowledgement was dropped from the full retry queue.
+        self._terminal_acks: OrderedDict[str, tuple[str, dict[str, Any]]] = OrderedDict()
         # Every cancel command waiting for the end of a session or subagent, oldest first:
         # each one is acknowledged when Hermes reports that end.
         self._cancel_sessions: dict[str, list[str]] = {}
@@ -976,7 +994,10 @@ class HermesAdapter:
             logger.warning("command %s ack %s failed (%s)", command_id, status, exc.code)
             if exc.status == 0 or exc.status >= 500:
                 _queue_ack_retry(
-                    self._ack_retries, self._commands_seen, (command_id, status, detail)
+                    self._ack_retries,
+                    self._commands_seen,
+                    self._terminal_acks,
+                    (command_id, status, detail),
                 )
             return False
         self._drop_superseded_acks(command_id, status)
@@ -1012,6 +1033,11 @@ class HermesAdapter:
             'paused'
         """
         command_id = _str(command.get("id"))
+        if command_id in self._terminal_acks:
+            # Its terminal acknowledgement was dropped: answer the redelivery with it.
+            status, detail = self._terminal_acks.pop(command_id)
+            self._ack(command_id, status, detail)
+            return
         if not command_id or command_id in self._commands_seen:
             return
         self._commands_seen.add(command_id)
@@ -2098,10 +2124,25 @@ class HermesAdapter:
                 )
             self._settle_delegation(provisional, commit=False)
             return _Verdict()
+        applied = True
         if effective_mode == "shadow" and self._effective_state not in _ENFORCE_LIKE - {"enforce"}:
-            self._set_state("shadow", seq)
+            applied = self._set_state("shadow", seq)
         elif effective_mode == "enforce" and self._effective_state not in _ENFORCE_LIKE:
-            self._set_state("enforce", seq)
+            applied = self._set_state("enforce", seq)
+        if not applied and self.local_mode() != effective_mode:
+            # A request sent after this one already applied another mode: the verdict is
+            # read in that mode, never in the stale one.
+            current = self.local_mode()
+            if current == "observe":
+                self._settle_delegation(provisional, commit=False)
+                return _Verdict()
+            if current == "enforce":
+                self._settle_delegation(provisional, commit=False)
+                return _Verdict(
+                    block="Agenomic: the mode changed while this call was decided; "
+                    "the action was not executed."
+                )
+            effective_mode = current
         explanation = _str(resp.get("explanation"))[:300]
         decision_id = _str(resp.get("decision_id")) or None
         self._emit_decision(
@@ -2207,6 +2248,9 @@ class HermesAdapter:
         last confirmed them; a block message (enforce) when that hello is not delivered."""
         if self.foreign_mutators() == self._foreign or self._hello():
             return None
+        # The hello may have overlapped a heartbeat that changed the mode: the current one
+        # decides whether the unconfirmed callbacks block, not the snapshot taken before.
+        mode = self.local_mode()
         reason = self._mutators_message(tool)
         self._emit_decision(
             sid,

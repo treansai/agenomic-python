@@ -374,6 +374,11 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   (reported in every heartbeat), no replacement is started (neither a restart
   nor `resume`) and the group stop is retried on every tick; without restarts
   the supervisor retries once more on the way out and exits 1.
+- With `--skills-dir`, Hermes is started only after a first successful sync of
+  the approved skills; while the gateway or the directory is unavailable it
+  stays stopped and every tick retries the sync, so it never loads skills left
+  over from before (possibly revoked since). Pending commands are fetched and
+  applied before that first start.
 - Approved skills (`GET /skills/approved`) are written into `--skills-dir`
   after their digest (`sha256:` or `blake3:`) is checked; targets escaping the
   directory are rejected; files a previous sync wrote and that are no longer

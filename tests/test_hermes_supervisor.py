@@ -9,7 +9,7 @@ import socket
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import pytest
 from pydantic import ValidationError
@@ -308,6 +308,10 @@ def test_failed_manifest_write_keeps_the_previous_manifest(
     sync_skills([_skill("a", "A")], out)
     assert not (out / "b" / "SKILL.md").exists()
     assert json.loads(manifest.read_text()) == {"files": ["a/SKILL.md"]}
+
+
+#: A successful sync that changed nothing (tests that skip the skills sync).
+SYNCED = {"written": 0, "unchanged": 0, "removed": 0, "rejected": 0}
 
 
 def make_supervisor(tmp_path: Path, api: FakeApi, argv: list[str]) -> Supervisor:
@@ -793,7 +797,7 @@ def test_launch_failure_follows_the_restart_policy(
         interval_s=0.01,
     )
     s = Supervisor(settings, FakeApi(), environ=PROCESS_ENV, connect=refuse)
-    monkeypatch.setattr(s, "sync_skills", lambda: None)
+    monkeypatch.setattr(s, "sync_skills", lambda: dict(SYNCED))
     monkeypatch.setattr(sup.signal, "signal", lambda *_a: None)
     assert s.run() == 1, "the supervisor stops with a failure instead of idling forever"
     assert s.restarts == 2
@@ -829,7 +833,7 @@ def test_failed_tick_still_stops_the_child(monkeypatch: pytest.MonkeyPatch, tmp_
         interval_s=0.01,
     )
     s = Supervisor(settings, FakeApi(), environ=PROCESS_ENV, connect=refuse)
-    monkeypatch.setattr(s, "sync_skills", lambda: None)
+    monkeypatch.setattr(s, "sync_skills", lambda: dict(SYNCED))
     monkeypatch.setattr(sup.signal, "signal", lambda *_a: None)
 
     def broken_tick() -> None:
@@ -897,7 +901,7 @@ def test_final_heartbeat_is_report_only(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
     api = ResumeAfterStop()
     s = make_supervisor(tmp_path, api, [sys.executable, "-c", "pass"])
-    monkeypatch.setattr(s, "sync_skills", lambda: None)
+    monkeypatch.setattr(s, "sync_skills", lambda: dict(SYNCED))
     monkeypatch.setattr(sup.signal, "signal", lambda *_a: None)
     real_start = s.start_child
     starts: list[bool] = []
@@ -1463,7 +1467,7 @@ def test_resume_at_startup_starts_hermes_only_after_the_skills_sync(
     s.settings.restart = False
     monkeypatch.setattr(sup.signal, "signal", lambda *_a: None)
     order: list[str] = []
-    monkeypatch.setattr(s, "sync_skills", lambda: order.append("skills"))
+    monkeypatch.setattr(s, "sync_skills", lambda: order.append("skills") or dict(SYNCED))
     real_start = s.start_child
 
     def tracking_start() -> bool:
@@ -1476,6 +1480,32 @@ def test_resume_at_startup_starts_hermes_only_after_the_skills_sync(
         assert order[:2] == ["skills", "start"], "Hermes starts after the approved skills"
         assert order.count("start") == 1
         assert ("r1", "applied") in [(c, st) for c, st, _ in api.acks]
+    finally:
+        proc = s.proc
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait(10)
+
+
+def test_hermes_waits_for_a_successful_first_skills_sync(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(sup.signal, "signal", lambda *_a: None)
+    results: list[Optional[dict[str, int]]] = [None, None, dict(SYNCED)]
+    monkeypatch.setattr(s, "sync_skills", lambda: results.pop(0) if results else dict(SYNCED))
+    starts: list[int] = []
+    real_start = s.start_child
+
+    def tracking_start() -> bool:
+        starts.append(len(results))
+        return real_start()
+
+    monkeypatch.setattr(s, "start_child", tracking_start)
+    try:
+        assert s.run() == 0
+        assert starts == [0], "started once, only after the sync succeeded"
     finally:
         proc = s.proc
         if proc is not None and proc.poll() is None:

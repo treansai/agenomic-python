@@ -1206,6 +1206,9 @@ class Supervisor:
         self._stopping = threading.Event()
         # True during the start-up heartbeat: a ``resume`` then only lifts the refusal.
         self._deferring_start = False
+        # Hermes waits for a successful first skills sync: until then it is not started, so
+        # it never loads skills left over from before (possibly revoked since).
+        self._start_after_sync = False
         self._seen_commands: set[str] = set()
         # Acknowledgements that failed in transport, retried on every tick until accepted.
         self._ack_retries: deque[tuple[str, str, dict[str, JsonValue]]] = deque(maxlen=500)
@@ -1559,10 +1562,23 @@ class Supervisor:
         self.poll()
         # Commands first: a stop command is never delayed by a slow skills sync.
         self.heartbeat()
-        if self._ticks % max(1, self.settings.skills_every) == 0:
+        if self._start_after_sync:
+            self._start_when_synced(self.sync_skills())
+        elif self._ticks % max(1, self.settings.skills_every) == 0:
             self.sync_skills()
         self._ticks += 1
         self._retry_acks()
+
+    def _start_when_synced(self, synced: Optional[dict[str, int]]) -> None:
+        """Start Hermes once the approved skills are reconciled (or no skills directory is
+        configured); after a failed sync it stays stopped and the next tick retries."""
+        if self.settings.skills_dir is not None and synced is None:
+            if not self._start_after_sync:
+                logger.error("approved skills not synced; Hermes is not started until they are")
+            self._start_after_sync = True
+            return
+        self._start_after_sync = False
+        self.start_child()
 
     def request_stop(self, *_: object) -> None:
         """Signal handler: stop at the next loop iteration.
@@ -1594,14 +1610,14 @@ class Supervisor:
             self.heartbeat()
         finally:
             self._deferring_start = False
-        self.sync_skills()
-        self.start_child()
+        self._start_when_synced(self.sync_skills())
         failed = False
         try:
             while not self._stopping.is_set():
                 self.tick()
                 if not self.settings.restart and (
-                    self.state in ("exited", "stopped") or self._group_pending
+                    (self.state in ("exited", "stopped") and not self._start_after_sync)
+                    or self._group_pending
                 ):
                     # Without restarts a group that did not stop is retried once more on
                     # the way out and the supervisor exits 1 if it still survives.
