@@ -33,24 +33,24 @@ and `aiosqlite` are only needed by the restart tests and by example 15
 
 ## Verified cells
 
-Status on 2026-10-05. Every cell below ran the whole test suite
+Status on 2026-10-06. Every cell below ran the whole test suite
 (`pytest --no-cov`) locally on macOS 26.3 (arm64), in a virtual environment
 installed with `uv pip install -e ".[dev,all]" -c <constraint file>`, whose
 packages of the table above match the point exactly.
 
-| Point   | Python  | Result                |
-| ------- | ------- | --------------------- |
-| primary | 3.10.18 | 963 passed, 2 skipped |
-| primary | 3.11.11 | 965 passed            |
-| primary | 3.12.11 | 965 passed            |
-| primary | 3.13.5  | 965 passed            |
-| floor   | 3.10.18 | 963 passed, 2 skipped |
-| floor   | 3.13.5  | 965 passed            |
+| Point   | Python  | Result                 |
+| ------- | ------- | ---------------------- |
+| primary | 3.10.18 | 1058 passed, 3 skipped |
+| primary | 3.11.11 | 1061 passed            |
+| primary | 3.12.11 | 1061 passed            |
+| primary | 3.13.5  | 1061 passed            |
+| floor   | 3.10.18 | 1058 passed, 3 skipped |
+| floor   | 3.13.5  | 1061 passed            |
 
 On the primary point with Python 3.10, the full check also passed in an
 environment without the SQLite saver: `ruff check`, `ruff format --check`,
-`mypy src` and `pytest --cov=agenomic --cov-fail-under=85` (959 passed,
-6 skipped, coverage 91.10 %).
+`mypy src` and `pytest --cov=agenomic --cov-fail-under=85` (1054 passed,
+7 skipped, coverage 91.52 %).
 
 The skipped tests:
 
@@ -61,6 +61,9 @@ The skipped tests:
   skips below Python 3.11: the LangChain run context variable does not reach
   asyncio tasks there, so a nested bind cannot be detected on Python 3.10
   async.
+- `test_experiments_runner.py::test_multi_turn_case_reuses_its_thread`
+  skips below Python 3.11: its case resumes an `interrupt()`, and the
+  experiment runner runs graphs with `ainvoke`.
 - `test_langgraph_binding_resume.py::test_interrupt_resume_after_real_process_restart_sqlite`
   (online and offline),
   `::test_factory_execution_scope_resume_after_real_process_restart_sqlite`
