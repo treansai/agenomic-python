@@ -2184,6 +2184,11 @@ class HermesAdapter:
             >>> a.authorize(tool="terminal", args={"command": "ls"}, sid="s1", tool_call_id="c1", local_hash="h").block
             'Agenomic denied terminal: not allowed (decision unknown)'
         """
+        if mask_text(tool) != tool:
+            # A credential-shaped tool name never leaves the process (discovery withholds it
+            # too): handled as an authorization that could not be asked, i.e. blocked in
+            # enforce, unchanged execution in shadow and observe.
+            raise HermesApiError("credential_shaped_tool", "tool name not sent to the gateway", 0)
         session = self._session(sid)
         if not session.admitted:
             self._admit(session)

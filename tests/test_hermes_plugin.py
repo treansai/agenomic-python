@@ -3530,3 +3530,22 @@ def test_credential_shaped_tool_identifiers_are_not_catalogued(
     assert adapter.discover_tools() == 1
     assert [t["tool_name"] for t in sent] == ["read_file"]
     assert "A1b2C3d4E5f6G7h8I9j0K1" not in json.dumps(sent)
+
+
+@pytest.mark.parametrize("mode", ["enforce", "shadow"])
+def test_credential_shaped_tool_name_never_reaches_authorize(
+    server: FakeAgenomic, tmp_path: Path, mode: str
+) -> None:
+    server.effective_state = mode
+    server.decide = lambda body: "allow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == mode
+    runner = Runner(adapter)
+    secret = "github_pat_" + "A1b2C3d4E5f6G7h8I9j0K1"
+    for order in ("agent_loop", "direct"):
+        out = getattr(runner, order)(secret, {"q": 1}, tcid=f"c_{order}")
+        if mode == "enforce":
+            assert "unavailable" in json.loads(out)["error"]
+    assert runner.executions == (0 if mode == "enforce" else 2), "shadow never blocks"
+    assert all(secret not in json.dumps(r.body) for r in server.authorize_calls())

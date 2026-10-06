@@ -316,3 +316,11 @@ def test_render_hermes_config_accepts_an_env_reference_for_a_string_setting() ->
     cfg = render_hermes_config("https://a.example", settings={"mode_hint": "${env:MODE}"})
     entry = cfg["plugins"]["entries"]["agenomic"]["settings"]  # type: ignore[index,call-overload]
     assert entry["mode_hint"] == "${MODE}"
+
+
+@pytest.mark.parametrize("key", ["timeouts", "buffer", "capture"])
+def test_render_hermes_config_refuses_an_unknown_nested_key_holding_an_env_reference(
+    key: str,
+) -> None:
+    with pytest.raises(ValueError, match=f"{key}.typo is not an adapter setting"):
+        render_hermes_config("https://a.example", settings={key: {"typo": "${env:X}"}})

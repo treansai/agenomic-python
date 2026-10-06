@@ -76,7 +76,8 @@ or fragment), as the adapter, the supervisor and the HTTP clients do, and so are
 `settings`: unknown keys and literal values the adapter would refuse are
 rejected, while `${env:VAR}` references are checked when the adapter loads
 (only in string fields: `timeouts`, `buffer` and `capture` are mappings and
-take references in their fields, never as a whole). A
+take references in their fields, never as a whole, and an unknown field is
+refused even when its value is a reference). A
 configuration Hermes could not load is never rendered. It produces:
 
 ```yaml
@@ -143,9 +144,10 @@ failure there (gateway unreachable, an exception from a third party registry)
 is never fatal: the heartbeat thread still starts and retries both on every
 tick, and a discovery failure never skips that tick's heartbeat, so the guard
 status and command polling stay alive. A tool whose name or toolset is
-credential-shaped is not catalogued (its identifier never leaves the process;
-in enforce the gateway refuses it as unknown), and schemas are redacted before
-they are sent.
+credential-shaped is not catalogued and its calls are never sent to
+`/authorize` either (its identifier never leaves the process: blocked in
+enforce, unchanged execution in shadow and observe), and schemas are redacted
+before they are sent.
 
 | Effective state | Adapter behaviour |
 | --- | --- |

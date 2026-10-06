@@ -150,6 +150,13 @@ def check_endpoint(value: str) -> str:
     return value.rstrip("/")
 
 
+_OBJECT_MODELS: dict[str, type[BaseModel]] = {
+    "timeouts": Timeouts,
+    "buffer": BufferConfig,
+    "capture": CaptureConfig,
+}
+
+
 class AdapterConfig(BaseModel):
     """``agenomic.hermes.adapter_config/v1``.
 
@@ -495,6 +502,13 @@ def render_hermes_config(
                     f"{key} is a mapping; use ${{env:VAR}} references in its fields instead"
                 )
             continue
+        if key in _OBJECT_SETTINGS and isinstance(value, dict):
+            # Checked before references are left out: an unknown field is refused by the
+            # adapter whatever its value, also one that only Hermes can expand.
+            known = _OBJECT_MODELS[key].model_fields
+            for field in value:
+                if field not in known:
+                    raise ValueError(f"{key}.{field} is not an adapter setting")
         literal[key] = _without_env_refs(value)
     # Values known now are validated as the adapter will; ${env:VAR} references are
     # only known in the Hermes environment and are checked when the adapter loads.
