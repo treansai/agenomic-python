@@ -991,7 +991,8 @@ class HermesAdapter:
             "foreign_mutators": foreign,
             "provider": provider,
             "compat_results": self._compat_results(),
-            "platform": self._platform or "cli",
+            # Sent outside the event pipeline: masked like any exported text.
+            "platform": mask_text(self._platform or "cli"),
         }
 
     def _hello(self) -> bool:
@@ -1424,7 +1425,7 @@ class HermesAdapter:
             return
         body: dict[str, Any] = {
             "hermes_session_id": session.hermes_session_id,
-            "platform": session.platform or self._platform or "cli",
+            "platform": mask_text(session.platform or self._platform or "cli"),
         }
         if session.model:
             # Sent outside the event pipeline: a custom model id can carry a credential.

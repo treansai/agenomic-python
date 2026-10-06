@@ -401,7 +401,8 @@ its retry queues (admissions, session ends, command acknowledgements, action
 reports) against a slow gateway, the guard status file is rewritten whenever a
 heartbeat interval has passed, so it never goes stale meanwhile. An
 interrupt that applies a cancel ends the session for the adapter.
-The admitted model id is masked like any exported text.
+The admitted model id and the platform name (in the hello and the
+admission) are masked like any exported text.
 An acknowledgement that fails on a transport error, a timeout, a 5xx or a
 transient 4xx (408, 425, 429) is queued and retried on the next heartbeat, by
 the plugin and the supervisor alike.
@@ -421,7 +422,10 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   `HERMES_HOME`, `AGENOMIC_HERMES_CONFIG`, ... plus `--allow-env`). Every
   `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD` (bare names too: `TOKEN`,
   `PASSWORD`, ...), and every provider
-  credential (`AWS_SECRET_ACCESS_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`), is
+  credential (`AWS_SECRET_ACCESS_KEY`, `AWS_ACCESS_KEY_ID`, and every variable
+  locating a credential file: `*_CREDENTIALS`, `*_CREDENTIALS_FILE`,
+  `*_TOKEN_FILE`, `*_KEY_FILE`, `*_SECRET_FILE`, `KUBECONFIG`,
+  `DOCKER_CONFIG`), is
   removed even when allowlisted, except the runtime token variable. The supervisor token is
   never passed.
 - `AGENOMIC_HERMES_SUPERVISOR_TOKEN` must hold a supervisor token
@@ -455,7 +459,9 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   acknowledged as applied and is executed again when the gateway delivers it
   again; a supervisor leaving with such a group exits 1. `resume`
   allows restarts again and starts the child; it also rearms the restart
-  budget of a supervisor that had given up after `--max-restarts`.
+  budget of a supervisor that had given up after `--max-restarts`. Only
+  actual launch attempts spend that budget: a start waiting for a successful
+  skills sync does not.
 - When the Hermes process exits on its own, what remains of its process group
   is stopped the same way (SIGTERM, SIGKILL after `--grace-s`) before
   anything else: before a restart, before giving up, and also after a clean

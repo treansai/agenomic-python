@@ -56,8 +56,13 @@ RUNTIME_TOKEN_PREFIX = "agmhr_"
 SUPERVISOR_TOKEN_PREFIX = "agmhs_"
 #: Credential-shaped variable names, bare (``TOKEN``, ``PASSWORD``) or suffixed (``X_TOKEN``).
 _SECRET_NAME = re.compile(r"(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|ACCESS_KEY|PRIVATE_KEY)$", re.I)
+#: Provider credentials, and the variables that locate credential files (the file is the
+#: credential: ``AWS_SHARED_CREDENTIALS_FILE``, ``AWS_WEB_IDENTITY_TOKEN_FILE``...).
 _PROVIDER_KEYS = re.compile(
-    r"_API_KEY$|^API_KEY$|^AWS_SECRET_ACCESS_KEY$|^GOOGLE_APPLICATION_CREDENTIALS$", re.I
+    r"_API_KEY$|^API_KEY$|^AWS_SECRET_ACCESS_KEY$|^AWS_ACCESS_KEY_ID$"
+    r"|_CREDENTIALS$|_CREDENTIALS_FILE$|_TOKEN_FILE$|_KEY_FILE$|_SECRET_FILE$"
+    r"|^KUBECONFIG$|^DOCKER_CONFIG$",
+    re.I,
 )
 PLUGIN_ID = "agenomic"
 GUARD_COMMAND = "agenomic-hermes-guard"

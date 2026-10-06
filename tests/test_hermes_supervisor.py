@@ -1968,3 +1968,38 @@ def test_only_the_root_manifest_is_left_out_of_the_inventory(tmp_path: Path) -> 
             assert sup._managed_files_at(fd) == expected
         finally:
             os.close(fd)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_ACCESS_KEY_ID",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "AZURE_CLIENT_CERTIFICATE_KEY_FILE",
+        "KUBECONFIG",
+    ],
+)
+def test_credential_locators_are_scrubbed_even_when_allowlisted(name: str) -> None:
+    env = build_child_env({**PARENT_ENV, name: "/secrets/x"}, allow=[name])
+    assert name not in env
+    assert not provider_secrets_absent({name: "/secrets/x"})
+
+
+def test_a_launch_waiting_for_the_skills_sync_spends_no_restart(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(sup.Supervisor, "_backoff_wait", lambda self, _s: False)
+    settings = SupervisorSettings(
+        argv=[str(tmp_path / "missing-binary")], hermes_home=tmp_path, max_restarts=2
+    )
+    s = Supervisor(settings, FakeApi(), environ=PROCESS_ENV, connect=refuse)
+    assert not s.start_child()
+    s.poll()  # the failed launch schedules a start after the next sync
+    assert s.restarts == 1
+    assert s._start_after_sync
+    for _ in range(5):  # the skills sync keeps failing: no new launch attempt
+        s.poll()
+    assert s.restarts == 1
+    assert not s.gave_up

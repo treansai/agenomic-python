@@ -4167,3 +4167,20 @@ def test_a_failing_admission_retry_rotates_so_later_sessions_are_retried(
     adapter.tick()
     assert adapter._sessions["s1"].admitted, "s0 failing never starves s1"
     assert "s0" in adapter._unadmitted
+
+
+def test_a_credential_shaped_platform_is_masked_in_hello_and_admission(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "sk-" + "abcdefghijklmnop"
+    adapter = make_adapter(server.url, tmp_path)
+    bodies: list[Any] = []
+    real_hello, real_create = adapter.client.hello, adapter.client.create_session
+    monkeypatch.setattr(adapter.client, "hello", lambda b: (bodies.append(b), real_hello(b))[1])
+    monkeypatch.setattr(
+        adapter.client, "create_session", lambda b: (bodies.append(b), real_create(b))[1]
+    )
+    adapter._ensure_started(f"custom-{secret}")
+    adapter.on_session_start(session_id="s1", platform=f"custom-{secret}")
+    assert len(bodies) >= 2
+    assert secret not in json.dumps(bodies)

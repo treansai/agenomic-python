@@ -1348,7 +1348,9 @@ class Supervisor:
             'stopped'
         """
         if self.proc is None:
-            if self._launch_failed and not self._stopping.is_set():
+            # A start already scheduled (waiting for a successful skills sync) is not a new
+            # attempt: only actual launches spend the restart budget.
+            if self._launch_failed and not self._stopping.is_set() and not self._start_after_sync:
                 self._restart_or_give_up("launch failed")
             return
         code = self.proc.poll()
