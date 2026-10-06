@@ -130,6 +130,10 @@ refused. Keep the default variable, or put the reference in the
 
 The server computes the effective state on every admission and returns it in
 `/hello`, `/heartbeat`, `/sessions` and every `authorize` answer.
+The first `/hello` and the tool discovery happen when the plugin starts; a
+failure there (gateway unreachable, an exception from a third party registry)
+is never fatal: the heartbeat thread still starts and retries both on every
+tick, so the guard status and command polling stay alive.
 
 | Effective state | Adapter behaviour |
 | --- | --- |

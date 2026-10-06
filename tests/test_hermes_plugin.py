@@ -2781,3 +2781,33 @@ def test_inner_gate_blocks_when_enforce_starts_after_the_middleware_admission(
     assert not [a for a in adapter._auth.values() if a.state == "authorized"], (
         "no authorization is left reusable"
     )
+
+
+def test_start_up_failure_still_starts_the_heartbeat_and_is_retried(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._start_threads = True
+    beats: list[bool] = []
+    monkeypatch.setattr(adapter, "_heartbeat_loop", lambda: beats.append(True))
+    real_discover = adapter.discover_tools
+    failures = {"n": 1}
+
+    def broken_registry() -> int:
+        if failures["n"]:
+            failures["n"] -= 1
+            raise RuntimeError("third-party registry failed")
+        return real_discover()
+
+    monkeypatch.setattr(adapter, "discover_tools", broken_registry)
+    try:
+        adapter._ensure_started("cli")  # never raises
+        assert adapter._thread is not None
+        adapter._thread.join(2.0)
+        assert beats == [True], "the heartbeat thread runs despite the failed start up"
+        assert json.loads(adapter.status_file.read_text())["loaded"] is True
+        adapter._tools_sent = False
+        adapter.tick()
+        assert failures["n"] == 0, "discovery is retried by the heartbeat"
+    finally:
+        adapter.shutdown()

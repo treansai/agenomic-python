@@ -653,12 +653,20 @@ class HermesAdapter:
             self._started = True
         if not first:
             return
-        if self._hello():
-            try:
-                self.discover_tools()
-            except HermesApiError as exc:
-                logger.warning("tool discovery failed (%s)", exc.code)
-        self._write_status()
+        try:
+            if self._hello():
+                try:
+                    self.discover_tools()
+                except HermesApiError as exc:
+                    logger.warning("tool discovery failed (%s)", exc.code)
+        except Exception as exc:
+            # Never fatal: the heartbeat thread started below retries hello and discovery
+            # on every tick, and keeps the guard status and command polling alive.
+            logger.warning("Agenomic start up failed: %s", type(exc).__name__)
+        try:
+            self._write_status()
+        except Exception as exc:
+            logger.warning("guard status write failed: %s", type(exc).__name__)
         if self._start_threads:
             self._thread = threading.Thread(
                 target=self._heartbeat_loop, name="agenomic-hermes-heartbeat", daemon=True
