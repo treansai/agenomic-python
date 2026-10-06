@@ -35,6 +35,7 @@ import json
 import logging
 import math
 import os
+import secrets
 import threading
 import time
 import uuid
@@ -70,6 +71,7 @@ from agenomic.integrations.hermes.guard import (
     _SHARING_BACKOFF_S,
     _SHARING_RETRIES,
     DEFAULT_MAX_AGE_S,
+    GUARD_EPOCH_ENV,
     MIN_MAX_AGE_S,
     STATUS_SCHEMA,
     status_path,
@@ -286,8 +288,12 @@ def write_status(
     instance_status: str,
     effective_state: Optional[str],
     error: Optional[str] = None,
+    epoch: Optional[str] = None,
 ) -> None:
     """Atomically write the status file read by ``agenomic-hermes-guard``.
+
+    ``epoch`` binds the file to the Hermes process whose environment carries it in
+    ``AGENOMIC_HERMES_GUARD_EPOCH``; the guard allows nothing without that match.
 
     Example:
         >>> import tempfile, json
@@ -307,6 +313,8 @@ def write_status(
     }
     if error:
         doc["error"] = error
+    if epoch:
+        doc["epoch"] = epoch
     path.parent.mkdir(parents=True, exist_ok=True)
     # Unpredictable name, created exclusively with mode 0600: a file or link planted in
     # the directory is never truncated or followed.
@@ -441,6 +449,9 @@ class HermesAdapter:
         self._thread: Optional[threading.Thread] = None
         # Serializes status writes so a heartbeat in flight cannot undo shutdown's "not loaded".
         self._status_lock = threading.Lock()
+        # Per adapter: published in the Hermes process environment at install, so only
+        # the shell hooks of this process accept the status file it writes.
+        self._guard_epoch = secrets.token_hex(16)
 
     # ------------------------------------------------------------------
     # installation and lifecycle
@@ -458,6 +469,7 @@ class HermesAdapter:
             ['pre_tool_call', 'tool_execution', 'llm_request']
         """
         self.ctx = ctx
+        os.environ[GUARD_EPOCH_ENV] = self._guard_epoch
         # Duck typed Hermes ``PluginContext``: a missing method is caught and reported below.
         hermes_ctx = cast(Any, ctx)
         registered: list[str] = []
@@ -696,6 +708,7 @@ class HermesAdapter:
                     loaded=self._gates_registered() and not self._stop.is_set(),
                     instance_status=self._instance_status(),
                     effective_state=self._effective_state,
+                    epoch=self._guard_epoch,
                 )
             except OSError as exc:
                 logger.warning("status file not written: %s", type(exc).__name__)
@@ -1004,7 +1017,9 @@ class HermesAdapter:
             return
         self._cancel_sessions[sid] = command_id
         if session.subagent_id and self._interrupt_subagent(session.subagent_id):
-            self._cancel_subagents[session.subagent_id] = command_id
+            # A subagent cancel already waiting keeps its own command id: both are
+            # acknowledged when the end is observed.
+            self._cancel_subagents.setdefault(session.subagent_id, command_id)
         # Root sessions expose no interrupt handle to plugins: further tool calls are blocked and
         # the command is applied once Hermes reports the session's end.
 
@@ -1028,10 +1043,16 @@ class HermesAdapter:
         return None
 
     def _observe_terminal(self, sid: str, subagent_id: Optional[str], how: str) -> None:
-        command_id = self._cancel_sessions.pop(sid, None) if sid else None
-        if subagent_id:
-            command_id = self._cancel_subagents.pop(subagent_id, None) or command_id
-        if command_id:
+        """Every cancel waiting for this end (of the session and of the subagent it runs
+        as, possibly distinct commands) is acknowledged as applied, each exactly once."""
+        command_ids: list[str] = []
+        for command_id in (
+            self._cancel_sessions.pop(sid, None) if sid else None,
+            self._cancel_subagents.pop(subagent_id, None) if subagent_id else None,
+        ):
+            if command_id and command_id not in command_ids:
+                command_ids.append(command_id)
+        for command_id in command_ids:
             self._ack(command_id, "applied", {"observed": how, "hermes_session_id": sid})
 
     # ------------------------------------------------------------------

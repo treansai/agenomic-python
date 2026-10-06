@@ -35,6 +35,11 @@ if TYPE_CHECKING:  # the guard runs on every tool call; keep its imports minimal
     from pydantic import JsonValue
 
 STATUS_SCHEMA = "agenomic.hermes.status/v1"
+#: Set by the plugin in the Hermes process environment (a random value per adapter, also
+#: written to the status file). Hermes hands its environment to the shell hooks it spawns,
+#: so a status file left by another Hermes process (one killed with SIGKILL, then restarted
+#: without the plugin) does not match and the guard blocks.
+GUARD_EPOCH_ENV = "AGENOMIC_HERMES_GUARD_EPOCH"
 DEFAULT_MAX_AGE_S = 120.0
 #: Smallest staleness deadline the guard accepts. The adapter refreshes the status file at
 #: least every ``max_age / 3`` seconds and never more often than every second, so a deadline
@@ -70,23 +75,33 @@ def _parse_time(value: object) -> Optional[float]:
 def evaluate(
     status: Optional[Mapping[str, JsonValue]],
     *,
+    epoch: Optional[str],
     now: Optional[float] = None,
     max_age_s: float = DEFAULT_MAX_AGE_S,
 ) -> Optional[str]:
     """Return a block message, or ``None`` to allow.
 
     Example:
-        >>> evaluate(None)
+        >>> evaluate(None, epoch="e1")
         'Agenomic adapter status is missing; the plugin is not loaded. The action was not executed.'
         >>> from datetime import timezone
-        >>> fresh = {"loaded": True, "instance_status": "active", "updated_at": "2026-10-05T12:00:00Z"}
-        >>> evaluate(fresh, now=datetime(2026, 10, 5, 12, 0, 30, tzinfo=timezone.utc).timestamp()) is None
+        >>> fresh = {"loaded": True, "instance_status": "active", "epoch": "e1",
+        ...     "updated_at": "2026-10-05T12:00:00Z"}
+        >>> t = datetime(2026, 10, 5, 12, 0, 30, tzinfo=timezone.utc).timestamp()
+        >>> evaluate(fresh, epoch="e1", now=t) is None
         True
+        >>> evaluate(fresh, epoch="e2", now=t)
+        'Agenomic adapter status was written by another Hermes process; the action was not executed.'
     """
     if status is None:
         return "Agenomic adapter status is missing; the plugin is not loaded. The action was not executed."
     if status.get("loaded") is not True:
         return "Agenomic adapter is not loaded; the action was not executed."
+    if not epoch or status.get("epoch") != epoch:
+        return (
+            "Agenomic adapter status was written by another Hermes process; "
+            "the action was not executed."
+        )
     updated = _parse_time(status.get("updated_at"))
     current = time.time() if now is None else now
     if updated is None:
@@ -179,7 +194,7 @@ def main(
             return _block(
                 out, "Agenomic adapter status is unreadable; the action was not executed."
             )
-        message = evaluate(status, max_age_s=max_age)
+        message = evaluate(status, epoch=env.get(GUARD_EPOCH_ENV), max_age_s=max_age)
         if message is not None:
             return _block(out, message)
         return 0

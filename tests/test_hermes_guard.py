@@ -31,18 +31,40 @@ def iso(delta_s: float = 0.0) -> str:
     )
 
 
+EPOCH = "epoch-of-this-hermes-process"
+
+
 def run(
     home: Path, status: Optional[Any] = None, stdin: str = PAYLOAD, **env: str
 ) -> tuple[int, str]:
+    """Run the guard as a hook of the Hermes process whose plugin wrote ``status``: the
+    epoch is in the environment and, unless the test sets it, in a dict status."""
     if status is not None:
+        if isinstance(status, dict):
+            status = {"epoch": EPOCH, **status}
         path = home / "agenomic" / "status.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(status if isinstance(status, str) else json.dumps(status))
     out = io.StringIO()
-    code = guard.main(
-        stdin=io.StringIO(stdin), stdout=out, environ={"HERMES_HOME": str(home), **env}
-    )
+    environ = {"HERMES_HOME": str(home), guard.GUARD_EPOCH_ENV: EPOCH, **env}
+    code = guard.main(stdin=io.StringIO(stdin), stdout=out, environ=environ)
     return code, out.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("status_epoch", "env_epoch"),
+    [("other-process", EPOCH), (None, EPOCH), (EPOCH, ""), ("", "")],
+    ids=["other_process", "status_without_epoch", "hook_without_epoch", "both_empty"],
+)
+def test_status_of_another_hermes_process_blocks(
+    tmp_path: Path, status_epoch: Optional[str], env_epoch: str
+) -> None:
+    # A fresh loaded status left by a Hermes process killed with SIGKILL and restarted
+    # without the plugin: the new process's hooks do not carry that epoch.
+    status: dict[str, Any] = {"loaded": True, "instance_status": "active", "updated_at": iso()}
+    status["epoch"] = status_epoch
+    code, out = run(tmp_path, status, **{guard.GUARD_EPOCH_ENV: env_epoch})
+    assert_block(code, out, "another Hermes process")
 
 
 def assert_block(code: int, out: str, fragment: str) -> None:

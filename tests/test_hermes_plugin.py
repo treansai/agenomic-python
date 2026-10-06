@@ -11,6 +11,7 @@ The two Hermes call orders are simulated faithfully:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from collections.abc import Iterator
@@ -1358,7 +1359,12 @@ def test_shutdown_makes_the_guard_block(server: FakeAgenomic, tmp_path: Path) ->
     adapter.on_session_start(session_id="s", platform="cli")
     assert wait_for(lambda: len(server.calls("/heartbeat")) >= 1)
     status = guard_mod._read_status(adapter.status_file)
-    assert guard_mod.evaluate(status, max_age_s=60) is None, "the loaded adapter allows"
+    assert os.environ[guard_mod.GUARD_EPOCH_ENV] == adapter._guard_epoch
+    epoch = adapter._guard_epoch
+    assert guard_mod.evaluate(status, epoch=epoch, max_age_s=60) is None, (
+        "the loaded adapter allows"
+    )
+    assert guard_mod.evaluate(status, epoch="restarted", max_age_s=60) is not None
 
     assert ctx.unload
     for callback in ctx.unload:
@@ -1368,7 +1374,7 @@ def test_shutdown_makes_the_guard_block(server: FakeAgenomic, tmp_path: Path) ->
     status = guard_mod._read_status(adapter.status_file)
     assert status is not None
     assert status["loaded"] is False
-    assert guard_mod.evaluate(status, max_age_s=60) is not None, "the guard blocks after unload"
+    assert guard_mod.evaluate(status, epoch=epoch, max_age_s=60) is not None, "blocks after unload"
     adapter.tick()  # a late heartbeat never reopens the guard
     assert guard_mod._read_status(adapter.status_file)["loaded"] is False  # type: ignore[index]
 
@@ -2088,3 +2094,27 @@ def test_observe_between_the_gates_never_leaves_the_authorization_reusable(
     adapter._set_state("enforce")
     runner.direct("read_file", args, tcid="call_1")
     assert len(server.authorize_calls()) == first + 1, "no reuse of the old permit"
+
+
+@pytest.mark.parametrize("first", ["subagent", "session"])
+def test_session_and_subagent_cancels_of_one_child_are_both_applied(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    monkeypatch.setattr(adapter, "_interrupt_subagent", lambda sid: True)
+    adapter.subagent_start(parent_session_id="p", child_session_id="c", child_subagent_id="sa-1")
+    adapter.on_session_start(session_id="c", platform="subagent", model="m")
+    commands = {
+        "subagent": {
+            "id": "k_sub",
+            "kind": "cancel",
+            "target_kind": "subagent",
+            "target_ref": "sa-1",
+        },
+        "session": {"id": "k_ses", "kind": "cancel", "target_kind": "session", "target_ref": "c"},
+    }
+    for kind in (first, "session" if first == "subagent" else "subagent"):
+        adapter.handle_command({**commands[kind], "status": "requested"})
+    adapter.subagent_stop(parent_session_id="p", child_session_id="c", child_status="interrupted")
+    applied = sorted(c for c, b in server.acks if b["status"] == "applied")
+    assert applied == ["k_ses", "k_sub"], "every cancel waiting for this end is acknowledged"

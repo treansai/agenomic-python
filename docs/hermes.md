@@ -427,7 +427,15 @@ the file is missing, unreadable, older than `AGENOMIC_HERMES_GUARD_MAX_AGE_S`
 `quarantined` or `revoked`. The plugin writes `loaded: true` only when both
 gates, the `pre_tool_call` hook and the `tool_execution` middleware, are
 registered: with one missing, an argument change after authorization could go
-undetected in one of the two Hermes call orders, so the guard keeps blocking. When Hermes unloads the plugin (or the process
+undetected in one of the two Hermes call orders, so the guard keeps blocking.
+The status file is also bound to the Hermes process that wrote it: at load the
+plugin draws a random epoch, puts it in that process's environment
+(`AGENOMIC_HERMES_GUARD_EPOCH`, which Hermes passes to the shell hooks it
+spawns) and writes it into the file. The guard blocks unless both match, so a
+fresh `loaded: true` left by a Hermes killed with SIGKILL does not open the
+guard of a Hermes restarted without the plugin. Limit: a Hermes that re-executes
+itself in place (`exec`, same environment) and then fails to load the plugin is
+covered only by the staleness deadline. When Hermes unloads the plugin (or the process
 exits) the plugin writes `loaded: false`, so the guard blocks at once instead
 of when the file goes stale; it then drains the exporter, closes its HTTP
 client and removes its `atexit` hook, so reloads do not accumulate adapters or
