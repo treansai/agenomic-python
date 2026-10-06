@@ -438,5 +438,131 @@ def test_spool_rewrite_never_reuses_a_wide_temporary_file(tmp_path: Path) -> Non
     leftover = tmp_path / "spool.jsonl.tmp"
     leftover.write_text("stale")
     os.chmod(leftover, 0o666)
-    assert len(spool.drain(1)) == 1
+    lines, events = spool.head(1)
+    assert len(events) == 1
+    spool.remove(lines)
+    assert len(spool.path.read_text().splitlines()) == 1
     assert oct(spool.path.stat().st_mode & 0o777) == "0o600"
+
+
+def _spooled_exporter(spool: Path, post: Any) -> EventExporter:
+    """An exporter whose worker stays parked, so the test drives ``_replay_spool`` itself."""
+    return EventExporter(post, max_retries=0, flush_interval_s=30.0, spool_path=str(spool))
+
+
+@posix_only
+def test_replay_refuses_a_symlinked_spool(tmp_path: Path) -> None:
+    target = tmp_path / "elsewhere.jsonl"
+    content = json.dumps(EventBuilder().build("planted")) + "\n"
+    target.write_text(content)
+    os.chmod(target, 0o644)
+    spool = tmp_path / "spool.jsonl"
+    spool.symlink_to(target)
+    sent: list[dict[str, Any]] = []
+    exporter = _spooled_exporter(spool, sent.extend)
+    exporter._replay_spool()
+    assert sent == []
+    assert spool.is_symlink(), "the link is not replaced"
+    assert target.read_text() == content, "the target is neither rewritten nor truncated"
+    assert oct(target.stat().st_mode & 0o777) == "0o644"
+    # Spooling to that path stops: an undelivered event is counted, not written.
+    exporter._overflow([EventBuilder().build("later")], "test")
+    assert target.read_text() == content
+    assert exporter.stats()["dropped"] == 1
+    exporter.close(0.2)
+
+
+@posix_only
+def test_replay_refuses_a_spool_owned_by_another_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spool = tmp_path / "spool.jsonl"
+    content = json.dumps(EventBuilder().build("planted")) + "\n"
+    spool.write_text(content)
+    foreign = spool.stat().st_ino
+    real_fstat = os.fstat
+
+    def fstat(fd: int) -> os.stat_result:
+        st = real_fstat(fd)
+        if st.st_ino != foreign:
+            return st
+        fields = list(st[:10])
+        fields[4] = os.geteuid() + 1  # st_uid
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", fstat)
+    sent: list[dict[str, Any]] = []
+    exporter = _spooled_exporter(spool, sent.extend)
+    exporter._replay_spool()
+    assert sent == []
+    assert spool.read_text() == content
+    assert spool.stat().st_ino == foreign, "the foreign file is not replaced"
+    exporter.close(0.2)
+
+
+def test_replayed_records_are_validated_and_redacted_again(tmp_path: Path) -> None:
+    spool = tmp_path / "spool.jsonl"
+    tampered = EventBuilder().build("tampered")
+    tampered["extra"] = {"note": "Authorization: Basic cGxhaW5zZWNyZXQ=", "api_key": "k-123"}
+    tampered["reason"] = "curl -H 'Authorization: Bearer abcdefghijklmnop'"
+    lines = [
+        json.dumps(tampered),
+        json.dumps({"event_id": "x", "type": "t"}),  # no schema_version
+        json.dumps({**EventBuilder().build("ok"), "unexpected": 1}),  # key outside the schema
+        json.dumps(["not", "an", "event"]),
+        "{not json",
+    ]
+    spool.write_text("".join(line + "\n" for line in lines))
+    sent: list[dict[str, Any]] = []
+    exporter = _spooled_exporter(spool, sent.extend)
+    exporter._replay_spool()
+    assert [e["event_id"] for e in sent] == [tampered["event_id"]]
+    text = json.dumps(sent)
+    assert "cGxhaW5zZWNyZXQ=" not in text
+    assert "abcdefghijklmnop" not in text
+    assert "k-123" not in text
+    assert sent[0]["extra"]["note"] == "Authorization: Basic ***"
+    assert exporter.stats()["dropped"] == 4
+    assert spool.read_text() == "", "the batch, invalid lines included, left the spool"
+    exporter.close(0.2)
+
+
+def test_replayed_batch_stays_on_disk_until_acknowledged(tmp_path: Path) -> None:
+    spool = tmp_path / "spool.jsonl"
+    events = [EventBuilder().build("spooled") for _ in range(3)]
+    original = "".join(json.dumps(e) + "\n" for e in events)
+    spool.write_text(original)
+    on_disk_during_post: list[str] = []
+
+    def failing(batch: list[dict[str, Any]]) -> None:
+        on_disk_during_post.append(spool.read_text())
+        raise ConnectionError("process dies before the acknowledgement")
+
+    exporter = _spooled_exporter(spool, failing)
+    exporter._replay_spool()
+    assert on_disk_during_post == [original], "a crash during delivery loses nothing"
+    assert spool.read_text() == original, "a failed replay neither loses nor duplicates"
+    assert exporter.stats()["dropped"] == 0
+    exporter.close(0.2)
+
+
+def test_acknowledged_replay_is_removed_and_concurrent_appends_survive(tmp_path: Path) -> None:
+    spool = tmp_path / "spool.jsonl"
+    events = [EventBuilder().build("spooled") for _ in range(3)]
+    spool.write_text("".join(json.dumps(e) + "\n" for e in events))
+    late = EventBuilder().build("late")
+    holder: dict[str, EventExporter] = {}
+    sent: list[dict[str, Any]] = []
+
+    def post(batch: list[dict[str, Any]]) -> None:
+        # Another producer overflows into the spool while the replay is in flight.
+        holder["exporter"]._overflow([late], "buffer full")
+        sent.extend(batch)
+
+    exporter = _spooled_exporter(spool, post)
+    holder["exporter"] = exporter
+    exporter._replay_spool()
+    assert [e["event_id"] for e in sent] == [e["event_id"] for e in events]
+    remaining = [json.loads(line) for line in spool.read_text().splitlines()]
+    assert [e["event_id"] for e in remaining] == [late["event_id"]]
+    exporter.close(0.2)

@@ -243,11 +243,21 @@ The exporter never blocks the agent: a bounded buffer, one daemon thread,
 batches of at most 500 to `POST /events`, 3 retries with backoff,
 deduplication by `event_id`, drop and count on overflow, and an optional
 size capped JSONL spool for undelivered batches. The spool is `0600` even
-when the file already existed with a wider mode, a spool owned by another
-user or a symbolic link is refused, and a directory the exporter creates for
-it is `0700`. The spool is
+when the file already existed with a wider mode, and a directory the exporter
+creates for it is `0700`. Every open of the spool, reads included, uses
+`O_NOFOLLOW` and an owner check: a spool that is a symbolic link or belongs to
+another user is never read, written, truncated or replaced; the exporter logs
+an error and stops spooling for its lifetime (overflow is then dropped and
+counted). The spool is
 replayed one batch at a time when the buffer is idle and, under continuous
-load, after every 10 live batches or once per `flush_interval_s`. Its stats
+load, after every 10 live batches or once per `flush_interval_s`. A replayed
+record must have the `agenomic.hermes.event/v1` shape (schema, string
+`event_id` and `type`, no unknown top-level key) and goes through the
+redaction walk again before it is sent; anything else is dropped and counted.
+A replayed batch stays in the file until the server acknowledged it, then is
+removed while events appended meanwhile are kept; a crash in between sends it
+again, which the gateway absorbs because it deduplicates events by
+`event_id` (counted as `duplicates`). Its stats
 (`buffered`, `dropped`, `buffer_full`, `last_flush_error`) go into every
 heartbeat. Telemetry is not the security record: decisions are stored server
 side when they are made, so dropped events never change a decision.

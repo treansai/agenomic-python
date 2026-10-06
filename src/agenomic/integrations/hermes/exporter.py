@@ -12,7 +12,9 @@ events per ``POST /v1/hermes/runtime/events``, retries a batch a limited number
 of times with backoff, deduplicates by ``event_id``, and counts what it drops.
 An optional spool keeps undelivered batches in a size capped JSONL file; it is
 replayed one batch at a time when the buffer is idle and, under continuous
-load, after every ``REPLAY_EVERY`` live batches or once per flush interval.
+load, after every ``REPLAY_EVERY`` live batches or once per flush interval. A
+replayed batch is re-validated and re-redacted, and leaves the file only once
+the server acknowledged it.
 
 Telemetry is not the security record: decisions are stored server side when
 they are made, so a dropped event never changes a decision.
@@ -33,6 +35,7 @@ Example:
 
 from __future__ import annotations
 
+import errno
 import itertools
 import json
 import logging
@@ -42,7 +45,7 @@ import re
 import sys
 import threading
 import time
-from collections import OrderedDict, deque
+from collections import Counter, OrderedDict, deque
 from collections.abc import Iterable, Mapping, Sequence, Set
 from datetime import datetime, timezone
 from pathlib import Path
@@ -377,11 +380,13 @@ class ExporterStats(dict[str, JsonValue]):
 
 
 def open_private(path: Path, flags: int) -> int:
-    """Open ``path`` for writing as a file only its owner can read.
+    """Open ``path`` (to read or write) as a file only its owner can read.
 
     ``os.open``'s mode applies only when the file is created, so an existing file is
     narrowed to ``0600`` too; a file owned by another user, or a symbolic link, is refused
-    (``OSError``). Windows has no POSIX modes: the file is opened as is.
+    with ``PermissionError`` before anything is read or written through the descriptor
+    (``O_TRUNC`` is not refused this way: add it only for a file nobody else can plant).
+    Windows has no POSIX modes: the file is opened as is.
 
     Example:
         >>> import tempfile
@@ -391,8 +396,17 @@ def open_private(path: Path, flags: int) -> int:
         >>> os.close(open_private(p, os.O_WRONLY | os.O_APPEND))
         >>> oct(p.stat().st_mode & 0o777) if sys.platform != "win32" else "0o600"
         '0o600'
+        >>> with os.fdopen(open_private(p, os.O_RDONLY), encoding="utf-8") as fh:
+        ...     fh.read()
+        'x'
     """
-    fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as e:
+        # O_NOFOLLOW on a symbolic link fails with ELOOP (EMLINK on some BSDs).
+        if e.errno in (errno.ELOOP, errno.EMLINK) and path.is_symlink():
+            raise PermissionError(f"spool file {path.name} is a symbolic link") from e
+        raise
     if sys.platform == "win32":
         return fd
     try:
@@ -407,28 +421,72 @@ def open_private(path: Path, flags: int) -> int:
     return fd
 
 
+#: Top-level keys an ``agenomic.hermes.event/v1`` document may carry.
+_EVENT_KEYS = frozenset(
+    {"schema_version", "event_id", "type", "seq", "occurred_at", "extra", *EventBuilder._FIELDS}
+)
+
+
+def _replayable(record: object) -> Optional[dict[str, Any]]:
+    """A spooled record re-checked and re-redacted before it is sent again, or ``None``.
+
+    The spool is a file on disk: whatever it holds is validated against the event shape
+    and goes through the same redaction walk as a freshly built event.
+    """
+    if not isinstance(record, dict) or not set(record) <= _EVENT_KEYS:
+        return None
+    if record.get("schema_version") != EVENT_SCHEMA:
+        return None
+    if not isinstance(record.get("event_id"), str) or not isinstance(record.get("type"), str):
+        return None
+    if not isinstance(record.get("extra", {}), dict):
+        return None
+    return cast(dict[str, Any], _redact_field(record))
+
+
 class _Spool:
     """Append only JSONL file capped at ``max_bytes``; lines are already redacted events.
 
     The file (and its temporary copy) is ``0600`` even when it existed with a wider mode;
-    a directory the spool creates is ``0700``.
+    a directory the spool creates is ``0700``. Every open, reads included, goes through
+    :func:`open_private`: a spool that is a symbolic link or belongs to another user is
+    never read, written or replaced, and spooling stops for the life of the exporter.
     """
 
     def __init__(self, path: Path, max_bytes: int) -> None:
         self.path = path
         self.max_bytes = max_bytes
+        self.refused = False
         self._lock = threading.Lock()
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     def size(self) -> int:
+        if self.refused:
+            return 0
         try:
             return self.path.stat().st_size
         except FileNotFoundError:
             return 0
 
+    def _refuse(self, error: PermissionError) -> None:
+        if not self.refused:
+            logger.error("event spool %s refused, spooling disabled: %s", self.path.name, error)
+        self.refused = True
+
+    def _read_lines(self) -> list[str]:
+        """The spool's lines, read through an owner-checked, no-follow descriptor."""
+        try:
+            fd = open_private(self.path, os.O_RDONLY)
+        except FileNotFoundError:
+            return []
+        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read().splitlines()
+
     def append(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Write what fits; return the events that did not fit."""
         with self._lock:
+            if self.refused:
+                return events
             size = self.size()
             lines: list[str] = []
             rejected: list[dict[str, Any]] = []
@@ -443,35 +501,70 @@ class _Spool:
                 size += cost
                 lines.append(line)
             if lines:
-                fd = open_private(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+                try:
+                    fd = open_private(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
+                except PermissionError as e:
+                    self._refuse(e)
+                    return events
                 with os.fdopen(fd, "a", encoding="utf-8") as fh:
                     fh.writelines(lines)
             return rejected
 
-    def drain(self, limit: int) -> list[dict[str, Any]]:
-        """Read up to ``limit`` events and rewrite the file without them."""
+    def head(self, limit: int) -> tuple[list[str], list[dict[str, Any]]]:
+        """The first ``limit`` lines, left on disk, and the replayable events among them."""
         with self._lock:
+            if self.refused:
+                return [], []
             try:
-                raw = self.path.read_text(encoding="utf-8").splitlines()
-            except FileNotFoundError:
-                return []
-            taken: list[dict[str, Any]] = []
-            for line in raw[:limit]:
-                try:
-                    item = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(item, dict):
-                    taken.append(item)
-            rest = raw[limit:]
+                lines = self._read_lines()[:limit]
+            except PermissionError as e:
+                self._refuse(e)
+                return [], []
+        events: list[dict[str, Any]] = []
+        for line in lines:
+            try:
+                item = _replayable(json.loads(line))
+            except json.JSONDecodeError:
+                item = None
+            if item is not None:
+                events.append(item)
+        return lines, events
+
+    def remove(self, taken: list[str]) -> None:
+        """Rewrite the spool without ``taken``, a head returned by :meth:`head`.
+
+        The file is read again under the lock, so lines appended since :meth:`head` stay.
+        """
+        with self._lock:
+            if self.refused or not taken:
+                return
+            try:
+                current = self._read_lines()
+            except PermissionError as e:
+                self._refuse(e)
+                return
+            if current[: len(taken)] == taken:
+                rest = current[len(taken) :]
+            else:  # not expected (only appends happen meanwhile): drop each line once
+                pending = Counter(taken)
+                rest = []
+                for line in current:
+                    if pending[line] > 0:
+                        pending[line] -= 1
+                    else:
+                        rest.append(line)
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            fd = open_private(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+            try:
+                fd = open_private(tmp, os.O_WRONLY | os.O_CREAT)
+            except PermissionError as e:
+                self._refuse(e)
+                return
+            os.ftruncate(fd, 0)  # only once the temporary file is known to be ours
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.writelines(line + "\n" for line in rest)
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, self.path)
-            return taken
 
 
 class EventExporter:
@@ -589,7 +682,8 @@ class EventExporter:
                 logger.warning("event spool write failed: %s", type(e).__name__)
                 rejected = events
             if rejected:
-                self._count_drop(f"{reason}; spool full", len(rejected))
+                why = "spool refused" if self._spool.refused else "spool full"
+                self._count_drop(f"{reason}; {why}", len(rejected))
         else:
             self._count_drop(reason, len(events))
 
@@ -703,7 +797,7 @@ class EventExporter:
                 self._in_flight = 0
                 self._cond.notify_all()
 
-    def _deliver(self, batch: list[dict[str, Any]]) -> bool:
+    def _deliver(self, batch: list[dict[str, Any]], *, spool_on_failure: bool = True) -> bool:
         for attempt in range(self._max_retries + 1):
             try:
                 self._post(batch)
@@ -721,6 +815,8 @@ class EventExporter:
                 self._delivered += len(batch)
                 return True
         self._last_failure_at = time.monotonic()
+        if not spool_on_failure:  # a replayed batch is still in the spool
+            return False
         self._overflow(batch, f"delivery failed after {self._max_retries + 1} attempt(s)")
         return False
 
@@ -733,13 +829,25 @@ class EventExporter:
         if time.monotonic() - self._last_failure_at < 5 * self._interval:
             return
         try:
-            events = self._spool.drain(self._batch_size)
+            lines, events = self._spool.head(self._batch_size)
         except OSError as e:
             logger.warning("event spool read failed: %s", type(e).__name__)
             return
+        if len(events) < len(lines):
+            self._count_drop("invalid spool record", len(lines) - len(events))
         if events:
             with self._cond:
                 self._in_flight = len(events)
-            self._deliver(events)
+            # The batch stays on disk until the server acknowledged it: a crash in between
+            # replays it again, which is harmless because the gateway deduplicates events
+            # by ``event_id`` (``ON CONFLICT ... event_id DO NOTHING``, counted as
+            # ``duplicates`` by ``POST /v1/hermes/runtime/events``).
+            delivered = self._deliver(events, spool_on_failure=False)
             with self._cond:
                 self._in_flight = 0
+            if not delivered:
+                return
+        try:
+            self._spool.remove(lines)
+        except OSError as e:
+            logger.warning("event spool rewrite failed: %s", type(e).__name__)
