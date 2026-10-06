@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import os
@@ -18,6 +19,7 @@ from agenomic.integrations.hermes.exporter import (
     EventExporter,
     is_secret_key,
     mask_text,
+    redact,
     redacted_preview,
 )
 
@@ -953,3 +955,20 @@ def test_event_type_carrying_a_credential_is_masked() -> None:
     secret = "agmhr_" + "s3cretvalue123456"
     event = EventBuilder().build(f"custom.{secret}")
     assert "s3cretvalue123456" not in json.dumps(event)
+
+
+@pytest.mark.parametrize("signature", ["c2lnbmF0dXJlLXZhbHVl", ""])
+def test_standalone_jwts_are_masked(signature: str) -> None:
+    header = base64.urlsafe_b64encode(b'{"alg":"HS256","typ":"JWT"}').rstrip(b"=").decode()
+    payload = base64.urlsafe_b64encode(b'{"sub":"user-1","exp":1}').rstrip(b"=").decode()
+    token = f"{header}.{payload}.{signature}"
+    masked = mask_text(f"session ended: {token} expired")
+    assert payload not in masked
+    assert masked.startswith("session ended: ")
+    assert masked.endswith(" expired")
+    assert redact({"note": token}) != {"note": token}
+
+
+def test_dotted_identifiers_are_not_mistaken_for_jwts() -> None:
+    text = "module.submodule.attr and eyJ.short.x"
+    assert mask_text(text) == text

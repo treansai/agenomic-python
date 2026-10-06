@@ -280,7 +280,7 @@ it reaches the queue or the spool. With `capture.content: redacted_preview`,
 previews go through `redacted_preview` in `exporter.py` (credential keys masked at any depth,
 including a content mapping's own top-level keys), credential pattern
 masking and truncation. Pattern masking covers token shapes (`agmhr_`, `sk-`,
-`ghp_`, `AKIA...`, private key headers), `Authorization`/`Proxy-Authorization`
+`ghp_`, `github_pat_`, `AKIA...`, `xox?-`, JWTs, private key blocks), `Authorization`/`Proxy-Authorization`
 values for every scheme (`Bearer`, `Basic`, `Digest`, `Token`, `ApiKey`,
 `AWS4-HMAC-SHA256`, ...), cookie headers, `key=value` and `key: value` pairs
 whose key names a credential (`api_key`, `x-api-key`, `password`, `token`,
