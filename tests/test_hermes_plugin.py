@@ -3005,3 +3005,36 @@ def test_invalid_reload_shuts_the_previous_adapter_down(
         assert json.loads(status.read_text())["loaded"] is False
     finally:
         previous.shutdown()
+
+
+@pytest.mark.parametrize("applied", ["pause", "cancel_session", "enforce", "enforce_blocked"])
+def test_shadow_fail_open_rechecks_before_executing(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, applied: str
+) -> None:
+    server.effective_state = "shadow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert adapter.local_mode() == "shadow"
+    server.authorize_status = 503  # fails open in shadow
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    real_unavailable = adapter._unavailable
+
+    def applied_during_the_outage(*a: Any, **k: Any) -> Any:
+        out = real_unavailable(*a, **k)  # read the shadow mode: fail open
+        if applied == "pause":
+            adapter.handle_command({"id": "k1", "kind": "pause", "target_kind": "instance"})
+        elif applied == "cancel_session":
+            adapter.handle_command(
+                {"id": "k1", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+            )
+        else:
+            adapter._set_state(applied, adapter._state_request())
+        return out
+
+    monkeypatch.setattr(adapter, "_unavailable", applied_during_the_outage)
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, f"{applied} applied during the outage stops the call"
+    assert "not executed" in json.loads(str(out))["error"]

@@ -2878,6 +2878,42 @@ class HermesAdapter:
         self._drop_delegation(auth)
         return None
 
+    def _admit_without_authorization(
+        self,
+        sid: str,
+        tool: str,
+        tool_call_id: str,
+        args: Mapping[str, object],
+        meta: dict[str, Any],
+        *,
+        observe: bool = False,
+    ) -> _ExecutionPlan:
+        """The final admission of a call that proceeds without an authorization (observe,
+        a shadow fail-open). In the agent loop order this middleware is the last gate, so
+        a local command, a blocking state or enforce applied since the mode was read is
+        caught here, atomically, as the admission of an authorized call does."""
+        with self._lock, self._state_lock:
+            local_block = self._local_blocker(sid)
+            raw_state = self._effective_state
+            mode = self.local_mode()
+        if local_block is not None:
+            self._emit_local_block(sid, tool, tool_call_id, args, local_block)
+            return _ExecutionPlan(False, error=local_block[0], meta=meta)
+        if raw_state in _ENFORCE_LIKE - {"enforce"}:
+            return _ExecutionPlan(
+                False,
+                error=f"Agenomic: the instance is {raw_state}; the action was not executed.",
+                meta=meta,
+            )
+        if mode == "enforce":
+            return _ExecutionPlan(
+                False,
+                error="Agenomic: the mode changed while this call was decided; "
+                "the action was not executed.",
+                meta=meta,
+            )
+        return _ExecutionPlan(True, observe=observe, meta=meta)
+
     def _execution_gate(self, kwargs: Mapping[str, Any]) -> _ExecutionPlan:
         tool = _str(kwargs.get("tool_name"))
         sid = _str(kwargs.get("session_id"))
@@ -2923,7 +2959,7 @@ class HermesAdapter:
             message = self._arguments_not_canonical(sid, tool, tool_call_id, args, "execution")
             if message:
                 return _ExecutionPlan(False, error=message, meta=meta)
-            return _ExecutionPlan(True, meta=meta)
+            return self._admit_without_authorization(sid, tool, tool_call_id, args, meta)
         meta["local_hash"] = local_hash
         with self._lock:
             auth = self._auth.get((sid, tool, tool_call_id)) if tool_call_id else None
@@ -2947,15 +2983,17 @@ class HermesAdapter:
                 message = self._unavailable(sid, tool, tool_call_id, exc)
                 if message:
                     return _ExecutionPlan(False, error=message, meta=meta)
-                return _ExecutionPlan(True, meta=meta)
+                return self._admit_without_authorization(sid, tool, tool_call_id, args, meta)
             if verdict.block:
                 return _ExecutionPlan(False, error=verdict.block, meta=meta)
             if self.local_mode() == "observe":
-                return _ExecutionPlan(True, observe=True, meta=meta)
+                return self._admit_without_authorization(
+                    sid, tool, tool_call_id, args, meta, observe=True
+                )
             auth = verdict.authorization
             if auth is None:
                 if self.local_mode() == "shadow":
-                    return _ExecutionPlan(True, meta=meta)
+                    return self._admit_without_authorization(sid, tool, tool_call_id, args, meta)
                 return _ExecutionPlan(False, error=NO_AUTH_MESSAGE, meta=meta)
         elif auth.local_hash != local_hash:
             blocked = self._mismatch(auth, local_hash, "tool_execution")

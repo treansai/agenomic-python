@@ -904,7 +904,9 @@ def _previous_files(root: Path, manifest_path: Path) -> set[str]:
     if files is None:
         logger.error("skills manifest malformed; reconciling the whole directory")
         return _managed_files(root)
-    return files
+    # A manifest the child can rewrite is never authoritative: what is on disk is always
+    # reconciled too, so a forged manifest cannot hide a revoked skill.
+    return files | _managed_files(root)
 
 
 def _previous_files_at(root_fd: int) -> set[str]:  # pragma: posix-only
@@ -930,7 +932,9 @@ def _previous_files_at(root_fd: int) -> set[str]:  # pragma: posix-only
     if files is None:
         logger.error("skills manifest malformed; reconciling the whole directory")
         return _managed_files_at(root_fd)
-    return files
+    # A manifest the child can rewrite (same uid) is never authoritative: what is on disk
+    # is always reconciled too, so a forged manifest cannot hide a revoked skill.
+    return files | _managed_files_at(root_fd)
 
 
 def sync_skills(skills: Sequence[Mapping[str, JsonValue]], skills_dir: Path) -> dict[str, int]:

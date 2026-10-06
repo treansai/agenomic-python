@@ -164,7 +164,10 @@ the execution gate, and `pre_tool_call` in every mode, make the same recheck
 (local commands and the raw state, `enforce_blocked` included) before they let
 a call through. In the agent loop order, a call the middleware admitted in
 observe or shadow is blocked by the inner `pre_tool_call` if enforce applies
-in between: an authorization made there would belong to no execution. A local `pause`,
+in between: an authorization made there would belong to no execution. A call
+the middleware lets through without an authorization (observe, a shadow
+fail-open) goes through the same locked recheck of local commands, blocking
+states and the mode first. A local `pause`,
 `quarantine`, `revoke` or `cancel` is written under the same lock and checked
 again at admission, so one applied while the authorization was in flight
 still stops the call.
@@ -412,7 +415,10 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   applied before the first start, and a restart after a crash goes through the
   same tick (heartbeat, then sync, then start), so a quarantine or revoke
   queued meanwhile applies before any replacement runs. A missing manifest
-  (first sync, or deleted by the agent) reconciles the whole directory,
+  (first sync, or deleted by the agent) reconciles the whole directory; a
+  present manifest is never authoritative either (the child may share the
+  supervisor's uid and rewrite it): every sync reconciles the manifest and
+  everything on disk,
   symbolic links, FIFOs, sockets and devices included (the node itself is
   removed, never what a link points to, never opened).
   A SIGTERM or SIGINT received while a heartbeat or sync is blocked means

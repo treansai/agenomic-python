@@ -1331,7 +1331,7 @@ def test_descriptor_sync_writes_nested_skills_and_removes_stale_ones(tmp_path: P
     counts = sync_skills([_skill("a", "A")], out)
     assert counts == {"written": 0, "unchanged": 1, "removed": 1, "rejected": 0}
     assert not (out / "team" / "deep" / "SKILL.md").exists()
-    # A stale file behind a directory link is kept, and its target untouched.
+    # A directory link planted on a stale path is unlinked; its target is never touched.
     victim = tmp_path / "victim"
     victim.mkdir()
     (victim / "SKILL.md").write_text("precious")
@@ -1339,7 +1339,10 @@ def test_descriptor_sync_writes_nested_skills_and_removes_stale_ones(tmp_path: P
     (out / "team" / "deep" / "SKILL.md").unlink()
     (out / "team" / "deep").rmdir()
     (out / "team" / "deep").symlink_to(victim)
-    assert sync_skills([_skill("a", "A")], out)["removed"] == 0
+    counts = sync_skills([_skill("a", "A")], out)
+    assert counts["removed"] == 1
+    assert counts["rejected"] == 0
+    assert not (out / "team" / "deep").is_symlink()
     assert (victim / "SKILL.md").read_text() == "precious"
 
 
@@ -1610,17 +1613,20 @@ def test_revoked_skill_replaced_by_a_link_is_removed_not_kept(tmp_path: Path) ->
 
 
 @posix_only
-def test_stale_skill_behind_a_linked_directory_keeps_hermes_stopped(tmp_path: Path) -> None:
+def test_stale_skill_behind_a_linked_directory_is_unlinked_never_followed(
+    tmp_path: Path,
+) -> None:
     out = tmp_path / "skills"
     sync_skills([_skill("a", "A"), _skill("b", "B")], out)
     elsewhere = tmp_path / "elsewhere"
     (out / "b").rename(elsewhere)
     (out / "b").symlink_to(elsewhere)  # b's directory is now a link
     counts = sync_skills([_skill("a", "A")], out)
-    assert counts["rejected"] == 1, "not reconciled: Hermes is not started on it"
-    manifest = json.loads((out / ".agenomic_manifest.json").read_text())
-    assert "b/SKILL.md" in manifest["files"], "a later sync keeps trying"
+    assert counts["rejected"] == 0
+    assert not (out / "b").is_symlink(), "the link itself is removed"
     assert (elsewhere / "SKILL.md").exists(), "nothing followed through the link"
+    manifest = json.loads((out / ".agenomic_manifest.json").read_text())
+    assert manifest["files"] == ["a/SKILL.md"]
 
 
 @posix_only
@@ -1810,3 +1816,14 @@ def test_missing_manifest_reconciles_a_fifo_on_a_skill_path(tmp_path: Path) -> N
     assert counts["removed"] == 1
     assert not (out / "b" / "SKILL.md").exists()
     assert json.loads((out / ".agenomic_manifest.json").read_text()) == {"files": ["a/SKILL.md"]}
+
+
+def test_forged_manifest_cannot_hide_a_revoked_skill(tmp_path: Path) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A"), _skill("b", "B")], out)
+    # The child runs as the supervisor's uid: it rewrites the manifest to forget b.
+    (out / ".agenomic_manifest.json").write_text(json.dumps({"files": ["a/SKILL.md"]}))
+    counts = sync_skills([_skill("a", "A")], out)
+    assert counts["removed"] == 1
+    assert counts["rejected"] == 0
+    assert not (out / "b" / "SKILL.md").exists()
