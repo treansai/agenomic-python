@@ -1,0 +1,61 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R017",
+  "intent": "a caller value overrides the partial of the same variable",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Locale: {locale}",
+      "variables": {
+        "locale": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "partials": {
+        "locale": "en"
+      },
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "locale": "fr"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "Locale: fr",
+    "messages": null,
+    "expanded_template": "Locale: {locale}",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:dcd9996b0ed23d43df7d0055aa459365b95a004fe39aeba67b36b2209d5bca6e",
+      "kind": "text",
+      "text": "Locale: fr",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:c585a9ae82434a1dd826a5c664cae412446caf459d3663154f2d1cfbf2ae1810",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

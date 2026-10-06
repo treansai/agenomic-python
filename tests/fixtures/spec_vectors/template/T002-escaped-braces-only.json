@@ -1,0 +1,25 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T002",
+  "intent": "doubled braces are one literal",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "template": "{{literal}}"
+  },
+  "expected": {
+    "ok": true,
+    "tokens": [
+      {
+        "t": "literal",
+        "text": "{literal}"
+      }
+    ],
+    "source": "{{literal}}"
+  }
+}

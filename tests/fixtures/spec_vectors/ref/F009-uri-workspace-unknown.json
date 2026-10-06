@@ -1,0 +1,26 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "ref",
+  "id": "F009",
+  "intent": "offline, with no workspace known, the URI parses and the workspace check is deferred to the resolver",
+  "consumers": [
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "ref": "agenomic://0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f/prompts/prm_planner/versions/7",
+    "context": "execution",
+    "workspace_id": null
+  },
+  "expected": {
+    "ok": true,
+    "form": "uri",
+    "prompt_id": "prm_planner",
+    "version": 7,
+    "alias": null,
+    "workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f",
+    "canonical": "agenomic://0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f/prompts/prm_planner/versions/7",
+    "version_ref": null
+  }
+}

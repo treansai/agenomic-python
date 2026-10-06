@@ -1,0 +1,1985 @@
+from __future__ import annotations
+
+import asyncio
+import builtins
+import datetime
+import json
+import logging
+import pickle
+import sys
+import time
+import types
+import warnings
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
+from urllib.parse import quote, quote_plus
+
+import httpx
+import pytest
+from experiment_fakes import (
+    BASE,
+    TOKEN,
+    FakeRunnerServer,
+    GraphState,
+    agent_case,
+    make_runner,
+    runtime_digest,
+    single_node,
+)
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage, SystemMessage, ToolCall
+from langchain_core.messages.tool import tool_call
+from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import tool
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import START, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.store.memory import InMemoryStore
+from langgraph.types import interrupt
+from langgraph_world import World
+from prompt_fakes import AGENT
+from pydantic import BaseModel
+
+import agenomic._transport as transport_module
+import agenomic.experiments.runner as runner_module
+import agenomic.experiments.tools as tools_module
+from agenomic import Client
+from agenomic.cli.__main__ import main
+from agenomic.exceptions import ApiError
+from agenomic.experiments import (
+    EnvSecretResolver,
+    IsolationViolation,
+    SecretResolutionError,
+    SecretValues,
+    TrialContext,
+    classify,
+)
+from agenomic.experiments.context import TrialState
+from agenomic.experiments.errors import RunnerConfigurationError, error_code
+from agenomic.experiments.isolation import NamespacedStore, jsonable
+from agenomic.experiments.models import TrialAssignment
+from agenomic.experiments.runner import (
+    CallableEntryPoint,
+    ExperimentRunner,
+    GraphNodeEntryPoint,
+    GraphTarget,
+    RunnerEvaluator,
+    local_assignment,
+)
+from agenomic.experiments.secrets import redact_message, replace_secrets
+from agenomic.experiments.tools import FIXTURE_MISS_TEXT, logical_call_id
+from agenomic.integrations.langgraph_binding import bind_langgraph, prompts_for
+from agenomic.prompts.digest import prompt_digest
+
+SECRET = "s3cr3t-runner-value-0123456789"
+FOREIGN_TOKEN = "agr_" + "fedcba9876543210" * 4
+ENCODED = "p\\a\"ss'w+rd/x=y-runner-value"
+SHAPED = "sk-" + "a" * 24 + ".tail-part-9876"
+
+
+@pytest.fixture(autouse=True)
+def fast_sleeps(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    async def fast(delay: float) -> None:
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(transport_module, "_asleep", fast)
+    monkeypatch.setattr(transport_module, "_sleep", lambda delay: None)
+    monkeypatch.setattr(tools_module, "_asleep", fast)
+    monkeypatch.setattr(tools_module, "_sleep", lambda delay: None)
+    return
+
+
+@pytest.fixture
+def world() -> World:
+    return World.create()
+
+
+@pytest.fixture
+def server(world: World) -> FakeRunnerServer:
+    return FakeRunnerServer(world)
+
+
+async def render_plan(
+    ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+) -> dict[str, Any]:
+    text = prompts_for(config).render_text("planner.instructions")
+    return {"log": [text], "messages": [AIMessage(content=text)]}
+
+
+@tool(description="Look up an order.")
+def lookup_order(order_id: str) -> str:
+    return f"real order {order_id}"
+
+
+def tool_graph(model_calls: list[list[ToolCall]], *, handle_errors: bool = False) -> Any:
+    def factory(ctx: TrialContext) -> Any:
+        replies = iter(model_calls)
+
+        def agent(state: dict[str, Any]) -> dict[str, Any]:
+            calls = next(replies, [])
+            return {"messages": [AIMessage(content="", tool_calls=calls)]}
+
+        builder = StateGraph(GraphState)
+        builder.add_node("agent", agent)
+        builder.add_node(
+            "tools", ToolNode(ctx.wrap_tools([lookup_order]), handle_tool_errors=handle_errors)
+        )
+        builder.add_edge(START, "agent")
+        builder.add_edge("agent", "tools")
+        return builder.compile(checkpointer=ctx.checkpointer, store=ctx.store)
+
+    return factory
+
+
+def call(order_id: str, call_id: str = "call_1") -> ToolCall:
+    return ToolCall(name="lookup_order", args={"order_id": order_id}, id=call_id)
+
+
+def serve(runner: ExperimentRunner, **options: Any) -> int:
+    return runner.serve(idle_timeout=0, **options)
+
+
+def test_hello_declares_agents_entry_points_and_secret_names(
+    world: World, server: FakeRunnerServer
+) -> None:
+    evaluator = RunnerEvaluator(lambda case, output: True, version=3)
+    runner = make_runner(
+        server,
+        single_node(render_plan),
+        entry_points={"planner": GraphNodeEntryPoint("plan", seed_as_node="__start__")},
+        evaluators={"refund_ok": evaluator},
+        live_tools=True,
+        runner_options={"secrets": EnvSecretResolver(allow=["OPENAI_API_KEY"], environ={})},
+    )
+    assert serve(runner) == 0
+    hello = server.hellos[0]
+    agent = hello["agents"][0]
+    assert agent["agent_id"] == AGENT
+    assert agent["runtime_digests"] == [runtime_digest(world)]
+    assert agent["levels"] == ["agent", "node"]
+    assert agent["tool_modes"] == ["none", "mock", "recorded", "live"]
+    assert agent["entry_points"] == [
+        {"name": "planner", "kind": "graph_node", "node_path": "plan", "seed_as_node": "__start__"}
+    ]
+    assert agent["custom_evaluators"][0]["code_digest"] == evaluator.digest()
+    assert hello["secret_ref_names"] == ["env:OPENAI_API_KEY"]
+    assert TOKEN not in repr(runner)
+    assert TOKEN.encode() not in b"".join(server.raw_bodies())
+
+
+@pytest.mark.parametrize("shared_store", [False, True])
+def test_concurrent_arms_isolated_in_runner(server: FakeRunnerServer, shared_store: bool) -> None:
+    active: list[int] = [0]
+    peak: list[int] = [0]
+    savers: list[Any] = []
+
+    async def node(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        active[0] += 1
+        peak[0] = max(peak[0], active[0])
+        text = prompts_for(config).render_text("planner.instructions")
+        namespace = (*ctx.store_namespace, "memories")
+        await ctx.store.aput(namespace, "seen", {"text": text})
+        await asyncio.sleep(0.05)
+        items = await ctx.store.asearch(namespace)
+        savers.append(ctx.checkpointer)
+        active[0] -= 1
+        return {"log": [f"{text}|{len(items)}|{config['configurable']['thread_id']}"]}
+
+    trials = {
+        name: server.add_trial(name, agent_case(), arm_key=f"arm_{name}", experiment_id="exp_iso")
+        for name in ("v1", "v2")
+    }
+    shared = InMemoryStore()
+    runner = make_runner(
+        server,
+        single_node(node),
+        output_adapter=lambda values: values["log"],
+        runner_options={"max_concurrency": 2},
+        **({"store": shared} if shared_store else {}),
+    )
+    assert serve(runner) == 2
+    assert peak[0] == 2
+    assert len({id(saver) for saver in savers}) == 2
+    stored = shared.search(("agenomic_exp", "exp_iso"))
+    if shared_store:
+        assert sorted(item.namespace for item in stored) == sorted(
+            ("agenomic_exp", "exp_iso", trial_id, "a1", "memories") for trial_id in trials.values()
+        )
+        assert sorted(item.value["text"] for item in stored) == ["PLAN v1", "PLAN v2"]
+    else:
+        assert stored == []
+    for name, trial_id in trials.items():
+        result = server.trials[trial_id].result
+        assert result is not None
+        assert result["outcome"] == "evaluated"
+        text, count, thread = result["output"]["final"][0].split("|")
+        assert text == f"PLAN {name}"
+        assert count == "1"
+        assert thread == f"exp:exp_iso:{trial_id}:a1"
+        assert result["isolation"]["fresh_thread"] is True
+        assert result["isolation"]["checkpointer"] == "per_trial_in_memory"
+        assert (
+            result["runner_view_digest"] == server.trials[trial_id].assignment["runner_view_digest"]
+        )
+        assert server.trials[trial_id].accepts == 1
+
+
+def test_isolation_violation_detected(world: World, server: FakeRunnerServer) -> None:
+    def own_saver(ctx: TrialContext) -> Any:
+        builder = StateGraph(GraphState)
+        builder.add_node("plan", lambda state: {"log": ["x"]})
+        builder.add_edge(START, "plan")
+        return builder.compile(checkpointer=InMemorySaver())
+
+    first = server.add_trial("v1", agent_case())
+    assert serve(make_runner(server, own_saver)) == 1
+    assert server.trials[first].failures[0]["error_code"] == "isolation_violation"
+    assert server.trials[first].failures[0]["error_class"] == "runner_configuration"
+
+    async def escape(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        await ctx.store.aput(("other_trial",), "k", {"v": 1})
+        return {}
+
+    shared = InMemoryStore()
+    second = server.add_trial("v1", agent_case("case-2"))
+    assert serve(make_runner(server, single_node(escape), store=shared)) == 1
+    failure = server.trials[second].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "runner_configuration",
+        "isolation_violation",
+    )
+    assert shared.search(("other_trial",)) == []
+
+
+def test_secrets_never_in_reports(world: World, server: FakeRunnerServer) -> None:
+    resolver = EnvSecretResolver(allow=["SERVICE_KEY"], environ={"SERVICE_KEY": SECRET})
+
+    async def leaky(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        value = ctx.secrets["env:SERVICE_KEY"]
+        if ctx.case.case_id == "raise":
+            raise RuntimeError(f"provider rejected key {value}")
+        if ctx.case.case_id == "infra":
+            raise httpx.ConnectError(f"provider unreachable with key {value}")
+        tools = {item.name: item for item in ctx.wrap_tools([lookup_order])}
+        answer = await tools["lookup_order"].ainvoke({"order_id": value})
+        return {"log": [f"key={value}", str(answer)]}
+
+    ok = server.add_trial(
+        "v1", agent_case("ok"), secret_refs=["env:SERVICE_KEY"], tools={"mode": "mock"}
+    )
+    failed = server.add_trial("v1", agent_case("raise"), secret_refs=["env:SERVICE_KEY"])
+    infra = server.add_trial("v1", agent_case("infra"), secret_refs=["env:SERVICE_KEY"])
+    runner = make_runner(
+        server,
+        single_node(leaky),
+        output_adapter=lambda values: values["log"],
+        runner_options={"secrets": resolver},
+    )
+    assert serve(runner) == 3
+    infra_failure = server.trials[infra].failures[0]
+    assert (infra_failure["error_class"], infra_failure["error_code"]) == (
+        "infrastructure",
+        "connection_error",
+    )
+    assert infra_failure["message"] == "provider unreachable with key [REDACTED]"
+    for body in server.raw_bodies():
+        assert SECRET.encode() not in body
+        assert TOKEN.encode() not in body
+    output = server.trials[ok].result["output"]["final"]
+    assert output[0] == "key=[REDACTED]"
+    error = server.trials[failed].result["error"]
+    assert error["message"] == "provider rejected key [REDACTED]"
+    assert server.trials[failed].result["outcome"] == "agent_error"
+    assert "values=hidden" in repr(SecretValues({"env:SERVICE_KEY": SECRET}))
+    assert SECRET not in repr(SecretValues({"env:SERVICE_KEY": SECRET}))
+    with pytest.raises(TypeError):
+        pickle.dumps(SecretValues({"env:SERVICE_KEY": SECRET}))
+
+
+def test_unresolved_secret_is_runner_configuration(server: FakeRunnerServer) -> None:
+    trial = server.add_trial("v1", agent_case(), secret_refs=["env:MISSING"])
+    assert serve(make_runner(server, single_node(render_plan))) == 1
+    assert server.trials[trial].failures[0]["error_code"] == "secret_unresolved"
+    resolver = EnvSecretResolver(allow=["MISSING"], environ={})
+    with pytest.raises(SecretResolutionError):
+        resolver.resolve("env:MISSING")
+    with pytest.raises(SecretResolutionError):
+        resolver.resolve("vault:MISSING")
+    with pytest.raises(ValueError):
+        EnvSecretResolver(allow=["bad name"])
+
+
+def test_tool_calls_mock_recorded_and_fixture_policies(server: FakeRunnerServer) -> None:
+    mock = server.add_trial("v1", agent_case("mock"), tools={"mode": "mock"})
+    hit = server.add_trial("v1", agent_case("hit"), tools={"mode": "recorded"})
+    miss = server.add_trial("v1", agent_case("miss"), tools={"mode": "recorded"})
+    soft = server.add_trial(
+        "v1", agent_case("soft"), tools={"mode": "recorded", "on_fixture_miss": "tool_error"}
+    )
+    server.fixtures[("lookup_order", '{"order_id":"1234"}')] = {"status": "shipped"}
+    plans = {
+        "mock": [call("77")],
+        "hit": [call("1234")],
+        "miss": [call("9999")],
+        "soft": [call("9999")],
+    }
+
+    def factory(ctx: TrialContext) -> Any:
+        return tool_graph([plans[ctx.case.case_id]], handle_errors=ctx.case.case_id == "miss")(ctx)
+
+    runner = make_runner(
+        server, factory, output_adapter=lambda values: values["messages"][-1].content
+    )
+    assert serve(runner) == 4
+    assert json.loads(server.trials[mock].result["output"]["final"]) == {
+        "mock": "lookup_order",
+        "arguments": {"order_id": "77"},
+    }
+    assert json.loads(server.trials[hit].result["output"]["final"]) == {"status": "shipped"}
+    missed = server.trials[miss].result
+    assert missed["outcome"] == "recorded_fixture_miss"
+    assert missed["error"]["tool"] == "lookup_order"
+    assert server.trials[soft].result["outcome"] == "evaluated"
+    assert server.trials[soft].result["output"]["final"] == FIXTURE_MISS_TEXT
+    calls = [json.loads(r.content) for r in server.requests if r.url.path.endswith("/tool-calls")]
+    assert {item["logical_call_id"] for item in calls} == {"call_1"}
+    assert all(item["attempt"] == 1 for item in calls)
+
+
+def test_tool_call_in_progress_backoff_and_exhaustion(server: FakeRunnerServer) -> None:
+    waited = server.add_trial("v1", agent_case("waited"), tools={"mode": "mock"})
+    server.in_progress = 2
+    runner = make_runner(server, tool_graph([[call("1")]]))
+    assert serve(runner) == 1
+    assert server.trials[waited].result["outcome"] == "evaluated"
+    exhausted = server.add_trial("v1", agent_case("exhausted"), tools={"mode": "mock"})
+    server.in_progress = 10
+    assert serve(make_runner(server, tool_graph([[call("2")]]))) == 1
+    failure = server.trials[exhausted].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "infrastructure",
+        "tool_call_in_progress",
+    )
+
+
+def test_tool_call_id_reused_fails_runner_configuration(server: FakeRunnerServer) -> None:
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "mock"})
+    runner = make_runner(server, tool_graph([[call("1", "call_x"), call("2", "call_x")]]))
+    assert serve(runner) == 1
+    failure = server.trials[trial].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "runner_configuration",
+        "tool_call_id_reused",
+    )
+
+
+def test_tool_mode_none_refuses_tool_calls(server: FakeRunnerServer) -> None:
+    trial = server.add_trial("v1", agent_case())
+    assert serve(make_runner(server, tool_graph([[call("1")]], handle_errors=True))) == 1
+    assert server.trials[trial].failures[0]["error_code"] == "tool_mode_none"
+    assert not any(r.url.path.endswith("/tool-calls") for r in server.requests)
+
+
+def test_logical_call_id_is_model_id_or_stable_hash() -> None:
+    config = {"configurable": {"checkpoint_ns": "tools:abc", "__pregel_task_id": "abc"}}
+    assert logical_call_id("call_ok-1", config, "t", {}) == "call_ok-1"
+    hashed = logical_call_id("bad id with spaces", config, "t", {"a": 1.5, "b": [1]})
+    assert hashed.startswith("call_")
+    assert len(hashed) == 21
+    assert hashed == logical_call_id(None, config, "t", {"b": [1], "a": 1.5})
+    assert hashed != logical_call_id(None, config, "t", {"a": 2})
+    assert hashed != logical_call_id(
+        None, {"configurable": {"checkpoint_ns": "tools:def"}}, "t", {"a": 1.5, "b": [1]}
+    )
+
+
+def test_live_tool_runs_locally_once_and_reports(server: FakeRunnerServer) -> None:
+    executed: list[str] = []
+
+    @tool(description="Issue a refund.")
+    def refund(order_id: str) -> str:
+        executed.append(order_id)
+        return f"refunded {order_id}"
+
+    def factory(ctx: TrialContext) -> Any:
+        async def node(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+            proxied = ctx.wrap_tools([refund])[0]
+            first = await proxied.ainvoke(
+                tool_call(name="refund", args={"order_id": "5"}, id="call_r")
+            )
+            again = await proxied.ainvoke(
+                tool_call(name="refund", args={"order_id": "5"}, id="call_r")
+            )
+            return {"log": [first.content, again.content]}
+
+        builder = StateGraph(GraphState)
+        builder.add_node("plan", node)
+        builder.add_edge(START, "plan")
+        return builder.compile(checkpointer=ctx.checkpointer, store=ctx.store)
+
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "live"})
+    server.drop_tool_call_responses = 1
+    server.drop_report_responses = 1
+    runner = make_runner(server, factory, live_tools=True, output_adapter=lambda v: v["log"])
+    assert serve(runner) == 1
+    assert executed == ["5"]
+    assert server.trials[trial].result["output"]["final"] == ["refunded 5", "refunded 5"]
+    reports = [json.loads(r.content) for r in server.requests if r.url.path.endswith("/report")]
+    assert len(reports) == 2
+    assert reports[0] == reports[1]
+    assert reports[0]["value"] == "refunded 5"
+    assert reports[0]["is_error"] is False
+
+
+def test_budget_stop_reports_budget_stopped(server: FakeRunnerServer) -> None:
+    async def two_calls(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        model = GenericFakeChatModel(messages=iter([AIMessage("one"), AIMessage("two")]))
+        prompts = prompts_for(config)
+        text = prompts.render_text("planner.instructions")
+        first = await model.ainvoke(
+            [SystemMessage(text)], prompts.config_for("planner.instructions")
+        )
+        second = await model.ainvoke([SystemMessage(text)], config)
+        return {"log": [str(first.content), str(second.content)]}
+
+    stopped = server.add_trial("v1", agent_case("stop"), limits={"max_model_calls_per_trial": 1})
+    ok = server.add_trial("v2", agent_case("ok"))
+    assert serve(make_runner(server, single_node(two_calls))) == 2
+    result = server.trials[stopped].result
+    assert result["outcome"] == "budget_stopped"
+    assert result["error"] == {"code": "trial_budget_exceeded", "limit": "model_calls"}
+    calls = server.trials[ok].result["model_calls"]
+    assert len(calls) == 2
+    assert calls[0]["slot_path"] == "planner.instructions"
+    assert calls[0]["prompt_ref"] == "prm_plan:2"
+    assert calls[0]["usage_source"] == "not_reported"
+    assert calls[0]["input_tokens"] is None
+    assert calls[1]["prompt_ref"] is None
+
+
+def test_prompt_outside_manifest_refused_before_report(server: FakeRunnerServer) -> None:
+    async def foreign(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        model = GenericFakeChatModel(messages=iter([AIMessage("x")]))
+        prompts = prompts_for(config)
+        borrowed = dict(prompts.config_for("planner.instructions"))
+        borrowed["metadata"] = {
+            **borrowed["metadata"],
+            "agenomic_prompt_refs": "prm_plan:1",
+        }
+        await model.ainvoke("hi", borrowed)
+        return {}
+
+    trial = server.add_trial("v2", agent_case())
+    assert serve(make_runner(server, single_node(foreign))) == 1
+    failure = server.trials[trial].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "runner_configuration",
+        "prompt_outside_manifest",
+    )
+    assert server.trials[trial].result is None
+
+
+def test_agent_and_infrastructure_errors_are_separated(server: FakeRunnerServer) -> None:
+    async def failing(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        if ctx.case.case_id == "agent":
+            raise ValueError("the agent gave up")
+        if ctx.case.case_id == "infra":
+            raise httpx.ConnectError("provider unreachable")
+        raise KeyError("hooked")
+
+    agent = server.add_trial("v1", agent_case("agent"))
+    infra = server.add_trial("v1", agent_case("infra"))
+    hooked = server.add_trial("v1", agent_case("hooked"))
+    runner = make_runner(
+        server,
+        single_node(failing),
+        runner_options={
+            "classify_error": lambda exc: "infrastructure" if isinstance(exc, KeyError) else None
+        },
+    )
+    assert serve(runner) == 3
+    result = server.trials[agent].result
+    assert result["outcome"] == "agent_error"
+    assert result["error"]["code"] == "agent_exception"
+    assert result["error"]["type"] == "ValueError"
+    assert result["error_class_source"] == "default_rules/v1"
+    infra_failure = server.trials[infra].failures[0]
+    assert (infra_failure["error_class"], infra_failure["error_code"]) == (
+        "infrastructure",
+        "connection_error",
+    )
+    assert server.trials[hooked].failures[0]["error_class"] == "infrastructure"
+
+
+def test_error_classification_rules() -> None:
+    class RateLimitError(Exception):
+        status_code = 429
+
+    class BadRequestError(Exception):
+        status_code = 400
+
+    assert classify(RateLimitError()) == ("infrastructure", "default_rules/v1")
+    assert error_code(RateLimitError()) == "provider_rate_limited"
+    assert classify(BadRequestError())[0] == "agent"
+    assert classify(IsolationViolation("x"))[0] == "runner_configuration"
+    assert classify(ApiError("registry_unavailable", 0, "down"))[0] == "infrastructure"
+    assert error_code(ApiError("registry_unavailable", 0, "down")) == "agenomic_unavailable"
+    assert classify(ApiError("prompt_render_error", 0, "missing"))[0] == "agent"
+    assert error_code(ApiError("prompt_render_error", 0, "missing")) == "prompt_render_error"
+    assert error_code(httpx.ReadTimeout("slow")) == "provider_timeout"
+    assert classify(ApiError("server", 503, "x"))[0] == "infrastructure"
+    assert error_code(ApiError("server", 503, "x")) == "provider_unavailable"
+    with pytest.raises(ValueError):
+        classify(ValueError(), lambda exc: "bogus")
+
+
+def test_cancel_and_stop_release_the_trial(server: FakeRunnerServer) -> None:
+    async def slow(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        await asyncio.sleep(5)
+        return {}
+
+    cancelled = server.add_trial("v1", agent_case("cancel"))
+    stopped = server.add_trial("v1", agent_case("stop"))
+
+    def flag(trial: Any) -> None:
+        if trial.view["case"]["case_id"] == "cancel":
+            trial.cancel_requested = True
+        else:
+            trial.stop_requested = True
+
+    server.on_heartbeat = flag
+    assert serve(make_runner(server, single_node(slow))) == 2
+    assert server.trials[cancelled].releases == [
+        {"lease_token": server.trials[cancelled].lease_token, "reason": "cancelled"}
+    ]
+    assert server.trials[stopped].releases[0]["reason"] == "stopped"
+    assert server.trials[cancelled].result is None
+
+
+def test_stale_lease_drops_the_trial_without_report(server: FakeRunnerServer) -> None:
+    async def slow(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        await asyncio.sleep(5)
+        return {}
+
+    trial = server.add_trial("v1", agent_case())
+
+    def expire(item: Any) -> None:
+        item.status = "queued"
+
+    server.on_heartbeat = expire
+    assert serve(make_runner(server, single_node(slow))) == 1
+    posted = [r.url.path.rsplit("/", 1)[-1] for r in server.requests]
+    assert "result" not in posted
+    assert "failure" not in posted
+    assert "release" not in posted
+    assert server.trials[trial].result is None
+
+
+def test_assignment_checks_before_execution(world: World, server: FakeRunnerServer) -> None:
+    tampered = server.add_trial("v1", agent_case("tampered"))
+    view = server.trials[tampered].assignment["view"]
+    ref = next(iter(view["prompts"]["prompts"]))
+    view["prompts"]["prompts"][ref]["content"]["body"] = "INJECTED"
+    other_runtime = server.add_trial("v1", agent_case("runtime"))
+    server.trials[other_runtime].assignment["view"]["arm"]["runtime_digest"] = "blake3:" + "0" * 64
+    other_thread = server.add_trial("v1", agent_case("thread"))
+    server.trials[other_thread].assignment["view"]["binding"]["thread_key"] = (
+        "thread:sha256:" + "0" * 64
+    )
+    other_manifest = server.add_trial("v1", agent_case("manifest"))
+    server.trials[other_manifest].assignment["view"]["arm"]["prompt_manifest_digest"] = (
+        "sha256:" + "1" * 64
+    )
+    built: list[str] = []
+
+    def factory(ctx: TrialContext) -> Any:
+        built.append(ctx.case.case_id)
+        return single_node(render_plan)(ctx)
+
+    assert serve(make_runner(server, factory)) == 4
+    codes = {
+        server.trials[trial].view["case"]["case_id"]: server.trials[trial].failures[0]["error_code"]
+        for trial in (tampered, other_runtime, other_thread, other_manifest)
+    }
+    assert codes == {
+        "tampered": "artifact_digest_mismatch",
+        "runtime": "runtime_digest_mismatch",
+        "thread": "binding_mismatch",
+        "manifest": "artifact_digest_mismatch",
+    }
+    assert built == []
+
+
+def test_assignment_binding_must_name_the_arm_and_its_children(
+    world: World, server: FakeRunnerServer
+) -> None:
+    def binding_of(trial: str) -> dict[str, Any]:
+        return server.trials[trial].assignment["view"]["binding"]
+
+    unpinned = server.add_trial("v1", agent_case("unpinned"))
+    binding_of(unpinned)["children"] = {}
+    extra = server.add_trial("v1", agent_case("extra"))
+    children = binding_of(extra)["children"]
+    children["0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b"] = dict(next(iter(children.values())))
+    moved = server.add_trial("v1", agent_case("moved"))
+    next(iter(binding_of(moved)["children"].values()))["prompt_manifest_digest"] = (
+        "sha256:" + "2" * 64
+    )
+    armless = server.add_trial("v1", agent_case("armless"))
+    binding_of(armless)["experiment"] = None
+    keyless = server.add_trial("v1", agent_case("keyless"))
+    del binding_of(keyless)["experiment"]["arm_key"]
+    trials = (unpinned, extra, moved, armless, keyless)
+    built: list[str] = []
+
+    def factory(ctx: TrialContext) -> Any:
+        built.append(ctx.case.case_id)
+        return single_node(render_plan)(ctx)
+
+    assert serve(make_runner(server, factory)) == len(trials)
+    codes = {
+        server.trials[trial].view["case"]["case_id"]: server.trials[trial].failures[0]["error_code"]
+        for trial in trials
+        if server.trials[trial].failures
+    }
+    assert codes == {
+        "unpinned": "artifact_digest_mismatch",
+        "extra": "artifact_digest_mismatch",
+        "moved": "artifact_digest_mismatch",
+        "armless": "binding_mismatch",
+        "keyless": "binding_mismatch",
+    }
+    assert built == []
+
+
+def test_node_entry_point_runs_only_the_node(world: World, server: FakeRunnerServer) -> None:
+    def factory(ctx: TrialContext) -> Any:
+        def intake(state: dict[str, Any]) -> dict[str, Any]:
+            return {"log": ["intake ran"]}
+
+        def plan(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+            return {"log": [prompts_for(config).render_text("planner.instructions")]}
+
+        def respond(state: dict[str, Any]) -> dict[str, Any]:
+            return {"log": ["respond ran"]}
+
+        builder = StateGraph(GraphState)
+        for name, node in (("intake", intake), ("plan", plan), ("respond", respond)):
+            builder.add_node(name, node)
+        builder.add_edge(START, "intake")
+        builder.add_edge("intake", "plan")
+        builder.add_edge("plan", "respond")
+        return builder.compile(checkpointer=ctx.checkpointer, store=ctx.store)
+
+    case = {
+        "case_id": "node-1",
+        "kind": "node_state",
+        "input": {"context": {"locale": "en"}},
+        "expected": None,
+        "initial_state": {"log": ["seeded"]},
+        "turns": [],
+        "tags": [],
+    }
+    good = server.add_trial(
+        "v2",
+        case,
+        level="node",
+        entry_point={
+            "name": "planner",
+            "kind": "graph_node",
+            "node_path": "plan",
+            "seed_as_node": "intake",
+            "slot_paths": [],
+        },
+    )
+    wrong = server.add_trial(
+        "v2",
+        dict(case, case_id="node-2"),
+        level="node",
+        entry_point={
+            "name": "start",
+            "kind": "graph_node",
+            "node_path": "plan",
+            "seed_as_node": "__start__",
+            "slot_paths": [],
+        },
+    )
+    unknown = server.add_trial(
+        "v2",
+        dict(case, case_id="node-3"),
+        level="node",
+        entry_point={
+            "name": "nope",
+            "kind": "graph_node",
+            "node_path": "plan",
+            "seed_as_node": "intake",
+            "slot_paths": [],
+        },
+    )
+    runner = make_runner(
+        server,
+        factory,
+        entry_points={
+            "planner": GraphNodeEntryPoint("plan", seed_as_node="intake"),
+            "start": GraphNodeEntryPoint("plan", seed_as_node="__start__"),
+        },
+    )
+    assert serve(runner) == 3
+    result = server.trials[good].result
+    assert result["outcome"] == "evaluated"
+    assert result["output"] == {
+        "state_update": {"log": ["seeded", "PLAN v2"]},
+        "extra_nodes_executed": [],
+    }
+    assert result["isolation"]["fork_fidelity"] == "none"
+    failure = server.trials[wrong].failures[0]
+    assert failure["error_code"] == "entry_point_not_next"
+    assert server.trials[unknown].failures[0]["error_code"] == "entry_point_unavailable"
+
+
+def test_callable_entry_point(server: FakeRunnerServer) -> None:
+    def entry(state: dict[str, Any], config: RunnableConfig) -> dict[str, Any]:
+        text = prompts_for(config).render_text("planner.instructions")
+        return {"plan": f"{state['goal']}:{text}"}
+
+    case = {
+        "case_id": "callable-1",
+        "kind": "node_state",
+        "input": {},
+        "expected": None,
+        "initial_state": {"goal": "refund"},
+        "turns": [],
+        "tags": [],
+    }
+    trial = server.add_trial(
+        "v1",
+        case,
+        level="node",
+        entry_point={
+            "name": "plan_fn",
+            "kind": "callable",
+            "node_path": "plan_fn",
+            "seed_as_node": None,
+            "slot_paths": [],
+        },
+    )
+    built: list[str] = []
+    runner = make_runner(
+        server,
+        lambda ctx: built.append("graph"),
+        entry_points={"plan_fn": CallableEntryPoint(entry)},
+    )
+    assert runner.hello_document()["agents"][0]["entry_points"][0]["kind"] == "callable"
+    assert serve(runner) == 1
+    assert server.trials[trial].result["output"]["state_update"] == {"plan": "refund:PLAN v1"}
+    assert built == []
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11),
+    reason="langgraph interrupt() in asyncio tasks needs Python 3.11 contextvar propagation",
+)
+def test_multi_turn_case_reuses_its_thread(server: FakeRunnerServer) -> None:
+    def factory(ctx: TrialContext) -> Any:
+        def ask(state: dict[str, Any]) -> dict[str, Any]:
+            answer = interrupt("approve?")
+            return {"log": [f"approved={answer}"]}
+
+        builder = StateGraph(GraphState)
+        builder.add_node("ask", ask)
+        builder.add_edge(START, "ask")
+        return builder.compile(checkpointer=ctx.checkpointer, store=ctx.store)
+
+    trial = server.add_trial("v1", agent_case(turns=[{"resume": True}]))
+    assert serve(make_runner(server, factory, output_adapter=lambda v: v["log"])) == 1
+    result = server.trials[trial].result
+    assert [turn["interrupted"] for turn in result["turns"]] == [True, False]
+    assert result["output"]["final"] == ["approved=True"]
+
+
+def make_judge_prompt() -> dict[str, Any]:
+    content = {
+        "schema": "agenomic.prompt_content/v1",
+        "template_format": "agenomic-fstring/v1",
+        "renderer_version": "1",
+        "kind": "text",
+        "body": "Rate {output}",
+        "variables": {"output": {"type": "json", "required": True}},
+        "partials": {},
+        "output_contract": None,
+        "fragments": {},
+    }
+    return {
+        "prompt_id": "prm_judge",
+        "version": 1,
+        "prompt_kind": "text",
+        "content_digest": prompt_digest(content),
+        "content": content,
+    }
+
+
+def test_runner_evaluators_custom_and_judge(server: FakeRunnerServer, world: World) -> None:
+    judge_prompt = make_judge_prompt()
+    evaluator = RunnerEvaluator(lambda case, output: output["final"] == ["PLAN v1"], version=2)
+    evaluators = [
+        {
+            "evaluator_id": "custom",
+            "kind": "runner_custom",
+            "version": 2,
+            "config": {
+                "name": "plan_ok",
+                "version": 2,
+                "code_digest": evaluator.digest(),
+                "value_kind": "binary",
+            },
+        },
+        {
+            "evaluator_id": "judge_help",
+            "kind": "model_judge",
+            "version": 4,
+            "config": {
+                "model": {"provider": "fake", "model": "judge-1"},
+                "rubric": {"scale": {"min": 1, "max": 5}},
+            },
+            "prompt": judge_prompt,
+        },
+        {
+            "evaluator_id": "judge_off",
+            "kind": "model_judge",
+            "version": 1,
+            "config": {},
+            "prompt": None,
+        },
+    ]
+    trial = server.add_trial("v1", agent_case(), runner_evaluators=evaluators)
+    seen: list[Any] = []
+
+    def judge_model(settings: Any) -> Any:
+        seen.append(dict(settings))
+        return GenericFakeChatModel(messages=iter([AIMessage('{"score": 4}')]))
+
+    runner = make_runner(
+        server,
+        single_node(render_plan),
+        evaluators={"plan_ok": evaluator},
+        output_adapter=lambda values: values["log"],
+        runner_options={"judge_model": judge_model},
+    )
+    assert serve(runner) == 1
+    result = server.trials[trial].result
+    assert result["runner_metrics"] == {
+        "plan_ok": {"value": 1, "evaluator_ref": "runner_custom:plan_ok@2"}
+    }
+    judged, skipped = result["judge_scores"]
+    assert judged["score"] == 4
+    assert judged["parsed"] is True
+    assert judged["judge_model"] == "judge-1"
+    assert skipped["parsed"] is False
+    assert skipped["score"] is None
+    assert seen == [{"provider": "fake", "model": "judge-1"}]
+    mismatch = server.add_trial(
+        "v1",
+        agent_case("bad"),
+        runner_evaluators=[
+            dict(
+                evaluators[0],
+                config=dict(evaluators[0]["config"], code_digest="sha256:" + "0" * 64),
+            )
+        ],
+    )
+    assert serve(runner) == 1
+    assert server.trials[mismatch].failures[0]["error_code"] == "evaluator_unavailable"
+
+
+def test_result_refusals_become_failures(server: FakeRunnerServer) -> None:
+    secret = server.add_trial("v1", agent_case("secret"))
+    server.refuse_result = ("experiment_result_secret_detected", 400, {})
+    assert serve(make_runner(server, single_node(render_plan))) == 1
+    assert server.trials[secret].failures[0]["error_code"] == "secret_in_report"
+    invalid = server.add_trial("v1", agent_case("invalid"))
+    server.refuse_result = ("experiment_result_invalid", 400, {"reason": "prompt_outside_manifest"})
+    assert serve(make_runner(server, single_node(render_plan))) == 1
+    assert server.trials[invalid].failures[0]["error_code"] == "prompt_outside_manifest"
+
+
+def test_hello_required_and_stop_release_unstarted_claim(server: FakeRunnerServer) -> None:
+    server.add_trial("v1", agent_case())
+    runner = make_runner(server, single_node(render_plan))
+    original = runner._hello
+    calls: list[int] = []
+
+    async def counting(http: Any) -> dict[str, Any]:
+        calls.append(1)
+        if len(calls) == 1:
+            return {}
+        return await original(http)
+
+    runner._hello = counting
+    server.on_claim = lambda trial: runner.stop()
+    assert serve(runner) == 0
+    trial = next(iter(server.trials.values()))
+    assert trial.releases[0]["reason"] == "shutdown"
+    assert len(calls) == 2
+
+
+def test_runner_configuration_validation(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = GraphTarget(factory=lambda ctx: None, runtime_digest=runtime_digest(world))
+    with pytest.raises(ValueError):
+        ExperimentRunner(targets={})
+    with pytest.raises(ValueError):
+        ExperimentRunner(targets={"agent": target})
+    with pytest.raises(TypeError):
+        ExperimentRunner(targets={AGENT: object()})
+    with pytest.raises(ValueError):
+        ExperimentRunner(targets={AGENT: target}, token="agm_wrong")
+    with pytest.raises(ValueError):
+        ExperimentRunner(targets={AGENT: target}, max_concurrency=0)
+    with pytest.raises(ValueError):
+        ExperimentRunner(targets={AGENT: target}, workspace_id="WS")
+    monkeypatch.delenv("AGENOMIC_RUNNER_TOKEN", raising=False)
+    monkeypatch.delenv("AGENOMIC_ENDPOINT", raising=False)
+    with pytest.raises(ValueError):
+        ExperimentRunner(targets={AGENT: target}, base_url=BASE).serve()
+    with pytest.raises(ValueError):
+        ExperimentRunner(targets={AGENT: target}, token=TOKEN).serve()
+
+
+def test_workspace_pin_refuses_other_workspace(world: World, server: FakeRunnerServer) -> None:
+    trial = server.add_trial("v1", agent_case())
+    runner = make_runner(
+        server,
+        single_node(render_plan),
+        runner_options={"workspace_id": "5a5a5a5a-1111-4222-8333-444455556666"},
+    )
+    assert serve(runner) == 1
+    assert server.trials[trial].failures[0]["error_code"] == "workspace_mismatch"
+
+
+def test_run_trial_offline_harness(world: World) -> None:
+    runner = ExperimentRunner(
+        targets={
+            AGENT: GraphTarget(
+                factory=single_node(render_plan), runtime_digest=runtime_digest(world)
+            )
+        }
+    )
+    assignment = local_assignment(
+        world.engine, agent_id=AGENT, release_id=world.releases["v2"], case=agent_case()
+    )
+    run = runner.run_trial(assignment)
+    assert run.kind == "result"
+    assert run.result is not None
+    assert run.result["output"]["final"] == "PLAN v2"
+    assert run.result["runtime"]["runtime_digest_source"] == "runner_declared"
+    tools_assignment = local_assignment(
+        world.engine,
+        agent_id=AGENT,
+        release_id=world.releases["v1"],
+        case=agent_case(),
+        tools={"mode": "mock"},
+    )
+    tool_runner = ExperimentRunner(
+        targets={
+            AGENT: GraphTarget(
+                factory=tool_graph([[call("1")]]), runtime_digest=runtime_digest(world)
+            )
+        }
+    )
+    failed = tool_runner.run_trial(tools_assignment)
+    assert (failed.kind, failed.error_code) == ("failure", "proxy_unavailable")
+
+
+def test_namespaced_store_and_helpers() -> None:
+    inner = InMemoryStore()
+    store = NamespacedStore(inner, ("agenomic_exp", "e", "t", "a1"))
+    store.put(("agenomic_exp", "e", "t", "a1", "m"), "k", {"v": 1})
+    assert store.get(("agenomic_exp", "e", "t", "a1", "m"), "k").value == {"v": 1}
+    assert store.list_namespaces(prefix=("agenomic_exp", "e", "t", "a1")) == [
+        ("agenomic_exp", "e", "t", "a1", "m")
+    ]
+    for attempt in (
+        lambda: store.get(("other",), "k"),
+        lambda: store.search(("agenomic_exp",)),
+        lambda: store.list_namespaces(),
+    ):
+        with pytest.raises(IsolationViolation):
+            attempt()
+    with pytest.raises(ValueError):
+        NamespacedStore(store, ("x",))
+    with pytest.raises(ValueError):
+        NamespacedStore(inner, ())
+    assert jsonable({"m": AIMessage("x"), "t": (1, 2)}) == {
+        "m": {"role": "assistant", "content": "x"},
+        "t": [1, 2],
+    }
+    assert replace_secrets({"k": ["a SECRET b"]}, ["SECRET"]) == {"k": ["a [REDACTED] b"]}
+    assert redact_message("x" * 5000, []).encode() == b"x" * 2048
+    assert "sk-" not in redact_message("key sk-" + "a" * 30, [])
+
+
+def test_cli_experiment_serve(server: FakeRunnerServer, monkeypatch: pytest.MonkeyPatch) -> None:
+    trial = server.add_trial("v1", agent_case())
+    module = types.ModuleType("agenomic_test_runner_target")
+    target = GraphTarget(
+        factory=single_node(render_plan), runtime_digest=runtime_digest(server.world)
+    )
+    module.runner = ExperimentRunner(targets={AGENT: target}, transport=server.transport())
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setenv("AGENOMIC_RUNNER_TOKEN", TOKEN)
+    monkeypatch.setenv("AGENOMIC_ENDPOINT", BASE)
+    assert (
+        main(
+            [
+                "experiment",
+                "serve",
+                "--target",
+                f"{module.__name__}:runner",
+                "--idle-timeout",
+                "0",
+                "--max-concurrency",
+                "2",
+            ]
+        )
+        == 0
+    )
+    assert server.trials[trial].accepts == 1
+    assert main(["experiment", "serve", "--target", "missing_module_x:runner"]) == 2
+    assert (
+        main(
+            [
+                "experiment",
+                "serve",
+                "--target",
+                f"{module.__name__}:runner",
+                "--max-concurrency",
+                "0",
+            ]
+        )
+        == 2
+    )
+    module.other = 42
+    assert main(["experiment", "serve", "--target", f"{module.__name__}:other"]) == 2
+    monkeypatch.delenv("AGENOMIC_ENDPOINT")
+    module.bare = ExperimentRunner(targets={AGENT: target})
+    assert main(["experiment", "serve", "--target", f"{module.__name__}:bare"]) == 2
+
+
+def test_sync_tool_paths_mock_and_live(server: FakeRunnerServer) -> None:
+    executed: list[str] = []
+
+    @tool(description="Issue a refund.")
+    def refund(order_id: str) -> str:
+        executed.append(order_id)
+        return f"refunded {order_id}"
+
+    def factory(ctx: TrialContext) -> Any:
+        def node(state: dict[str, Any]) -> dict[str, Any]:
+            lookup, issue = ctx.wrap_tools([lookup_order, refund])
+            picked = issue if ctx.tool_mode == "live" else lookup
+            first = picked.invoke(tool_call(name=picked.name, args={"order_id": "9"}, id="call_s"))
+            return {"log": [str(first.content)]}
+
+        builder = StateGraph(GraphState)
+        builder.add_node("plan", node)
+        builder.add_edge(START, "plan")
+        return builder.compile(checkpointer=ctx.checkpointer, store=ctx.store)
+
+    mock = server.add_trial("v1", agent_case("mock"), tools={"mode": "mock"})
+    live = server.add_trial("v1", agent_case("live"), tools={"mode": "live"})
+    server.in_progress = 1
+    server.drop_report_responses = 1
+    runner = make_runner(server, factory, live_tools=True, output_adapter=lambda v: v["log"])
+    assert serve(runner) == 2
+    assert json.loads(server.trials[mock].result["output"]["final"][0])["mock"] == "lookup_order"
+    assert server.trials[live].result["output"]["final"] == ["refunded 9"]
+    assert executed == ["9"]
+
+
+def test_live_tool_error_is_reported_and_reraised(server: FakeRunnerServer) -> None:
+    @tool(description="Always fails.")
+    def explode(order_id: str) -> str:
+        raise RuntimeError(f"cannot refund {order_id} with {SECRET}")
+
+    resolver = EnvSecretResolver(allow=["SERVICE_KEY"], environ={"SERVICE_KEY": SECRET})
+
+    async def node(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        proxied = ctx.wrap_tools([explode])[0]
+        await proxied.ainvoke({"order_id": "3"})
+        return {}
+
+    trial = server.add_trial(
+        "v1", agent_case(), tools={"mode": "live"}, secret_refs=["env:SERVICE_KEY"]
+    )
+    runner = make_runner(
+        server, single_node(node), live_tools=True, runner_options={"secrets": resolver}
+    )
+    assert serve(runner) == 1
+    report = next(json.loads(r.content) for r in server.requests if r.url.path.endswith("/report"))
+    assert report["is_error"] is True
+    assert report["value"] == {"error": "cannot refund 3 with [REDACTED]"}
+    assert server.trials[trial].result["outcome"] == "agent_error"
+    assert all(SECRET.encode() not in body for body in server.raw_bodies())
+
+
+def test_store_seed_output_and_factory_errors(server: FakeRunnerServer) -> None:
+    async def read_seed(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        item = await ctx.store.aget((*ctx.store_namespace, "profile"), "customer")
+        if ctx.case.case_id == "opaque":
+            return {"log": ["x"]}
+        return {"log": [item.value["tier"] if item else "missing"]}
+
+    seeds = [{"namespace": ["profile"], "key": "customer", "value": {"tier": "gold"}}]
+    seeded = server.add_trial(
+        "v1", agent_case("seeded", input={"messages": [], "store_seed": seeds})
+    )
+    invalid = server.add_trial("v1", agent_case("invalid", input={"store_seed": "nope"}))
+    opaque = server.add_trial("v1", agent_case("opaque"))
+
+    def output(values: Any) -> Any:
+        return object() if values["log"] == ["x"] else values["log"]
+
+    assert serve(make_runner(server, single_node(read_seed), output_adapter=output)) == 3
+    assert server.trials[seeded].result["output"]["final"] == ["gold"]
+    assert server.trials[invalid].failures[0]["error_code"] == "store_seed_invalid"
+    assert server.trials[opaque].failures[0]["error_code"] == "output_not_serializable"
+    bound = server.add_trial("v1", agent_case("bound"))
+
+    def bound_factory(ctx: TrialContext) -> Any:
+        graph = single_node(render_plan)(ctx)
+        return bind_langgraph(graph, client=Client(), agent_id=AGENT, channel="production")
+
+    assert serve(make_runner(server, bound_factory)) == 1
+    assert server.trials[bound].failures[0]["error_code"] == "factory_returned_bound_graph"
+
+
+def test_checkpointer_factory_cleanup_and_trial_end(server: FakeRunnerServer) -> None:
+    savers: dict[str, InMemorySaver] = {}
+    ended: list[str] = []
+
+    def saver_for(thread_key: str) -> InMemorySaver:
+        savers[thread_key] = InMemorySaver()
+        return savers[thread_key]
+
+    def on_end(ctx: TrialContext) -> None:
+        ended.append(ctx.trial_id)
+        raise RuntimeError("hook failures are logged, never raised")
+
+    first = server.add_trial("v1", agent_case("first"))
+    runner = make_runner(
+        server, single_node(render_plan), checkpointer_factory=saver_for, on_trial_end=on_end
+    )
+    assert serve(runner) == 1
+    result = server.trials[first].result
+    assert result["isolation"]["checkpointer"] == "per_trial_factory"
+    assert ended == [first]
+    assert all(not saver.storage for saver in savers.values())
+    kept = server.add_trial("v1", agent_case("kept"))
+    keeper = make_runner(
+        server, single_node(render_plan), checkpointer_factory=saver_for, keep_checkpoints=True
+    )
+    assert serve(keeper) == 1
+    assert any(saver.storage for saver in savers.values())
+    assert server.trials[kept].result["outcome"] == "evaluated"
+
+
+def test_deadline_reported_as_agent_timeout(server: FakeRunnerServer) -> None:
+    async def slow(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        await asyncio.sleep(5)
+        return {}
+
+    trial = server.add_trial("v1", agent_case())
+
+    def expire(item: Any) -> None:
+        item.deadline_exceeded = True
+
+    server.on_heartbeat = expire
+    assert serve(make_runner(server, single_node(slow))) == 1
+    result = server.trials[trial].result
+    assert result["outcome"] == "agent_timeout"
+    assert result["error"] == {"code": "deadline_exceeded"}
+    assert result["isolation"]["checkpointer"] == "per_trial_in_memory"
+    factory_trial = server.add_trial("v1", agent_case("factory"))
+    factory_runner = make_runner(
+        server, single_node(slow), checkpointer_factory=lambda thread_key: InMemorySaver()
+    )
+    assert serve(factory_runner) == 1
+    factory_result = server.trials[factory_trial].result
+    assert factory_result["outcome"] == "agent_timeout"
+    assert factory_result["isolation"]["checkpointer"] == "per_trial_factory"
+
+
+def test_hello_outage_never_stops_the_runner(
+    server: FakeRunnerServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def capped(delay: float) -> None:
+        await asyncio.sleep(min(delay, 0.01))
+
+    monkeypatch.setattr(runner_module, "_asleep", capped)
+
+    async def node(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        if ctx.case.case_id == "slow":
+            await asyncio.sleep(0.3)
+        return {"log": [ctx.case.case_id]}
+
+    def outage(trial: Any) -> None:
+        if trial.view["case"]["case_id"] == "slow":
+            server.fail_hellos = 8
+
+    slow = server.add_trial("v1", agent_case("slow"))
+    fast = server.add_trial("v1", agent_case("fast"))
+    server.on_claim = outage
+    with monkeypatch.context() as patched:
+        patched.setattr(runner_module, "HELLO_REFRESH_SECONDS", 0.0)
+        runner = make_runner(server, single_node(node), runner_options={"max_concurrency": 2})
+        assert serve(runner) == 2
+    assert server.fail_hellos == 0
+    assert (server.trials[slow].accepts, server.trials[fast].accepts) == (1, 1)
+    server.on_claim = None
+    required = server.add_trial("v1", agent_case("required"))
+    needy = make_runner(server, single_node(node))
+    startup = needy._hello
+
+    async def then_outage(http: Any) -> dict[str, Any]:
+        needy._hello = startup
+        body = await startup(http)
+        server.demand_hello, server.fail_hellos = 1, 4
+        return body
+
+    needy._hello = then_outage
+    assert serve(needy) == 1
+    assert (server.demand_hello, server.fail_hellos) == (0, 0)
+    assert server.trials[required].accepts == 1
+    refused = make_runner(server, single_node(node))
+    original = refused._hello
+
+    async def revoked(http: Any) -> dict[str, Any]:
+        if refused._last_hello:
+            raise ApiError("runner_token_invalid", 401, "the token was revoked")
+        return await original(http)
+
+    refused._hello = revoked
+    server.add_trial("v1", agent_case("revoked"))
+    with monkeypatch.context() as patched:
+        patched.setattr(runner_module, "HELLO_REFRESH_SECONDS", 0.0)
+        with pytest.raises(ApiError) as stopped:
+            serve(refused)
+    assert stopped.value.code == "runner_token_invalid"
+
+
+def test_unexpected_errors_never_stop_the_runner(server: FakeRunnerServer) -> None:
+    class BrokenResolver:
+        def names(self) -> list[str]:
+            return ["env:BROKEN"]
+
+        def resolve(self, ref: str) -> str:
+            raise KeyError(ref)
+
+    broken = server.add_trial("v1", agent_case("broken"), secret_refs=["env:BROKEN"])
+    healthy = server.add_trial("v1", agent_case("healthy"))
+    runner = make_runner(
+        server, single_node(render_plan), runner_options={"secrets": BrokenResolver()}
+    )
+    assert serve(runner) == 2
+    failure = server.trials[broken].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "runner_configuration",
+        "secret_unresolved",
+    )
+    assert server.trials[healthy].accepts == 1
+    crashed = server.add_trial("v1", agent_case("crashed"))
+    survivor = server.add_trial("v1", agent_case("survivor"))
+    original = runner._aexecute
+
+    async def flaky(assignment: Any, state: Any) -> Any:
+        if assignment.view.case.case_id == "crashed":
+            raise RuntimeError("internal bug")
+        return await original(assignment, state)
+
+    runner._aexecute = flaky
+    assert serve(runner) == 2
+    failure = server.trials[crashed].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "infrastructure",
+        "runner_internal_error",
+    )
+    assert server.trials[survivor].accepts == 1
+
+
+def test_runner_logs_never_carry_secrets(
+    world: World,
+    server: FakeRunnerServer,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="agenomic.experiments")
+    leak = f"{SECRET} {FOREIGN_TOKEN} {TOKEN}"
+    hidden = "[REDACTED] [REDACTED] [REDACTED]"
+    resolver = EnvSecretResolver(allow=["SERVICE_KEY"], environ={"SERVICE_KEY": SECRET})
+
+    def broken(case: Any, output: Any) -> bool:
+        raise ValueError(f"evaluator failed with {leak}")
+
+    evaluator = RunnerEvaluator(broken, version=1)
+    custom = {
+        "evaluator_id": "custom",
+        "kind": "runner_custom",
+        "version": 1,
+        "config": {
+            "name": "broken",
+            "version": 1,
+            "code_digest": evaluator.digest(),
+            "value_kind": "binary",
+        },
+    }
+    judge = {
+        "evaluator_id": "judge_leak",
+        "kind": "model_judge",
+        "version": 1,
+        "config": {"model": {"provider": "fake", "model": "judge-1"}},
+        "prompt": make_judge_prompt(),
+    }
+
+    class LeakyJudge:
+        async def ainvoke(self, messages: Any) -> Any:
+            raise RuntimeError(f"judge refused {leak}")
+
+    def trial(case_id: str, **options: Any) -> str:
+        return server.add_trial(
+            "v1", agent_case(case_id), secret_refs=["env:SERVICE_KEY"], **options
+        )
+
+    evaluated = trial("evaluator", runner_evaluators=[custom])
+    judged = trial("judge", runner_evaluators=[judge])
+    executed = trial("execute")
+    delivered = trial("deliver")
+
+    class LeakySaver(InMemorySaver):
+        def delete_thread(self, thread_id: str) -> None:
+            if executed in thread_id:
+                raise RuntimeError(f"saver unreachable with {leak}")
+            super().delete_thread(thread_id)
+
+    def on_end(ctx: TrialContext) -> None:
+        raise RuntimeError(f"cleanup failed with {leak}")
+
+    handle = server.handle
+
+    def leaky_handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(f"/trials/{delivered}/result"):
+            raise RuntimeError(f"upload failed with {leak}")
+        return handle(request)
+
+    monkeypatch.setattr(server, "handle", leaky_handle)
+    runner = make_runner(
+        server,
+        single_node(render_plan),
+        evaluators={"broken": evaluator},
+        checkpointer_factory=lambda thread_key: LeakySaver(),
+        on_trial_end=on_end,
+        runner_options={"secrets": resolver, "judge_model": lambda settings: LeakyJudge()},
+    )
+    assert serve(runner) == 4
+    assert server.trials[evaluated].result["runner_metrics"]["broken"]["value"] is None
+    assert server.trials[judged].result["judge_scores"][0]["parsed"] is False
+    failure = server.trials[executed].failures[0]
+    assert (failure["error_code"], failure["message"]) == (
+        "runner_internal_error",
+        "the runner failed while executing the trial",
+    )
+    assert server.trials[delivered].result is None
+    for body in server.raw_bodies():
+        assert SECRET.encode() not in body
+        assert TOKEN.encode() not in body
+    ours = [record for record in caplog.records if record.name == "agenomic.experiments"]
+    messages = [record.getMessage() for record in ours]
+    for expected in (
+        "runner evaluator broken failed",
+        "judge judge_leak failed",
+        f"on_trial_end failed for trial {executed}",
+        f"the runner failed while executing trial {executed}",
+        f"delivery for trial {delivered} failed",
+    ):
+        assert expected in messages
+    for traced in (
+        f"ValueError: evaluator failed with {hidden}",
+        f"RuntimeError: judge refused {hidden}",
+        f"RuntimeError: cleanup failed with {hidden}",
+        f"RuntimeError: saver unreachable with {hidden}",
+        f"RuntimeError: upload failed with {hidden}",
+    ):
+        assert traced in caplog.text
+    for record in ours:
+        assert record.exc_info is None
+        for leaked in (SECRET, TOKEN, FOREIGN_TOKEN):
+            assert leaked not in record.getMessage()
+            assert leaked not in (record.exc_text or "")
+    for leaked in (SECRET, TOKEN, FOREIGN_TOKEN):
+        assert leaked not in caplog.text
+
+    caplog.clear()
+    offline = ExperimentRunner(
+        targets={
+            AGENT: GraphTarget(
+                factory=single_node(render_plan),
+                runtime_digest=runtime_digest(world),
+                evaluators={"broken": evaluator},
+            )
+        },
+        secrets=resolver,
+    )
+    run = offline.run_trial(
+        local_assignment(
+            world.engine,
+            agent_id=AGENT,
+            release_id=world.releases["v1"],
+            case=agent_case(),
+            secret_refs=["env:SERVICE_KEY"],
+            runner_evaluators=[custom],
+        )
+    )
+    assert run.kind == "result"
+    assert f"ValueError: evaluator failed with {hidden}" in caplog.text
+    assert SECRET not in caplog.text
+    assert FOREIGN_TOKEN not in caplog.text
+
+    caplog.clear()
+    logging.getLogger("agenomic.experiments").warning("malformed %d", leak)
+    assert [record.getMessage() for record in caplog.records] == [
+        "a log record was withheld because it could not be redacted"
+    ]
+
+
+def secret_forms(value: str) -> set[str]:
+    return {
+        value,
+        repr(value)[1:-1],
+        json.dumps(value)[1:-1],
+        quote(value, safe=""),
+        quote(value),
+        quote_plus(value),
+    }
+
+
+def sent_strings(server: FakeRunnerServer) -> list[str]:
+    found: list[str] = []
+
+    def walk(item: Any) -> None:
+        if isinstance(item, str):
+            found.append(item)
+        elif isinstance(item, dict):
+            for key, value in item.items():
+                found.append(str(key))
+                walk(value)
+        elif isinstance(item, list):
+            for value in item:
+                walk(value)
+
+    for request in server.requests:
+        if request.content:
+            walk(json.loads(request.content))
+    return found
+
+
+def test_encoded_and_pattern_shaped_secrets_never_reported_or_logged(
+    server: FakeRunnerServer, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="agenomic.experiments")
+    resolver = EnvSecretResolver(
+        allow=["SERVICE_KEY", "MODEL_KEY"], environ={"SERVICE_KEY": ENCODED, "MODEL_KEY": SHAPED}
+    )
+
+    def provider_error(status: int, key: str) -> None:
+        request = httpx.Request("GET", "https://provider.test/v1", params={"key": key})
+        httpx.Response(status, request=request).raise_for_status()
+
+    async def node(
+        ctx: TrialContext, state: dict[str, Any], config: RunnableConfig
+    ) -> dict[str, Any]:
+        value = ctx.secrets["env:SERVICE_KEY"]
+        case_id = ctx.case.case_id
+        if case_id == "repr":
+            raise KeyError(value)
+        if case_id in ("client", "server"):
+            provider_error(401 if case_id == "client" else 503, value)
+        if case_id == "shaped":
+            raise RuntimeError(f"provider rejected {ctx.secrets['env:MODEL_KEY']}")
+        return {"log": ["ok"]}
+
+    def broken(case: Any, output: Any) -> bool:
+        try:
+            raise KeyError(ENCODED)
+        except KeyError as inner:
+            error = ValueError(f"evaluator failed near {SHAPED}")
+            error.__cause__ = inner
+        group = getattr(builtins, "ExceptionGroup", None)
+        raise group("evaluators", [error]) if group is not None else error
+
+    evaluator = RunnerEvaluator(broken, version=1)
+    custom = {
+        "evaluator_id": "custom",
+        "kind": "runner_custom",
+        "version": 1,
+        "config": {"name": "broken", "version": 1, "code_digest": evaluator.digest()},
+    }
+    refs = ["env:SERVICE_KEY", "env:MODEL_KEY"]
+    trials = {
+        name: server.add_trial(
+            "v1",
+            agent_case(name),
+            secret_refs=refs,
+            runner_evaluators=[custom] if name == "evaluated" else [],
+        )
+        for name in ("repr", "client", "server", "shaped", "evaluated")
+    }
+    runner = make_runner(
+        server,
+        single_node(node),
+        evaluators={"broken": evaluator},
+        runner_options={"secrets": resolver},
+    )
+    assert serve(runner) == 5
+    results = {name: server.trials[trial_id].result for name, trial_id in trials.items()}
+    assert results["repr"]["error"]["message"] == "'[REDACTED]'"
+    assert results["client"]["outcome"] == "agent_error"
+    assert "https://provider.test/v1?key=[REDACTED]" in results["client"]["error"]["message"]
+    assert results["shaped"]["error"]["message"] == "provider rejected [REDACTED]"
+    assert results["evaluated"]["runner_metrics"]["broken"]["value"] is None
+    failure = server.trials[trials["server"]].failures[0]
+    assert failure["error_class"] == "infrastructure"
+    assert "https://provider.test/v1?key=[REDACTED]" in failure["message"]
+    assert "KeyError: '[REDACTED]'" in caplog.text
+    assert "ValueError: evaluator failed near [REDACTED]" in caplog.text
+    leaks = [*secret_forms(ENCODED), *secret_forms(SHAPED), ".tail-part-9876"]
+    for text in [*sent_strings(server), caplog.text]:
+        for form in leaks:
+            assert form not in text
+
+
+def test_trial_state_repr_hides_secrets_and_lease() -> None:
+    state = TrialState(proxy=None, lease_token="lease-4b8c0b9e", literals=[SECRET, TOKEN])
+    state.live_reports["call_1"] = {"body": {}, "value": f"raw {SECRET}", "error": None}
+    text = repr(state)
+    assert text.startswith("TrialState(")
+    for hidden in (SECRET, TOKEN, "lease-4b8c0b9e"):
+        assert hidden not in text
+
+
+def test_output_model_serializer_warning_never_carries_secret(server: FakeRunnerServer) -> None:
+    class Verdict(BaseModel):
+        count: int
+
+    def adapt(values: Any) -> list[Verdict]:
+        verdict = Verdict(count=1)
+        object.__setattr__(verdict, "count", SECRET)
+        return [verdict]
+
+    trial = server.add_trial("v1", agent_case(), secret_refs=["env:SERVICE_KEY"])
+    runner = make_runner(
+        server,
+        single_node(render_plan),
+        output_adapter=adapt,
+        runner_options={
+            "secrets": EnvSecretResolver(allow=["SERVICE_KEY"], environ={"SERVICE_KEY": SECRET})
+        },
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert serve(runner) == 1
+    assert all(SECRET not in str(item.message) for item in caught)
+    assert server.trials[trial].result["output"]["final"] == [{"count": "[REDACTED]"}]
+
+
+@pytest.mark.parametrize("path", ["tool_node", "sync_invoke"])
+def test_live_tool_unreportable_value_reported_once_and_fails_trial(
+    server: FakeRunnerServer, path: str
+) -> None:
+    booked: list[str] = []
+
+    @tool(description="Book a slot.")
+    def book_slot(day: str) -> Any:
+        booked.append(day)
+        return datetime.date(2026, 10, 5)
+
+    call_b = tool_call(name="book_slot", args={"day": "mon"}, id="call_b")
+
+    def factory(ctx: TrialContext) -> Any:
+        tools = ctx.wrap_tools([book_slot])
+        builder = StateGraph(GraphState)
+        if path == "tool_node":
+            replies = iter([[call_b], [call_b]])
+
+            def agent(state: dict[str, Any]) -> dict[str, Any]:
+                return {"messages": [AIMessage(content="", tool_calls=next(replies, []))]}
+
+            builder.add_node("agent", agent)
+            builder.add_node("tools", ToolNode(tools, handle_tool_errors=True))
+            builder.add_edge(START, "agent")
+            builder.add_conditional_edges("agent", tools_condition)
+            builder.add_edge("tools", "agent")
+        else:
+
+            def node(state: dict[str, Any]) -> dict[str, Any]:
+                seen = []
+                for _ in range(2):
+                    try:
+                        seen.append(str(tools[0].invoke(call_b).content))
+                    except Exception as error:
+                        seen.append(type(error).__name__)
+                return {"log": seen}
+
+            builder.add_node("plan", node)
+            builder.add_edge(START, "plan")
+        return builder.compile(checkpointer=ctx.checkpointer, store=ctx.store)
+
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "live"})
+    runner = make_runner(server, factory, live_tools=True)
+    assert serve(runner) == 1
+    assert booked == ["mon"]
+    reports = [json.loads(r.content) for r in server.requests if r.url.path.endswith("/report")]
+    assert len(reports) == 1
+    assert reports[0]["is_error"] is True
+    assert server.trials[trial].result is None
+    failure = server.trials[trial].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "runner_configuration",
+        "output_not_serializable",
+    )
+
+
+def gated_refund_factory(executed: list[str], path: str) -> Any:
+    @tool(description="Issue a refund.")
+    def refund(order_id: str) -> str:
+        executed.append(order_id)
+        return f"refunded {order_id}"
+
+    call_g = tool_call(name="refund", args={"order_id": "5"}, id="call_g")
+
+    def factory(ctx: TrialContext) -> Any:
+        tools = ctx.wrap_tools([refund])
+        builder = StateGraph(GraphState)
+        if path == "tool_node":
+            replies = iter([[call_g]])
+
+            def agent(state: dict[str, Any]) -> dict[str, Any]:
+                return {"messages": [AIMessage(content="", tool_calls=next(replies, []))]}
+
+            builder.add_node("agent", agent)
+            builder.add_node("tools", ToolNode(tools, handle_tool_errors=True))
+            builder.add_edge(START, "agent")
+            builder.add_conditional_edges("agent", tools_condition)
+            builder.add_edge("tools", "agent")
+        elif path == "sync_invoke":
+
+            def node(state: dict[str, Any]) -> dict[str, Any]:
+                try:
+                    return {"log": [str(tools[0].invoke(call_g).content)]}
+                except Exception as error:
+                    return {"log": [type(error).__name__]}
+
+            builder.add_node("plan", node)
+            builder.add_edge(START, "plan")
+        else:
+
+            async def anode(state: dict[str, Any]) -> dict[str, Any]:
+                try:
+                    return {"log": [str((await tools[0].ainvoke(call_g)).content)]}
+                except Exception as error:
+                    return {"log": [type(error).__name__]}
+
+            builder.add_node("plan", anode)
+            builder.add_edge(START, "plan")
+        return builder.compile(checkpointer=ctx.checkpointer, store=ctx.store)
+
+    return factory
+
+
+@pytest.mark.parametrize("path", ["tool_node", "sync_invoke", "async_invoke"])
+@pytest.mark.parametrize("mode", ["mock", "recorded"])
+def test_authorized_answer_for_simulated_trial_never_runs_the_tool(
+    server: FakeRunnerServer, mode: str, path: str
+) -> None:
+    executed: list[str] = []
+    trial = server.add_trial("v1", agent_case(), tools={"mode": mode})
+    server.answer_as = "live"
+    runner = make_runner(server, gated_refund_factory(executed, path), live_tools=True)
+    assert serve(runner) == 1
+    assert executed == []
+    assert any(path.endswith("/tool-calls") for path in server.paths())
+    assert not any(path.endswith("/report") for path in server.paths())
+    assert server.trials[trial].result is None
+    failure = server.trials[trial].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "runner_configuration",
+        "live_tools_disabled",
+    )
+
+
+def test_live_assignment_refused_without_live_tools(server: FakeRunnerServer) -> None:
+    built: list[str] = []
+    executed: list[str] = []
+    inner = gated_refund_factory(executed, "async_invoke")
+
+    def factory(ctx: TrialContext) -> Any:
+        built.append(ctx.trial_id)
+        return inner(ctx)
+
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "live"})
+    runner = make_runner(server, factory)
+    assert serve(runner) == 1
+    assert built == []
+    assert executed == []
+    assert not any(path.endswith("/tool-calls") for path in server.paths())
+    assert server.trials[trial].result is None
+    failure = server.trials[trial].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "runner_configuration",
+        "tool_mode_unavailable",
+    )
+    assert runner._workspace_id is None
+
+
+@pytest.mark.parametrize("path", ["tool_node", "sync_invoke", "async_invoke"])
+def test_live_trial_with_live_tools_runs_the_tool(server: FakeRunnerServer, path: str) -> None:
+    executed: list[str] = []
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "live"})
+    runner = make_runner(server, gated_refund_factory(executed, path), live_tools=True)
+    assert serve(runner) == 1
+    assert executed == ["5"]
+    reports = [json.loads(r.content) for r in server.requests if r.url.path.endswith("/report")]
+    assert [(item["value"], item["is_error"]) for item in reports] == [("refunded 5", False)]
+    assert server.trials[trial].result["outcome"] == "evaluated"
+
+
+class AuthorizingProxy:
+    def __init__(self) -> None:
+        self.reports: list[dict[str, Any]] = []
+
+    def call(self, body: Any) -> dict[str, Any]:
+        return {"status": "authorized", "record_id": "rec_1", "permit": {}, "decision": {}}
+
+    async def acall(self, body: Any) -> dict[str, Any]:
+        return self.call(body)
+
+    def report(self, logical_call_id: str, body: Any) -> dict[str, Any]:
+        self.reports.append(dict(body))
+        return {"recorded": True}
+
+    async def areport(self, logical_call_id: str, body: Any) -> dict[str, Any]:
+        return self.report(logical_call_id, body)
+
+
+@pytest.mark.parametrize("live_allowed", [False, True])
+def test_live_gate_needs_live_mode_and_local_opt_in(world: World, live_allowed: bool) -> None:
+    raw = local_assignment(
+        world.engine,
+        agent_id=AGENT,
+        release_id=world.releases["v1"],
+        case=agent_case(),
+        tools={"mode": "live"},
+    )
+    assignment = TrialAssignment.model_validate(raw)
+    proxy = AuthorizingProxy()
+    state = TrialState(proxy=proxy, lease_token=assignment.lease_token, literals=[])
+    context = TrialContext(
+        view=assignment.view,
+        agent_id=AGENT,
+        checkpointer=InMemorySaver(),
+        store=InMemoryStore(),
+        secrets=SecretValues(),
+        state=state,
+        **({"live_allowed": True} if live_allowed else {}),
+    )
+    executed: list[str] = []
+
+    @tool(description="Issue a refund.")
+    def refund(order_id: str) -> str:
+        executed.append(order_id)
+        return f"refunded {order_id}"
+
+    proxied = context.wrap_tools([refund])[0]
+    if live_allowed:
+        assert proxied.invoke({"order_id": "1"}) == "refunded 1"
+        assert asyncio.run(proxied.ainvoke({"order_id": "2"})) == "refunded 2"
+        assert executed == ["1", "2"]
+        assert len(proxy.reports) == 2
+        assert state.terminal is None
+        return
+    with pytest.raises(RunnerConfigurationError) as sync_refused:
+        proxied.invoke({"order_id": "1"})
+    with pytest.raises(RunnerConfigurationError) as async_refused:
+        asyncio.run(proxied.ainvoke({"order_id": "2"}))
+    assert sync_refused.value.code == async_refused.value.code == "live_tools_disabled"
+    assert executed == []
+    assert proxy.reports == []
+    assert state.terminal is sync_refused.value
+
+
+def wait_for_terminal(ctx: TrialContext) -> None:
+    deadline = time.monotonic() + 2.0
+    while ctx._state.terminal is None and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+
+@pytest.mark.parametrize("path", ["tool_node", "threads"])
+def test_concurrent_calls_with_one_id_run_the_live_tool_once(
+    server: FakeRunnerServer, path: str
+) -> None:
+    executed: list[str] = []
+    call_d = tool_call(name="refund", args={"order_id": "5"}, id="call_d")
+
+    def factory(ctx: TrialContext) -> Any:
+        @tool(description="Issue a refund.")
+        def refund(order_id: str) -> str:
+            executed.append(order_id)
+            wait_for_terminal(ctx)
+            return f"refunded {order_id}"
+
+        tools = ctx.wrap_tools([refund])
+        builder = StateGraph(GraphState)
+        if path == "tool_node":
+            replies = iter([[call_d, call_d]])
+
+            def agent(state: dict[str, Any]) -> dict[str, Any]:
+                return {"messages": [AIMessage(content="", tool_calls=next(replies, []))]}
+
+            builder.add_node("agent", agent)
+            builder.add_node("tools", ToolNode(tools, handle_tool_errors=True))
+            builder.add_edge(START, "agent")
+            builder.add_conditional_edges("agent", tools_condition)
+            builder.add_edge("tools", "agent")
+        else:
+
+            def node(state: dict[str, Any]) -> dict[str, Any]:
+                with ThreadPoolExecutor(2) as pool:
+                    futures = [pool.submit(tools[0].invoke, call_d) for _ in range(2)]
+                return {"log": [type(future.exception()).__name__ for future in futures]}
+
+            builder.add_node("plan", node)
+            builder.add_edge(START, "plan")
+        return builder.compile(checkpointer=ctx.checkpointer, store=ctx.store)
+
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "live"})
+    runner = make_runner(server, factory, live_tools=True)
+    assert serve(runner) == 1
+    assert executed == ["5"]
+    reports = [json.loads(r.content) for r in server.requests if r.url.path.endswith("/report")]
+    assert [(item["value"], item["is_error"]) for item in reports] == [("refunded 5", False)]
+    assert server.trials[trial].result is None
+    failure = server.trials[trial].failures[0]
+    assert (failure["error_class"], failure["error_code"]) == (
+        "runner_configuration",
+        "live_call_concurrent",
+    )
+
+
+@pytest.mark.parametrize("trigger", ["unreportable", "fixture_miss"])
+def test_no_tool_runs_after_the_trial_is_terminal(
+    server: FakeRunnerServer, monkeypatch: pytest.MonkeyPatch, trigger: str
+) -> None:
+    executed: list[str] = []
+
+    @tool(description="Book a slot.")
+    def book_slot(day: str) -> Any:
+        executed.append("book " + day)
+        return datetime.date(2026, 10, 5)
+
+    @tool(description="Issue a refund.")
+    def refund(order_id: str) -> str:
+        executed.append("refund " + order_id)
+        return f"refunded {order_id}"
+
+    if trigger == "fixture_miss":
+        original = server._answer
+
+        def answer(trial: Any, mode: str, name: str, arguments: Any) -> dict[str, Any]:
+            return original(trial, "recorded" if name == "book_slot" else mode, name, arguments)
+
+        monkeypatch.setattr(server, "_answer", answer)
+    first = tool_call(name="book_slot", args={"day": "mon"}, id="call_b")
+    second = tool_call(name="refund", args={"order_id": "5"}, id="call_r")
+
+    def factory(ctx: TrialContext) -> Any:
+        replies = iter([[first], [second]])
+
+        def agent(state: dict[str, Any]) -> dict[str, Any]:
+            return {"messages": [AIMessage(content="", tool_calls=next(replies, []))]}
+
+        builder = StateGraph(GraphState)
+        builder.add_node("agent", agent)
+        builder.add_node(
+            "tools", ToolNode(ctx.wrap_tools([book_slot, refund]), handle_tool_errors=True)
+        )
+        builder.add_edge(START, "agent")
+        builder.add_conditional_edges("agent", tools_condition)
+        builder.add_edge("tools", "agent")
+        return builder.compile(checkpointer=ctx.checkpointer, store=ctx.store)
+
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "live"})
+    runner = make_runner(server, factory, live_tools=True)
+    assert serve(runner) == 1
+    calls = [
+        json.loads(r.content)["tool"] for r in server.requests if r.url.path.endswith("/tool-calls")
+    ]
+    assert calls == ["book_slot"]
+    if trigger == "unreportable":
+        assert executed == ["book mon"]
+        assert server.trials[trial].failures[0]["error_code"] == "output_not_serializable"
+    else:
+        assert executed == []
+        assert server.trials[trial].result["outcome"] == "recorded_fixture_miss"
+
+
+def test_fixture_miss_policy_comes_from_the_view(
+    server: FakeRunnerServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = server._answer
+
+    def answer(trial: Any, mode: str, name: str, arguments: Any) -> dict[str, Any]:
+        response = original(trial, mode, name, arguments)
+        if response.get("status") == "recorded_fixture_miss":
+            response["on_fixture_miss"] = "tool_error"
+        return response
+
+    monkeypatch.setattr(server, "_answer", answer)
+    trial = server.add_trial("v1", agent_case(), tools={"mode": "recorded"})
+    assert serve(make_runner(server, tool_graph([[call("9999")]], handle_errors=True))) == 1
+    result = server.trials[trial].result
+    assert result["outcome"] == "recorded_fixture_miss"
+    assert result["error"]["tool"] == "lookup_order"
+
+
+def test_idle_claims_keep_long_polling_until_the_idle_timeout(server: FakeRunnerServer) -> None:
+    runner = make_runner(server, single_node(render_plan))
+    assert runner.serve(idle_timeout=0.4) == 0
+    waits = [
+        json.loads(request.content)["wait_seconds"]
+        for request in server.requests
+        if request.url.path.endswith("/claims")
+    ]
+    assert waits
+    assert waits.count(0) <= runner.max_concurrency, waits

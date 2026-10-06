@@ -1,0 +1,59 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R016",
+  "intent": "a partial supplies the value of an optional variable that the caller does not pass",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Locale: {locale}",
+      "variables": {
+        "locale": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "partials": {
+        "locale": "en"
+      },
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {},
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "Locale: en",
+    "messages": null,
+    "expanded_template": "Locale: {locale}",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:dcd9996b0ed23d43df7d0055aa459365b95a004fe39aeba67b36b2209d5bca6e",
+      "kind": "text",
+      "text": "Locale: en",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:1eb3752116af6355de8ad1ac0c0aed9dd9c7ccc966d9780aeecca125a816f5b4",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

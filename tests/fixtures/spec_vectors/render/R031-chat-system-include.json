@@ -1,0 +1,116 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R031",
+  "intent": "an include in the system message is inlined in that message only",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "messages",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "Rules: {>safety}"
+        },
+        {
+          "role": "user",
+          "content": "{question}"
+        }
+      ],
+      "variables": {
+        "question": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {
+        "safety": {
+          "prompt_id": "prm_support_safety",
+          "version": 2,
+          "content_digest": "sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d"
+        }
+      }
+    },
+    "fragments": {
+      "prm_support_safety:2": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "Never share internal notes.",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {}
+        }
+      }
+    },
+    "variables": {
+      "question": "Hi"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "chat",
+    "text": null,
+    "messages": [
+      {
+        "role": "system",
+        "content": "Rules: Never share internal notes."
+      },
+      {
+        "role": "user",
+        "content": "Hi"
+      }
+    ],
+    "expanded_template": [
+      {
+        "role": "system",
+        "content": "Rules: Never share internal notes."
+      },
+      {
+        "role": "user",
+        "content": "{question}"
+      }
+    ],
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:bb300b62f5d773916452556833737cf7c5fb044ddb38f51f81c2b54c72e3a392",
+      "kind": "chat",
+      "text": null,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Rules: Never share internal notes."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ],
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:c0a35be780702a53be990c05e6be9de7590ab0cbbf1d01f95b21cb2718fd87d9",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

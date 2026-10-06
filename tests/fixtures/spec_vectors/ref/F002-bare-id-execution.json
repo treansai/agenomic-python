@@ -1,0 +1,23 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "ref",
+  "id": "F002",
+  "intent": "a bare prompt id in an execution context has no implicit latest",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "ref": "prm_planner",
+    "context": "execution",
+    "workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f"
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_ref_unversioned"
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R066",
+  "intent": "R064 with the caller supplying constructor and an undeclared toString in strict mode reports toString as unknown",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Value: {constructor}",
+      "variables": {
+        "constructor": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "partials": {
+        "constructor": "c"
+      },
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "constructor": "v",
+      "toString": "x"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_render_error",
+      "item": {
+        "code": "unknown_variable",
+        "variable": "toString"
+      }
+    }
+  }
+}

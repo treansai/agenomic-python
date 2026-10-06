@@ -1,0 +1,44 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D020",
+  "intent": "integer and boolean partials keep their JSON types (7 and true)",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "{n} {b}",
+      "variables": {
+        "b": {
+          "type": "boolean",
+          "required": false
+        },
+        "n": {
+          "type": "integer",
+          "required": false
+        }
+      },
+      "partials": {
+        "b": true,
+        "n": 7
+      },
+      "output_contract": null,
+      "fragments": {}
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.prompt_content/v1",
+    "canonical": "{\"body\":\"{n} {b}\",\"fragments\":{},\"kind\":\"text\",\"output_contract\":null,\"partials\":{\"b\":true,\"n\":7},\"renderer_version\":\"1\",\"schema\":\"agenomic.prompt_content/v1\",\"template_format\":\"agenomic-fstring/v1\",\"variables\":{\"b\":{\"required\":false,\"type\":\"boolean\"},\"n\":{\"required\":false,\"type\":\"integer\"}}}",
+    "digest": "sha256:64500dfeaa2cfcda4211c272bcaf1595a501805e982bdc272cf2286917cc3cd7"
+  }
+}

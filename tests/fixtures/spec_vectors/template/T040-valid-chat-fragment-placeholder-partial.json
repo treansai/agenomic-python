@@ -1,0 +1,96 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T040",
+  "intent": "valid chat content with a fragment, an optional placeholder and a partial",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "You plan support work for locale {locale}.\n{>safety}"
+        },
+        {
+          "placeholder": "history",
+          "optional": true
+        },
+        {
+          "role": "user",
+          "content": "{question}"
+        }
+      ],
+      "variables": {
+        "history": {
+          "type": "messages",
+          "required": false
+        },
+        "locale": {
+          "type": "string",
+          "required": false
+        },
+        "question": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {
+        "locale": "en"
+      },
+      "output_contract": null,
+      "fragments": {
+        "safety": {
+          "prompt_id": "prm_support_safety",
+          "version": 2,
+          "content_digest": "sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d"
+        }
+      }
+    },
+    "fragments": {
+      "prm_support_safety:2": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "Never share internal notes.",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {}
+        }
+      }
+    }
+  },
+  "expected": {
+    "ok": true,
+    "validation": {
+      "variables": {
+        "declared": [
+          "history",
+          "locale",
+          "question"
+        ],
+        "referenced": [
+          "locale",
+          "question"
+        ],
+        "placeholders": [
+          "history"
+        ]
+      },
+      "warnings": [],
+      "content_digest": "sha256:939bfaf5a5d795e644e9fad6a8c5c8767b620ee2ab0f9bd8dbe048613bb764ef"
+    }
+  }
+}

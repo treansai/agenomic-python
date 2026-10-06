@@ -1,0 +1,42 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D019",
+  "intent": "the rendered document of a chat render with a placeholder count of 3 and history_count 0",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:280b5fd21416acbe44d32d0239ff8ba8f464570264b08666ec135fb0f436ca61",
+      "kind": "chat",
+      "text": null,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a support planner."
+        },
+        {
+          "placeholder": "history",
+          "count": 3
+        },
+        {
+          "role": "user",
+          "content": "Where is my parcel?"
+        }
+      ],
+      "history_count": 0
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.rendered_prompt/v1",
+    "canonical": "{\"content_digest\":\"sha256:280b5fd21416acbe44d32d0239ff8ba8f464570264b08666ec135fb0f436ca61\",\"history_count\":0,\"kind\":\"chat\",\"messages\":[{\"content\":\"You are a support planner.\",\"role\":\"system\"},{\"count\":3,\"placeholder\":\"history\"},{\"content\":\"Where is my parcel?\",\"role\":\"user\"}],\"schema\":\"agenomic.rendered_prompt/v1\",\"text\":null}",
+    "digest": "sha256:32f10b53547ed1d2a3dedbfc13dd06dbc40da4dcf50041db6b8b7290fb92c35e"
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R008",
+  "intent": "a variable used three times renders its value three times",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "{a}-{a}-{a}",
+      "variables": {
+        "a": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "a": "x"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "x-x-x",
+    "messages": null,
+    "expanded_template": "{a}-{a}-{a}",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:92ad0f34db26d921d6ad39198e8468b1014f103579a2e8d888a5b32ca1652e30",
+      "kind": "text",
+      "text": "x-x-x",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:17ab1ff5a247f248835a478efa7734e9941c68226f64c5778164c7b4c7adfd8e",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

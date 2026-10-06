@@ -1,0 +1,42 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T065",
+  "intent": "a non-integral number inside the output contract is refused by the AJS pre-pass",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Rate it.",
+      "variables": {},
+      "partials": {},
+      "output_contract": {
+        "type": "json_schema",
+        "json_schema": {
+          "type": "number",
+          "minimum": 0.5
+        }
+      },
+      "fragments": {}
+    },
+    "fragments": {}
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_template_invalid",
+      "item": {
+        "code": "float_not_allowed",
+        "value_path": "/output_contract/json_schema/minimum"
+      }
+    }
+  }
+}

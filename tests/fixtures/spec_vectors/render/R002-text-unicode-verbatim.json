@@ -1,0 +1,52 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R002",
+  "intent": "a text prompt without variables renders accented, astral and CJK characters byte for byte",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "café 😀 日本語のテキスト",
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {},
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "café 😀 日本語のテキスト",
+    "messages": null,
+    "expanded_template": "café 😀 日本語のテキスト",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:f61240d80b19d1b51d9c649ae8c1a294c95b595a47bb973b4aa51449ac70565c",
+      "kind": "text",
+      "text": "café 😀 日本語のテキスト",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:a38e322743e134067084c69f7e7cf488ea0cfef12347d14834e31fff94ce7e2f",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

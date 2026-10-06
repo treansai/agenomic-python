@@ -1,0 +1,30 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T010",
+  "intent": "offsets count code points: an astral character before the variable counts as one",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "template": "😀{x}"
+  },
+  "expected": {
+    "ok": true,
+    "tokens": [
+      {
+        "t": "literal",
+        "text": "😀"
+      },
+      {
+        "t": "var",
+        "name": "x",
+        "offset": 1
+      }
+    ],
+    "source": "😀{x}"
+  }
+}

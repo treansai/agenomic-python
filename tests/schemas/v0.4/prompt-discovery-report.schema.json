@@ -1,0 +1,277 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agenomic.dev/spec/v0.4/prompt-discovery-report.schema.json",
+  "title": "Agenomic prompt discovery report (v0.4)",
+  "description": "The `agenomic.prompt_discovery_report/v1` document produced locally by a static prompt scanner (RFC 0012). It is the only thing that leaves the developer's machine during discovery: it carries no source code, no absolute path and no secret, and an import endpoint accepts it instead of source code. The report is hashed whole (`discovery_report_digest`), so every member is always present and unknown members are refused. A `blocked_secret` candidate carries the pattern id and location of each finding, never the matched text.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "scanner", "root", "generated_at", "limits", "files", "candidates"],
+  "properties": {
+    "schema": { "const": "agenomic.prompt_discovery_report/v1" },
+    "scanner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "python_grammar", "secret_patterns"],
+      "properties": {
+        "name": { "$ref": "#/$defs/shortText" },
+        "version": { "$ref": "#/$defs/shortText" },
+        "python_grammar": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
+        "secret_patterns": { "type": "string", "pattern": "^agenomic-secrets/[1-9][0-9]*$" }
+      }
+    },
+    "root": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "vcs"],
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000]*$",
+          "not": { "pattern": "^(/|\\\\|~|[A-Za-z]:)" }
+        },
+        "vcs": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "commit"],
+              "properties": {
+                "kind": { "const": "git" },
+                "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+              }
+            },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "generated_at": { "$ref": "prompt-common.schema.json#/$defs/timestamp" },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_files", "max_file_bytes"],
+      "properties": {
+        "max_files": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+        "max_file_bytes": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
+      }
+    },
+    "files": { "type": "array", "items": { "$ref": "#/$defs/file" } },
+    "candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } }
+  },
+  "$defs": {
+    "shortText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "symbol": {
+      "anyOf": [
+        { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\u0000]*$" },
+        { "type": "null" }
+      ]
+    },
+    "nodePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "slotUsage": {
+      "enum": ["system", "instructions", "user", "chat", "tool_description", "other"]
+    },
+    "position": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "status", "skip_reason"],
+      "properties": {
+        "path": { "$ref": "prompt-common.schema.json#/$defs/repoPath" },
+        "sha256": { "$ref": "prompt-common.schema.json#/$defs/sha256Digest" },
+        "status": { "enum": ["scanned", "skipped"] },
+        "skip_reason": {
+          "enum": [null, "too_large", "syntax_error", "not_utf8", "excluded", "limit_reached"]
+        }
+      },
+      "if": { "properties": { "status": { "const": "scanned" } } },
+      "then": { "properties": { "skip_reason": { "type": "null" } } },
+      "else": { "properties": { "skip_reason": { "type": "string" } } }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_id",
+        "status",
+        "construct",
+        "source",
+        "proposal",
+        "content",
+        "content_digest",
+        "issues",
+        "secret_findings"
+      ],
+      "properties": {
+        "candidate_id": { "type": "string", "pattern": "^cand_[0-9a-f]{16}$" },
+        "status": { "enum": ["supported", "unsupported", "unresolved", "blocked_secret"] },
+        "construct": {
+          "enum": [
+            "langchain.prompt_template",
+            "langchain.chat_prompt_template",
+            "langchain.message_prompt_template",
+            "langchain.message",
+            "langgraph.create_react_agent.prompt",
+            "langchain.create_agent.system_prompt",
+            "python.string_constant",
+            "langgraph.subagent_node",
+            "dynamic"
+          ]
+        },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "line", "column", "end_line", "end_column", "symbol", "enclosing_function"],
+          "properties": {
+            "path": { "$ref": "prompt-common.schema.json#/$defs/repoPath" },
+            "line": { "$ref": "#/$defs/position" },
+            "column": { "$ref": "#/$defs/position" },
+            "end_line": { "$ref": "#/$defs/position" },
+            "end_column": { "$ref": "#/$defs/position" },
+            "symbol": { "$ref": "#/$defs/symbol" },
+            "enclosing_function": { "$ref": "#/$defs/symbol" }
+          }
+        },
+        "proposal": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["prompt_id", "prompt_kind", "slot_path", "node_path", "usage"],
+          "properties": {
+            "prompt_id": {
+              "anyOf": [{ "$ref": "prompt-common.schema.json#/$defs/promptId" }, { "type": "null" }]
+            },
+            "prompt_kind": {
+              "anyOf": [{ "$ref": "prompt-common.schema.json#/$defs/promptKind" }, { "type": "null" }]
+            },
+            "slot_path": {
+              "anyOf": [{ "$ref": "prompt-common.schema.json#/$defs/slotPath" }, { "type": "null" }]
+            },
+            "node_path": {
+              "anyOf": [{ "$ref": "#/$defs/nodePath" }, { "type": "null" }]
+            },
+            "usage": {
+              "anyOf": [{ "$ref": "#/$defs/slotUsage" }, { "type": "null" }]
+            }
+          }
+        },
+        "content": {
+          "anyOf": [{ "$ref": "prompt-content.schema.json" }, { "type": "null" }]
+        },
+        "content_digest": {
+          "anyOf": [{ "$ref": "prompt-common.schema.json#/$defs/sha256Digest" }, { "type": "null" }]
+        },
+        "issues": { "type": "array", "items": { "$ref": "#/$defs/issue" } },
+        "secret_findings": { "type": "array", "items": { "$ref": "#/$defs/secretFinding" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "supported" } } },
+          "then": {
+            "properties": {
+              "content": { "type": "object" },
+              "content_digest": { "type": "string" },
+              "secret_findings": { "maxItems": 0 }
+            }
+          },
+          "else": {
+            "properties": {
+              "content": { "type": "null" },
+              "content_digest": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "blocked_secret" } } },
+          "then": { "properties": { "secret_findings": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "construct": { "const": "dynamic" } } },
+          "then": { "properties": { "status": { "const": "unresolved" } } }
+        },
+        {
+          "if": { "properties": { "construct": { "const": "langgraph.subagent_node" } } },
+          "then": {
+            "properties": {
+              "status": { "const": "unresolved" },
+              "proposal": { "properties": { "node_path": { "type": "string" } } },
+              "issues": { "contains": { "properties": { "code": { "const": "subagent_unmapped" } } } }
+            }
+          }
+        },
+        { "$ref": "#/$defs/kindAgreement" }
+      ]
+    },
+    "kindAgreement": {
+      "allOf": [
+        {
+          "if": {
+            "required": ["proposal", "content"],
+            "properties": {
+              "proposal": { "properties": { "prompt_kind": { "const": "chat" } } },
+              "content": { "type": "object" }
+            }
+          },
+          "then": { "properties": { "content": { "properties": { "kind": { "const": "chat" } } } } }
+        },
+        {
+          "if": {
+            "required": ["proposal", "content"],
+            "properties": {
+              "proposal": { "properties": { "prompt_kind": { "enum": ["text", "fragment"] } } },
+              "content": { "type": "object" }
+            }
+          },
+          "then": { "properties": { "content": { "properties": { "kind": { "const": "text" } } } } }
+        }
+      ]
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "line", "column", "message"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+        "severity": { "enum": ["error", "warning", "info"] },
+        "line": { "anyOf": [{ "$ref": "#/$defs/position" }, { "type": "null" }] },
+        "column": { "anyOf": [{ "$ref": "#/$defs/position" }, { "type": "null" }] },
+        "message": { "type": "string", "pattern": "^[^\\u0000]*$" }
+      }
+    },
+    "secretFinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pattern", "line", "column", "length"],
+      "properties": {
+        "pattern": {
+          "enum": [
+            "bearer_token",
+            "private_key_block",
+            "openai_key",
+            "stripe_key",
+            "aws_access_key",
+            "github_token",
+            "huggingface_token",
+            "slack_token",
+            "google_api_key",
+            "jwt",
+            "agenomic_api_key"
+          ]
+        },
+        "line": { "$ref": "#/$defs/position" },
+        "column": { "$ref": "#/$defs/position" },
+        "length": { "$ref": "#/$defs/position" }
+      }
+    }
+  }
+}

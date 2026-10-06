@@ -1,0 +1,193 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R061",
+  "intent": "two role entries each expand 254 includes (fan-out 2 over 7 levels); a per-template counter would accept, the per-content counter passes 256 during the second entry",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "messages",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "{>fan}{>fan}"
+        },
+        {
+          "role": "user",
+          "content": "{>fan}{>fan}"
+        }
+      ],
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {
+        "fan": {
+          "prompt_id": "prm_fan_1",
+          "version": 1,
+          "content_digest": "sha256:a64cfded85a9313e20e49ea4bc1361577e2d61bb320b9761277fde822463e022"
+        }
+      }
+    },
+    "fragments": {
+      "prm_fan_1:1": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "{>a}{>a}",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {
+            "a": {
+              "prompt_id": "prm_fan_2",
+              "version": 1,
+              "content_digest": "sha256:f1cb766b397a8f369430dbbedcd4e19712f2b51cff23149132d1e0d9c3883cad"
+            }
+          }
+        }
+      },
+      "prm_fan_2:1": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "{>a}{>a}",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {
+            "a": {
+              "prompt_id": "prm_fan_3",
+              "version": 1,
+              "content_digest": "sha256:87ef1295f271c7f63de14897049d9f0322178e6f86aa781a3daa29e2b322d03b"
+            }
+          }
+        }
+      },
+      "prm_fan_3:1": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "{>a}{>a}",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {
+            "a": {
+              "prompt_id": "prm_fan_4",
+              "version": 1,
+              "content_digest": "sha256:c850dcdb91754a45029966deba7d848e3526377bd31655ba3b527c9603c01c45"
+            }
+          }
+        }
+      },
+      "prm_fan_4:1": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "{>a}{>a}",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {
+            "a": {
+              "prompt_id": "prm_fan_5",
+              "version": 1,
+              "content_digest": "sha256:6f0c99966c332d24a0ad6c4927deb923da99d93e715388ca74f6b7abdec5027e"
+            }
+          }
+        }
+      },
+      "prm_fan_5:1": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "{>a}{>a}",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {
+            "a": {
+              "prompt_id": "prm_fan_6",
+              "version": 1,
+              "content_digest": "sha256:71857c2ae01e7f8bf0b45535e295fea93c919a73aa3eeea8a8ba2a0475e1ce7c"
+            }
+          }
+        }
+      },
+      "prm_fan_6:1": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "{>a}{>a}",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {
+            "a": {
+              "prompt_id": "prm_fan_7",
+              "version": 1,
+              "content_digest": "sha256:3831dc89b4fc46c5a4d563bf2697931386d062edc2dc6c79db17af14f9527449"
+            }
+          }
+        }
+      },
+      "prm_fan_7:1": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "x",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {}
+        }
+      }
+    },
+    "variables": {},
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_render_error",
+      "item": {
+        "code": "fragment_expansion_limit"
+      }
+    }
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R032",
+  "intent": "a fragment included twice side by side (a diamond) is expanded twice",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "{>safety} {>safety}",
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {
+        "safety": {
+          "prompt_id": "prm_support_safety",
+          "version": 2,
+          "content_digest": "sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d"
+        }
+      }
+    },
+    "fragments": {
+      "prm_support_safety:2": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "Never share internal notes.",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {}
+        }
+      }
+    },
+    "variables": {},
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "Never share internal notes. Never share internal notes.",
+    "messages": null,
+    "expanded_template": "Never share internal notes. Never share internal notes.",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:032508ddcb4736427769d81902de01d8f169e47694c689539a1a8cae7c7a6419",
+      "kind": "text",
+      "text": "Never share internal notes. Never share internal notes.",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:33184a695508fdfdbeb27790293790765323d320433758a78f29df3273eb79bb",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

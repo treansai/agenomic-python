@@ -1,0 +1,38 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D004",
+  "intent": "text content pinning one fragment by prompt id, version and content digest",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Plan the next step.\n{>safety}",
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {
+        "safety": {
+          "prompt_id": "prm_support_safety",
+          "version": 2,
+          "content_digest": "sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d"
+        }
+      }
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.prompt_content/v1",
+    "canonical": "{\"body\":\"Plan the next step.\\n{>safety}\",\"fragments\":{\"safety\":{\"content_digest\":\"sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d\",\"prompt_id\":\"prm_support_safety\",\"version\":2}},\"kind\":\"text\",\"output_contract\":null,\"partials\":{},\"renderer_version\":\"1\",\"schema\":\"agenomic.prompt_content/v1\",\"template_format\":\"agenomic-fstring/v1\",\"variables\":{}}",
+    "digest": "sha256:5ad0e07bf5dfb86e45302963f04ef455fa4f965622ca97f55e48cf7ff6956f31"
+  }
+}

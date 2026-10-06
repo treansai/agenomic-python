@@ -1,0 +1,117 @@
+{
+  "schema": "agenomic.prompt_import_plan/v1",
+  "plan_id": null,
+  "workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f",
+  "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+  "source": {
+    "kind": "prompts_file",
+    "digest": "sha256:e587ec9f68469d257e9c9a88247bf1b9d199514616f6878099c9c8151cd1978e"
+  },
+  "created_at": null,
+  "items": [
+    {
+      "item_id": "cand_489c7cabe45be793",
+      "action": "create_prompt",
+      "prompt_id": "prm_support_safety",
+      "prompt_kind": "fragment",
+      "base_version": null,
+      "content": {
+        "schema": "agenomic.prompt_content/v1",
+        "template_format": "agenomic-fstring/v1",
+        "renderer_version": "1",
+        "kind": "text",
+        "body": "Never share internal notes.",
+        "variables": {},
+        "partials": {},
+        "output_contract": null,
+        "fragments": {}
+      },
+      "content_digest": "sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d",
+      "existing_version_with_same_digest": null,
+      "slot": null,
+      "issues": [],
+      "secret_findings": [],
+      "provenance": {
+        "source_file": null,
+        "source_line": null
+      }
+    },
+    {
+      "item_id": "cand_ce58c3b5491196c8",
+      "action": "create_version",
+      "prompt_id": "prm_support_planner",
+      "prompt_kind": "chat",
+      "base_version": 6,
+      "content": {
+        "schema": "agenomic.prompt_content/v1",
+        "template_format": "agenomic-fstring/v1",
+        "renderer_version": "1",
+        "kind": "chat",
+        "body": [
+          {
+            "role": "system",
+            "content": "You plan support work for locale {locale}.\n{>safety}"
+          },
+          {
+            "placeholder": "history",
+            "optional": true
+          },
+          {
+            "role": "user",
+            "content": "{question}"
+          }
+        ],
+        "variables": {
+          "history": {
+            "type": "messages",
+            "required": false
+          },
+          "locale": {
+            "type": "string",
+            "required": false
+          },
+          "question": {
+            "type": "string",
+            "required": true
+          }
+        },
+        "partials": {
+          "locale": "en"
+        },
+        "output_contract": null,
+        "fragments": {
+          "safety": {
+            "prompt_id": "prm_support_safety",
+            "version": 1,
+            "content_digest": "sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d"
+          }
+        }
+      },
+      "content_digest": "sha256:84a74530fb596db87bcaefd59edf3f13959a85141cc6ddb3b3f56eeda1e77089",
+      "existing_version_with_same_digest": null,
+      "slot": {
+        "slot_path": "planner.instructions",
+        "node_path": "planner",
+        "subagent_id": null,
+        "usage": "instructions",
+        "status": "managed"
+      },
+      "issues": [],
+      "secret_findings": [],
+      "provenance": {
+        "source_file": null,
+        "source_line": null
+      }
+    }
+  ],
+  "summary": {
+    "create_prompt": 1,
+    "create_version": 1,
+    "reuse_version": 0,
+    "map_slot_only": 0,
+    "skip": 0,
+    "blocked": 0,
+    "unresolved": 0
+  },
+  "plan_digest": "sha256:83a7f1313e19c7db80f6dc528e65f40844381a48f47f91f327a4d8e9a15a4432"
+}

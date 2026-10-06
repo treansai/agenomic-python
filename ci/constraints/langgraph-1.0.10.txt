@@ -1,0 +1,7 @@
+langgraph==1.0.10
+langgraph-prebuilt==1.0.8
+langgraph-checkpoint==4.2.0
+langgraph-sdk==0.3.15
+langchain-core==1.6.3
+langgraph-checkpoint-sqlite==3.1.1
+aiosqlite==0.22.1

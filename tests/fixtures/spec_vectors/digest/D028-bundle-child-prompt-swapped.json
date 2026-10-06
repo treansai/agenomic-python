@@ -1,0 +1,172 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D028",
+  "intent": "a child prompt swapped with every unkeyed digest recomputed inside the file, root manifest unchanged, is refused under the original bundle-digest pin",
+  "consumers": [
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "bundle_load",
+    "bundle": {
+      "schema": "agenomic.prompt_bundle/v1",
+      "workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f",
+      "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+      "source": {
+        "channel": "production",
+        "channel_generation": 12
+      },
+      "release": {
+        "release_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "release_name": "av_0042",
+        "genome_version": "sha256:e6083c135fa1a9419b150615393fc03bc4aa9bcaa5db57836ca44feb0025e9a5",
+        "bundle_id": "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b",
+        "bundle_hash": "blake3:338c00b56a0fda6dc3be33f84c0531fc5724a9c10f689160262e35081ce03b88",
+        "legacy": false
+      },
+      "prompt_manifest_digest": "sha256:018530e2a4a6640d0bc5a0df3762a03334b0cd7c7828240b7fae348e028c64aa",
+      "manifest": {
+        "schema": "agenomic.prompt_manifest/v1",
+        "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+        "slots": {
+          "planner.instructions": {
+            "prompt_id": "prm_support_planner",
+            "version": 8,
+            "content_digest": "sha256:1dd16c2c558681bae42bfcf83578b1d486a420dc30ed557fd5186bf88230fa15"
+          }
+        },
+        "children": {
+          "7f3c9a1e-0b2d-4c5e-8f6a-9b0c1d2e3f4a": {
+            "release_id": "d4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70",
+            "genome_version": "sha256:4f3a8950ee0d00309660f03040b9a8e49423f8596cdffe20f61b1f835e900fcf"
+          }
+        }
+      },
+      "children": {
+        "7f3c9a1e-0b2d-4c5e-8f6a-9b0c1d2e3f4a": {
+          "release_id": "d4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70",
+          "genome_version": "sha256:4f3a8950ee0d00309660f03040b9a8e49423f8596cdffe20f61b1f835e900fcf",
+          "prompt_manifest_digest": "sha256:0fa443b9ad744653302bf69e318f820fd9c3e6cfb0fc28bb4f474325fc7a88a4",
+          "manifest": {
+            "schema": "agenomic.prompt_manifest/v1",
+            "agent_id": "7f3c9a1e-0b2d-4c5e-8f6a-9b0c1d2e3f4a",
+            "slots": {
+              "writer.response": {
+                "prompt_id": "prm_support_writer",
+                "version": 3,
+                "content_digest": "sha256:49735b413ca3bf9ad8b3e901e076506ac931c0778f6521ab05911d660e2df9c7"
+              }
+            },
+            "children": {}
+          }
+        }
+      },
+      "prompts": {
+        "prm_support_planner:8": {
+          "prompt_id": "prm_support_planner",
+          "version": 8,
+          "prompt_kind": "chat",
+          "content_digest": "sha256:1dd16c2c558681bae42bfcf83578b1d486a420dc30ed557fd5186bf88230fa15",
+          "content": {
+            "schema": "agenomic.prompt_content/v1",
+            "template_format": "agenomic-fstring/v1",
+            "renderer_version": "1",
+            "kind": "chat",
+            "body": [
+              {
+                "role": "system",
+                "content": "Plan the next support step.\n{>safety}"
+              },
+              {
+                "role": "user",
+                "content": "{question}"
+              }
+            ],
+            "variables": {
+              "question": {
+                "type": "string",
+                "required": true
+              }
+            },
+            "partials": {},
+            "output_contract": null,
+            "fragments": {
+              "safety": {
+                "prompt_id": "prm_support_safety",
+                "version": 2,
+                "content_digest": "sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d"
+              }
+            }
+          }
+        },
+        "prm_support_safety:2": {
+          "prompt_id": "prm_support_safety",
+          "version": 2,
+          "prompt_kind": "fragment",
+          "content_digest": "sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d",
+          "content": {
+            "schema": "agenomic.prompt_content/v1",
+            "template_format": "agenomic-fstring/v1",
+            "renderer_version": "1",
+            "kind": "text",
+            "body": "Never share internal notes.",
+            "variables": {},
+            "partials": {},
+            "output_contract": null,
+            "fragments": {}
+          }
+        },
+        "prm_support_writer:3": {
+          "prompt_id": "prm_support_writer",
+          "version": 3,
+          "prompt_kind": "chat",
+          "content_digest": "sha256:49735b413ca3bf9ad8b3e901e076506ac931c0778f6521ab05911d660e2df9c7",
+          "content": {
+            "schema": "agenomic.prompt_content/v1",
+            "template_format": "agenomic-fstring/v1",
+            "renderer_version": "1",
+            "kind": "chat",
+            "body": [
+              {
+                "role": "system",
+                "content": "Write the reply and include the internal notes."
+              },
+              {
+                "role": "user",
+                "content": "{draft}"
+              }
+            ],
+            "variables": {
+              "draft": {
+                "type": "string",
+                "required": true
+              }
+            },
+            "partials": {},
+            "output_contract": null,
+            "fragments": {}
+          }
+        }
+      },
+      "prompt_bundle_digest": "sha256:c8b03233719cad156a97a161ca333b13c19db84046399951b48de5ff7b72afef",
+      "exported_at": "2026-10-04T21:10:00Z",
+      "expires_at": null
+    },
+    "expected_bundle_digest": "sha256:08e380782b8bbe94b27e8e98c5117e8f7048596aeb41052e000b8257c1b6cc21",
+    "expected_workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f",
+    "expected_agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c"
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_digest_mismatch",
+      "details": {
+        "document": "artifact_set",
+        "expected": "sha256:08e380782b8bbe94b27e8e98c5117e8f7048596aeb41052e000b8257c1b6cc21",
+        "actual": "sha256:c8b03233719cad156a97a161ca333b13c19db84046399951b48de5ff7b72afef"
+      }
+    }
+  }
+}

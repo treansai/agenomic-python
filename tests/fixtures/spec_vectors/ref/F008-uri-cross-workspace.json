@@ -1,0 +1,23 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "ref",
+  "id": "F008",
+  "intent": "a canonical URI of another workspace is never resolved",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "ref": "agenomic://0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f/prompts/prm_planner/versions/7",
+    "context": "execution",
+    "workspace_id": "5a5a5a5a-1111-4222-8333-444455556666"
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_ref_cross_workspace"
+    }
+  }
+}

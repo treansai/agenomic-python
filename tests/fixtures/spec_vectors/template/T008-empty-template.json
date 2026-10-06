@@ -1,0 +1,20 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T008",
+  "intent": "the empty template has no tokens",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "template": ""
+  },
+  "expected": {
+    "ok": true,
+    "tokens": [],
+    "source": ""
+  }
+}

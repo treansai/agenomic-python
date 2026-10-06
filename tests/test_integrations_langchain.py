@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -19,7 +22,14 @@ from agenomic.integrations.langchain import (
     flush,
     shutdown,
 )
+from agenomic.prompts.render import render_content
 from agenomic.tracking import TrackingSession
+
+VECTORS = Path(__file__).parent / "fixtures" / "spec_vectors" / "render"
+MANIFEST_DIGEST = "sha256:" + "1" * 64
+GENOME_VERSION = "sha256:" + "2" * 64
+PLANNER_DIGEST = "sha256:" + "3" * 64
+WRITER_DIGEST = "sha256:" + "4" * 64
 
 
 def _session() -> TrackingSession:
@@ -388,3 +398,92 @@ async def test_handlers_on_one_session_share_a_single_emitter() -> None:
     assert session.session_id not in _dispatchers
     thread.join(timeout=2.0)
     assert thread.is_alive() is False, "one teardown is registered, not one per handler"
+
+
+def _pinned_metadata(**overrides: Any) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "ls_provider": "openai",
+        "ls_model_name": "gpt-test",
+        "agenomic_binding_id": "bnd_01j9x4w6k2m8n0p3q5r7s9t1v3",
+        "agenomic_prompt_manifest_digest": MANIFEST_DIGEST,
+        "agenomic_genome_version": GENOME_VERSION,
+        "agenomic_experiment_id": "exp_01j9x4w6k2m8n0p3q5r7s9t1v3",
+        "agenomic_experiment_arm_key": "candidate",
+        "agenomic_prompt_slots": "planner.instructions,writer.response",
+        "agenomic_prompt_refs": "prm_planner:7,prm_writer:3",
+        "agenomic_prompt_content_digests": f"{PLANNER_DIGEST},{WRITER_DIGEST}",
+    }
+    metadata.update(overrides)
+    return {key: value for key, value in metadata.items() if value is not None}
+
+
+async def _model_started(metadata: dict[str, Any]) -> dict[str, Any]:
+    session = _session()
+    handler = TrackingCallbackHandler(session)
+    run = uuid4()
+    await handler.on_chat_model_start(
+        {}, [[HumanMessage(content="raw user text")]], run_id=run, metadata=metadata
+    )
+    assert flush(session)
+    started = [e for e in session.events if e["type"] == "model.call.started"]
+    assert len(started) == 1
+    return started[0]
+
+
+async def test_model_call_carries_the_pinned_prompt_keys() -> None:
+    event = await _model_started(_pinned_metadata())
+    assert event["prompt_binding_id"] == "bnd_01j9x4w6k2m8n0p3q5r7s9t1v3"
+    assert event["prompt_manifest_digest"] == MANIFEST_DIGEST
+    assert event["agent_version"] == GENOME_VERSION
+    assert event["experiment_id"] == "exp_01j9x4w6k2m8n0p3q5r7s9t1v3"
+    assert event["experiment_arm_key"] == "candidate"
+    assert event["prompt_refs"] == [
+        {"slot": "planner.instructions", "ref": "prm_planner:7", "content_digest": PLANNER_DIGEST},
+        {"slot": "writer.response", "ref": "prm_writer:3", "content_digest": WRITER_DIGEST},
+    ]
+    assert "prompt_rendered_hash" not in event
+    assert len(event["input_hash"]) == 64
+    assert "raw user text" not in json.dumps(event)
+    assert not [key for key in event if key.startswith("agenomic_")]
+
+
+async def test_malformed_prompt_metadata_is_dropped_whole() -> None:
+    uneven = await _model_started(_pinned_metadata(agenomic_prompt_refs="prm_planner:7"))
+    assert "prompt_refs" not in uneven
+    bad_digest = await _model_started(
+        _pinned_metadata(agenomic_prompt_content_digests=f"{PLANNER_DIGEST},sha256:nope")
+    )
+    assert "prompt_refs" not in bad_digest
+    alias = await _model_started(
+        _pinned_metadata(
+            agenomic_prompt_refs="prm_planner@staging,prm_writer:3",
+            agenomic_rendered_hash="blake3:abc",
+            agenomic_binding_id="bnd with spaces",
+        )
+    )
+    assert "prompt_refs" not in alias
+    assert "prompt_rendered_hash" not in alias
+    assert "prompt_binding_id" not in alias
+    bad_manifest = await _model_started(
+        _pinned_metadata(agenomic_prompt_manifest_digest="not-a-digest")
+    )
+    assert "prompt_manifest_digest" not in bad_manifest
+    legacy = await _model_started(_pinned_metadata(agenomic_genome_version=None))
+    assert "agent_version" not in legacy
+    plain = await _model_started({"ls_provider": "openai"})
+    assert not [key for key in plain if key.startswith(("prompt_", "experiment_"))]
+
+
+async def test_rendered_hash_equals_vector() -> None:
+    vector = json.loads(next(VECTORS.glob("R019-*.json")).read_text(encoding="utf-8"))
+    data, expected = vector["input"], vector["expected"]
+    rendered = render_content(
+        data["content"],
+        data["variables"],
+        fragments=lambda prompt_id, version, digest: None,
+        expect_kind="chat",
+    )
+    assert rendered.rendered_hash == expected["rendered_hash"]
+    event = await _model_started(_pinned_metadata(agenomic_rendered_hash=rendered.rendered_hash))
+    assert event["prompt_rendered_hash"] == expected["rendered_hash"]
+    assert event["prompt_rendered_hash"] != event["input_hash"]

@@ -1,0 +1,29 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D018",
+  "intent": "the rendered document of a text render",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:bcd8fd23d76935d3eb9d1afb1e821ecebbf0ccb0f3655b5776ec8eacbe6a5ff1",
+      "kind": "text",
+      "text": "Hello Ada",
+      "messages": null,
+      "history_count": 0
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.rendered_prompt/v1",
+    "canonical": "{\"content_digest\":\"sha256:bcd8fd23d76935d3eb9d1afb1e821ecebbf0ccb0f3655b5776ec8eacbe6a5ff1\",\"history_count\":0,\"kind\":\"text\",\"messages\":null,\"schema\":\"agenomic.rendered_prompt/v1\",\"text\":\"Hello Ada\"}",
+    "digest": "sha256:4be83c4143f3f7ad2dc2b75dabd1aadd16b0c4ba88edeac96a4bb4a755e3307b"
+  }
+}

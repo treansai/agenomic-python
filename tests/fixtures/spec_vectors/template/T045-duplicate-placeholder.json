@@ -1,0 +1,59 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T045",
+  "intent": "two placeholders on the same variable",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "S"
+        },
+        {
+          "placeholder": "history",
+          "optional": false
+        },
+        {
+          "placeholder": "history",
+          "optional": false
+        },
+        {
+          "role": "user",
+          "content": "Q"
+        }
+      ],
+      "variables": {
+        "history": {
+          "type": "messages",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {}
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_template_invalid",
+      "item": {
+        "code": "duplicate_placeholder",
+        "path": "/body/2",
+        "variable": "history"
+      }
+    }
+  }
+}
