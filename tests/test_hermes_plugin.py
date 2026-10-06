@@ -1563,7 +1563,7 @@ def test_refused_delegation_is_recorded_and_blocks_only_in_enforce(
     monkeypatch.setattr(
         adapter.client,
         "reserve_delegation",
-        lambda sid, body: {"decision": "deny", "explanation": "delegation limit reached"},
+        lambda sid, body: (403, {"decision": "deny", "explanation": "delegation limit reached"}),
     )
     runner = Runner(adapter)
     runner.direct("delegate_task", {"tasks": [{"goal": "a"}]})
@@ -1733,7 +1733,7 @@ def test_concurrent_approvals_each_keep_their_delegation_reservation(
 
     def reserve(sid: str, body: Any) -> Any:
         reserved.append(body["tool_call_id"])
-        return {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
+        return 200, {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
 
     monkeypatch.setattr(adapter.client, "reserve_delegation", reserve)
     monkeypatch.setattr(adapter.client, "authorize", answer_then_interleave)
@@ -1960,7 +1960,7 @@ def test_each_child_takes_the_reservation_of_the_invocation_that_built_it(
     adapter._ensure_started("cli")
 
     def reserve(sid: str, body: Any) -> Any:
-        return {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
+        return 200, {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
 
     monkeypatch.setattr(adapter.client, "reserve_delegation", reserve)
     args = {"tasks": [{"goal": "x"}]}
@@ -2018,7 +2018,7 @@ def test_failed_identical_delegations_each_keep_their_reservation(
     args = {"tasks": [{"goal": "x"}]}
 
     def reserve(sid: str, body: Any) -> Any:
-        return {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
+        return 200, {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
 
     monkeypatch.setattr(adapter.client, "reserve_delegation", reserve)
     original = adapter.client.authorize
@@ -2050,7 +2050,7 @@ def test_call_blocked_before_the_middleware_retires_its_authorization(
     adapter._ensure_started("cli")
 
     def reserve(sid: str, body: Any) -> Any:
-        return {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
+        return 200, {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
 
     monkeypatch.setattr(adapter.client, "reserve_delegation", reserve)
     args = {"tasks": [{"goal": "x"}]}
@@ -3916,3 +3916,44 @@ def test_a_refused_terminal_end_refuses_the_cancel_instead_of_applying_it(
     assert ("k9", "applied") not in acks
     assert ("k9", "refused") in acks
     assert "s1" not in adapter._pending_ends
+
+
+def test_an_admission_lost_after_the_session_ended_settles_its_cancels(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+
+    def finalized_then_lost(body: dict[str, Any]) -> Any:
+        adapter.handle_command(
+            {"id": "k10", "kind": "cancel", "target_kind": "session", "target_ref": "ags_y"}
+        )
+        # The session ends while its admission is in flight, then the answer is lost.
+        adapter.on_session_finalize(session_id="s1", reason="exit")
+        raise HermesApiError("transport_error", "connection reset", 0)
+
+    monkeypatch.setattr(adapter.client, "create_session", finalized_then_lost)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert "s1" not in adapter._unadmitted
+    assert ("k10", "refused") in [(c, b["status"]) for c, b in server.acks], (
+        "the cancel is decided, not held forever"
+    )
+
+
+@pytest.mark.parametrize(("status", "decision"), [(403, "allow"), (200, "deny")])
+def test_a_delegation_decision_contradicting_its_status_blocks(
+    server: FakeAgenomic,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    decision: str,
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    # Through the real client and HTTP status, as the gateway would answer.
+    server.delegation_answer = (status, {"decision": decision, "delegation_id": "del-1"})
+    runner = Runner(adapter)
+    out = json.loads(runner.direct("delegate_task", {"tasks": [{"goal": "a"}]}))
+    assert "error" in out
+    assert runner.executions == 0

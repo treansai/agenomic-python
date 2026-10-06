@@ -292,19 +292,20 @@ class RuntimeClient(_ApiClient):
 
     def reserve_delegation(
         self, hermes_session_id: str, body: Mapping[str, JsonValue]
-    ) -> dict[str, JsonValue]:
-        """``POST /sessions/:sid/delegations``; a 403 deny is returned, not raised.
+    ) -> tuple[int, dict[str, JsonValue]]:
+        """``POST /sessions/:sid/delegations``: ``(status, answer)``; a 403 deny is returned,
+        not raised, and the status is kept so the caller can check it against the decision.
 
         Example:
             >>> import httpx
             >>> t = httpx.MockTransport(lambda r: httpx.Response(403, json={"decision": "deny"}))
             >>> RuntimeClient("https://a.example", "agmhr_x", transport=t).reserve_delegation("s1", {"count": 2})
-            {'decision': 'deny'}
+            (403, {'decision': 'deny'})
         """
         path = f"/sessions/{_seg(hermes_session_id)}/delegations"
         return self.request(
             "POST", path, json_body=body, timeout_s=self.decision_s, decision_statuses=(403,)
-        )[1]
+        )
 
     def authorize(
         self, hermes_session_id: str, body: Mapping[str, JsonValue]

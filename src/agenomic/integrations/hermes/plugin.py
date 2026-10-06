@@ -135,6 +135,7 @@ APPROVAL_IN_USE_MESSAGE = (
 )
 _SESSION_HEADER = "X-Agenomic-Hermes-Session"
 _DECISION_STATUS = {"allow": 200, "observe": 200, "require_approval": 202, "deny": 403}
+_DELEGATION_STATUS = {"allow": 200, "observe": 200, "deny": 403}
 NO_AUTH_MESSAGE = "Agenomic: no valid authorization for this action"
 #: Reason recorded when a call's arguments have no canonical form (``agenomic.canon/v1``).
 NOT_CANONICAL_REASON = "arguments_not_canonical"
@@ -1445,9 +1446,12 @@ class HermesAdapter:
         info = resp.get("session") if resp is not None else None
         with self._lock:
             self._admissions_in_flight -= 1
-            if resp is None:
+            if resp is None and session.active:
                 self._unadmitted.add(session.hermes_session_id)
             else:
+                # Admitted, or failed after the session already ended (its terminal callback
+                # ran while this request was in flight): no id will ever be published for
+                # it, so it holds no cancel unresolved.
                 self._unadmitted.discard(session.hermes_session_id)
             if isinstance(info, dict) and isinstance(info.get("id"), str):
                 session.agenomic_id = cast(str, info["id"])
@@ -2042,8 +2046,16 @@ class HermesAdapter:
             return None, None
         tasks = args.get("tasks")
         count = len(tasks) if isinstance(tasks, list) and tasks else 1
-        resp = self.client.reserve_delegation(sid, {"count": count, "tool_call_id": tool_call_id})
+        status, resp = self.client.reserve_delegation(
+            sid, {"count": count, "tool_call_id": tool_call_id}
+        )
         decision = _str(resp.get("decision"))
+        if decision in _DELEGATION_STATUS and status != _DELEGATION_STATUS[decision]:
+            # allow and observe come with 200, deny with 403: a decision contradicting its
+            # status is not trusted (enforce blocks on the invalid answer).
+            raise HermesApiError(
+                "invalid_response", "delegation answer contradicting its HTTP status", status
+            )
         if decision == "observe":
             return None, None
         if decision == "allow" and isinstance(resp.get("delegation_id"), str):
@@ -2054,7 +2066,9 @@ class HermesAdapter:
                 str(c) for c in (codes if isinstance(codes, list) else [])
             )
             return f"Agenomic denied delegate_task: {explanation or 'delegation limit'}", None
-        raise HermesApiError("invalid_response", "delegation answer without a valid decision", 200)
+        raise HermesApiError(
+            "invalid_response", "delegation answer without a valid decision", status
+        )
 
     def _claim_delegation(
         self,

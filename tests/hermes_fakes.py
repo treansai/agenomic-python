@@ -251,6 +251,8 @@ class FakeAgenomic:
     decide: Decide = field(default=lambda body: "allow")
     authorize_delay_s: float = 0.0
     authorize_status: Optional[int] = None
+    # Forced ``(status, body)`` answer of ``POST /sessions/:sid/delegations``.
+    delegation_answer: Optional[tuple[int, dict[str, Any]]] = None
     llm: ScriptedLLM = field(default_factory=ScriptedLLM)
     fail_events: int = 0
     heartbeat_interval_secs: int = 15
@@ -379,7 +381,9 @@ class FakeAgenomic:
         elif re.fullmatch(r"/sessions/[^/]+/end", sub):
             send_json(h, 200, {"session": {"status": body.get("status")}})
         elif re.fullmatch(r"/sessions/[^/]+/delegations", sub):
-            if mode == "observe":
+            if self.delegation_answer is not None:
+                send_json(h, *self.delegation_answer)
+            elif mode == "observe":
                 send_json(h, 200, {"decision": "observe"})
             else:
                 send_json(

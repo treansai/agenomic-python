@@ -157,7 +157,7 @@ before they are sent.
 | --- | --- |
 | `observe` | events only, `authorize` is never called (also when a `/hello` sent during an authorization switches to observe: the call proceeds without asking, and an authorization outage never blocks); local checks (protected paths, incompatible Hermes, argument mutators the gateway has not confirmed) emit one local `tool.call.decision` per call (`deny`, `local_mode: observe`, with a counterfactual) and the call proceeds; an approval required in enforce for the same action (session, tool, arguments hash) and still held locally is recorded the same way as `require_approval` (reason `approval_pending`, its `approval_id` in `extra`), without claiming, consuming or dropping it and without asking its status, so a later enforce retry still resumes under it; delegations are not reserved (a delegation refusal is only known by asking the gateway, so nothing is recorded for it) |
 | `shadow` | `authorize` is called and recorded as counterfactual, nothing is blocked; an authorization outage emits `authorization.unavailable` and the call proceeds; local checks (protected paths, incompatible Hermes, unconfirmed mutators, refused delegation, arguments without a canonical form) emit a local `tool.call.decision` and the call proceeds; an approval still pending from an earlier enforce is not consulted (the call is asked afresh) |
-| `enforce` | `allow` executes; `deny` and `require_approval` block; any error, timeout or invalid answer blocks, including a decision contradicting its HTTP status (`allow`/`observe` 200, `require_approval` 202, `deny` 403) and an `observe` decision whose `effective_mode` is not observe (or the reverse): it never downgrades enforcement |
+| `enforce` | `allow` executes; `deny` and `require_approval` block; any error, timeout or invalid answer blocks, including a decision contradicting its HTTP status (`allow`/`observe` 200, `require_approval` 202, `deny` 403; the same pairing is checked on delegation reservations) and an `observe` decision whose `effective_mode` is not observe (or the reverse): it never downgrades enforcement |
 | `enforce_blocked`, `paused`, `quarantined`, `revoked` | treated as enforce; the server denies |
 | unknown (no answer yet) | treated as enforce: no valid decision, no execution |
 
@@ -387,7 +387,8 @@ A cancel naming an Agenomic session id the adapter does not know yet is held
 while an admission is in flight, or while an active session's admission failed
 (the gateway may have created it and lost the answer): it is decided once the
 id is published by an admission or retry, and refused only once no such
-session remains.
+session remains (a session that ended while its failed admission was in
+flight holds none).
 An acknowledgement that fails on a transport error, a timeout, a 5xx or a
 transient 4xx (408, 425, 429) is queued and retried on the next heartbeat, by
 the plugin and the supervisor alike.
