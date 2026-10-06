@@ -1796,3 +1796,17 @@ def test_allowlisted_provider_credential_is_scrubbed() -> None:
     assert "AWS_SECRET_ACCESS_KEY" not in env
     assert env["X"] == "1"
     assert provider_secrets_absent(env)
+
+
+@posix_only
+def test_missing_manifest_reconciles_a_fifo_on_a_skill_path(tmp_path: Path) -> None:
+    out = tmp_path / "skills"
+    sync_skills([_skill("a", "A"), _skill("b", "B")], out)
+    (out / ".agenomic_manifest.json").unlink()  # the child deletes it...
+    (out / "b" / "SKILL.md").unlink()
+    os.mkfifo(out / "b" / "SKILL.md")  # ...and plants a FIFO on the revoked skill
+    counts = sync_skills([_skill("a", "A")], out)
+    assert counts["rejected"] == 0
+    assert counts["removed"] == 1
+    assert not (out / "b" / "SKILL.md").exists()
+    assert json.loads((out / ".agenomic_manifest.json").read_text()) == {"files": ["a/SKILL.md"]}

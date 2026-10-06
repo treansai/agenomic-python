@@ -397,10 +397,15 @@ class EventBuilder:
         # The whole mapping is redacted, so its own credential-named keys are masked too.
         extra_doc = cast(dict[str, Any], _redact_field(dict(extra or {})))
         if content:
-            extra_doc["content_hashes"] = {k: content_hash(v) for k, v in content.items()}
+            # These mappings bypass _walk: their keys are masked here like any text.
+            extra_doc["content_hashes"] = {
+                mask_text(str(k)): content_hash(v) for k, v in content.items()
+            }
             if self.capture == "redacted_preview":
                 extra_doc["previews"] = {
-                    k: _MASK if is_secret_key(k) else redacted_preview(v, self.preview_chars)
+                    mask_text(str(k)): (
+                        _MASK if is_secret_key(str(k)) else redacted_preview(v, self.preview_chars)
+                    )
                     for k, v in content.items()
                 }
         event["extra"] = extra_doc

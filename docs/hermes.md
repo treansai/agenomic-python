@@ -407,7 +407,8 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   same tick (heartbeat, then sync, then start), so a quarantine or revoke
   queued meanwhile applies before any replacement runs. A missing manifest
   (first sync, or deleted by the agent) reconciles the whole directory,
-  symbolic links included (the link is removed, never what it points to).
+  symbolic links, FIFOs, sockets and devices included (the node itself is
+  removed, never what a link points to, never opened).
   A SIGTERM or SIGINT received while a heartbeat or sync is blocked means
   Hermes is not started once it returns.
   A periodic sync that fails or rejects an entry while Hermes runs stops it

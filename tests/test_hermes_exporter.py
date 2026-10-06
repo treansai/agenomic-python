@@ -903,3 +903,19 @@ def test_credential_shaped_mapping_keys_are_masked() -> None:
         exporter_mod._walk({"labels": {"agmhr_" + "s3cretvalue123456": "x"}}, lambda v: v)
     )
     assert "s3cretvalue123456" not in out
+
+
+@pytest.mark.parametrize("capture", ["metadata", "redacted_preview"])
+def test_credential_shaped_content_keys_are_masked(capture: str) -> None:
+    builder = (
+        EventBuilder("redacted_preview", preview_chars=80)
+        if capture == "redacted_preview"
+        else EventBuilder()
+    )
+    secret = "agmhr_" + "s3cretvalue123456"
+    event = builder.build(
+        "tool.call.requested", hermes_session_id="s1", content={secret: "x", "input": "y"}
+    )
+    out = json.dumps(event)
+    assert "s3cretvalue123456" not in out
+    assert "input" in event["extra"]["content_hashes"]  # type: ignore[index,operator]

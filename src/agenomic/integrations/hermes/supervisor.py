@@ -838,10 +838,11 @@ def _open_regular_at(name: str, dir_fd: int) -> int:  # pragma: posix-only
 
 
 def _managed_files(root: Path) -> set[str]:
-    """Every regular file and every symbolic link (to a file or a directory, never followed)
-    under ``root``, the manifest excluded, relative and with ``/`` separators on every
-    platform, so manifest entries compare equal on Windows. Links are listed so a full
-    reconciliation removes them, or keeps the sync failed, instead of forgetting them."""
+    """Every node under ``root`` that is not a directory (regular files, symbolic links to
+    files or directories, never followed, FIFOs, sockets, devices), the manifest excluded,
+    relative and with ``/`` separators on every platform, so manifest entries compare equal
+    on Windows. Every such node is listed so a full reconciliation removes it, or keeps the
+    sync failed, instead of forgetting it."""
     found: set[str] = set()
     for dirpath, dirs, files in os.walk(root):
         for name in dirs:
@@ -850,7 +851,7 @@ def _managed_files(root: Path) -> set[str]:
                 found.add(full.relative_to(root).as_posix())
         for name in files:
             full = Path(dirpath) / name
-            if name == _MANIFEST or not (full.is_symlink() or full.is_file()):
+            if name == _MANIFEST:
                 continue
             found.add(full.relative_to(root).as_posix())
     return found
@@ -870,7 +871,7 @@ def _managed_files_at(root_fd: int) -> set[str]:  # pragma: posix-only
                 mode = os.lstat(name, dir_fd=dfd).st_mode
             except OSError:
                 continue
-            if stat.S_ISLNK(mode) or (stat.S_ISREG(mode) and name in files):
+            if not stat.S_ISDIR(mode):
                 found.add(posixpath.normpath(posixpath.join(dirpath, name)))
     return found
 
@@ -1064,13 +1065,13 @@ def _sync_skills_at(
                 mode = os.lstat(stale_parts[-1], dir_fd=dir_fd).st_mode
             except FileNotFoundError:
                 continue
-            if stat.S_ISLNK(mode) or stat.S_ISREG(mode):
-                # unlink relative to the trusted descriptor removes a link itself, never
-                # what it points to.
+            if not stat.S_ISDIR(mode):
+                # unlink relative to the trusted descriptor removes the node itself (a link,
+                # never what it points to; a FIFO, socket or device, never opened).
                 os.unlink(stale_parts[-1], dir_fd=dir_fd)
                 counts["removed"] += 1
             else:
-                logger.warning("stale skill %s kept: it is not a regular file", stale)
+                logger.warning("stale skill %s kept: it is a directory", stale)
                 unreconciled.add(stale)
         finally:
             os.close(dir_fd)
