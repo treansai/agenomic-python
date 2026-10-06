@@ -3405,24 +3405,39 @@ def register(ctx: object) -> None:
     """
     global _ADAPTER
     home = _hermes_home()
-    try:
-        config, token = build_config(settings_from_context(ctx))
-    except ConfigError as exc:
+
+    def failed(error: str) -> None:
+        # A failed (re)load never leaves the previous adapter running: its heartbeat would
+        # rewrite the status as loaded and its hooks would keep the old configuration.
+        global _ADAPTER
+        previous, _ADAPTER = _ADAPTER, None
+        if previous is not None:
+            previous.shutdown()
         with contextlib.suppress(OSError):
             write_status(
                 status_path({"HERMES_HOME": str(home)}),
                 loaded=False,
                 instance_status="unknown",
                 effective_state=None,
-                error="config_error",
+                error=error,
             )
+
+    try:
+        config, token = build_config(settings_from_context(ctx))
+    except ConfigError as exc:
+        failed("config_error")
         logger.error("Agenomic adapter not loaded: %s", exc)
         raise
     assert token is not None
-    previous = _ADAPTER
+    previous, _ADAPTER = _ADAPTER, None
     if previous is not None:
         previous.shutdown()
-    adapter = HermesAdapter(config, token, ctx=ctx, hermes_home=home)
-    adapter.install(ctx)
+    try:
+        adapter = HermesAdapter(config, token, ctx=ctx, hermes_home=home)
+        adapter.install(ctx)
+    except Exception as exc:
+        failed("install_error")
+        logger.error("Agenomic adapter not loaded: %s", type(exc).__name__)
+        raise
     _ADAPTER = adapter
     logger.info("Agenomic adapter %s registered", ADAPTER_VERSION)

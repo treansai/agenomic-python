@@ -2983,3 +2983,25 @@ def test_shadow_fail_open_admission_never_leaves_an_orphan_authorization(
     assert not [a for a in adapter._auth.values() if a.state == "authorized"], (
         "no authorization is left reusable"
     )
+
+
+def test_invalid_reload_shuts_the_previous_adapter_down(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hh"))
+    monkeypatch.delenv("AGENOMIC_HERMES_CONFIG", raising=False)
+    monkeypatch.setenv("AGENOMIC_HERMES_RUNTIME_TOKEN", "agmhr_entry")
+    plugin_mod.register(FakeCtx({"endpoint": server.url}))
+    previous = plugin_mod.current_adapter()
+    assert previous is not None
+    status = tmp_path / "hh" / "agenomic" / "status.json"
+    monkeypatch.delenv("AGENOMIC_HERMES_RUNTIME_TOKEN")  # the reload's config is invalid
+    try:
+        with pytest.raises(ConfigError):
+            plugin_mod.register(FakeCtx({"endpoint": server.url}))
+        assert previous._shut_down, "the old adapter never keeps running"
+        assert plugin_mod.current_adapter() is None
+        previous._write_status()  # a late refresh from the old adapter
+        assert json.loads(status.read_text())["loaded"] is False
+    finally:
+        previous.shutdown()
