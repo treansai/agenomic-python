@@ -74,7 +74,9 @@ print(yaml.safe_dump(render_hermes_config("https://agenomic.example", model="dem
 The endpoint is validated first (absolute http(s) URL, no credentials, query
 or fragment), as the adapter, the supervisor and the HTTP clients do, and so are the plugin
 `settings`: unknown keys and literal values the adapter would refuse are
-rejected, while `${env:VAR}` references are checked when the adapter loads. A
+rejected, while `${env:VAR}` references are checked when the adapter loads
+(only in string fields: `timeouts`, `buffer` and `capture` are mappings and
+take references in their fields, never as a whole). A
 configuration Hermes could not load is never rendered. It produces:
 
 ```yaml
@@ -140,7 +142,10 @@ The first `/hello` and the tool discovery happen when the plugin starts; a
 failure there (gateway unreachable, an exception from a third party registry)
 is never fatal: the heartbeat thread still starts and retries both on every
 tick, and a discovery failure never skips that tick's heartbeat, so the guard
-status and command polling stay alive.
+status and command polling stay alive. A tool whose name or toolset is
+credential-shaped is not catalogued (its identifier never leaves the process;
+in enforce the gateway refuses it as unknown), and schemas are redacted before
+they are sent.
 
 | Effective state | Adapter behaviour |
 | --- | --- |
@@ -402,7 +407,8 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
   Otherwise the process state is `stop_failed`, the command is not
   acknowledged as applied and is executed again when the gateway delivers it
   again; a supervisor leaving with such a group exits 1. `resume`
-  allows restarts again and starts the child.
+  allows restarts again and starts the child; it also rearms the restart
+  budget of a supervisor that had given up after `--max-restarts`.
 - When the Hermes process exits on its own, what remains of its process group
   is stopped the same way (SIGTERM, SIGKILL after `--grace-s`) before
   anything else: before a restart, before giving up, and also after a clean

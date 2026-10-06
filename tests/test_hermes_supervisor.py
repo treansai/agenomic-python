@@ -1898,3 +1898,15 @@ def test_unreadable_skill_subtree_fails_the_sync(
 
     monkeypatch.setattr(sup.os, "fwalk", fwalk_hitting_an_unreadable_directory)
     assert s.sync_skills() is None, "a subtree that cannot be read is a failed sync"
+
+
+def test_resume_rearms_a_supervisor_that_gave_up_restarting(tmp_path: Path) -> None:
+    api = FakeApi()
+    s = make_supervisor(tmp_path, api, [sys.executable, "-c", "pass"])
+    s.restarts = s.settings.max_restarts
+    s.gave_up = True
+    s.handle_command({"id": "r1", "kind": "resume", "status": "requested"})
+    assert ("r1", "applied") in [(c, st) for c, st, _ in api.acks]
+    assert not s.gave_up, "run() would otherwise stop the resumed child at once"
+    assert s.restarts == 0
+    assert s._start_after_sync

@@ -304,3 +304,15 @@ def test_render_hermes_config_keeps_env_references_for_load_time() -> None:
     entry = cfg["plugins"]["entries"]["agenomic"]["settings"]  # type: ignore[index,call-overload]
     assert entry["buffer"] == {"spool_path": "${SPOOL}"}
     assert entry["mode_hint"] == "shadow"
+
+
+@pytest.mark.parametrize("key", ["timeouts", "buffer", "capture"])
+def test_render_hermes_config_refuses_an_env_reference_for_a_mapping_setting(key: str) -> None:
+    with pytest.raises(ValueError, match="mapping"):
+        render_hermes_config("https://a.example", settings={key: "${env:X}"})
+
+
+def test_render_hermes_config_accepts_an_env_reference_for_a_string_setting() -> None:
+    cfg = render_hermes_config("https://a.example", settings={"mode_hint": "${env:MODE}"})
+    entry = cfg["plugins"]["entries"]["agenomic"]["settings"]  # type: ignore[index,call-overload]
+    assert entry["mode_hint"] == "${MODE}"

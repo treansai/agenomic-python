@@ -1002,7 +1002,14 @@ class HermesAdapter:
         if manager is not None:
             plugin_tools = set(getattr(manager, "_plugin_tool_names", set()) or set())
         tools: list[dict[str, Any]] = []
+        withheld = 0
         for name in sorted(registry.get_all_tool_names()):
+            toolset = _str(registry.get_toolset_for_tool(name))
+            if mask_text(name) != name or mask_text(toolset) != toolset:
+                # A credential-shaped identifier never leaves the process: the tool is not
+                # catalogued (in enforce the gateway then refuses it as unknown).
+                withheld += 1
+                continue
             schema = registry.get_schema(name)
             if not isinstance(schema, dict):
                 continue
@@ -1011,7 +1018,6 @@ class HermesAdapter:
             except CanonicalError:
                 continue
             self._schema_hashes[name] = digest
-            toolset = _str(registry.get_toolset_for_tool(name))
             entry: dict[str, Any] = {
                 "tool_name": name,
                 "source": "builtin",
@@ -1028,6 +1034,8 @@ class HermesAdapter:
             elif name in plugin_tools:
                 entry["source"] = "plugin"
             tools.append(entry)
+        if withheld:
+            logger.warning("%d tool(s) with a credential-shaped name were not catalogued", withheld)
         for start in range(0, len(tools), 500):
             self.client.tools_discovered(tools[start : start + 500])
         self._tools_sent = True

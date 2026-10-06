@@ -1619,7 +1619,11 @@ class Supervisor:
             pending = self.proc is None or self.proc.poll() is not None
             if pending:
                 # Never started here: the next skills sync must succeed first (same tick),
-                # so a resumed Hermes cannot load a stale or revoked skill.
+                # so a resumed Hermes cannot load a stale or revoked skill. An operator
+                # resume also rearms the restart budget: a supervisor that had given up
+                # would otherwise stop the resumed child at once and exit.
+                self.gave_up = False
+                self.restarts = 0
                 self._start_after_sync = True
             self._ack(
                 command_id,

@@ -79,6 +79,9 @@ _SETTINGS_KEYS = (
 )
 
 
+_OBJECT_SETTINGS = ("timeouts", "buffer", "capture")
+
+
 class ConfigError(AgenomicError):
     """The adapter configuration is missing, malformed or references an unset variable.
 
@@ -484,6 +487,14 @@ def render_hermes_config(
         if key == "endpoint":
             continue
         plugin_settings[key] = _to_hermes_refs(value)
+        if isinstance(value, str) and _ANY_ENV_REF.search(value):
+            if key in _OBJECT_SETTINGS:
+                # Hermes expands references inside strings only: the adapter would get a
+                # string where it needs a mapping, whatever the variable holds.
+                raise ValueError(
+                    f"{key} is a mapping; use ${{env:VAR}} references in its fields instead"
+                )
+            continue
         literal[key] = _without_env_refs(value)
     # Values known now are validated as the adapter will; ${env:VAR} references are
     # only known in the Hermes environment and are checked when the adapter loads.

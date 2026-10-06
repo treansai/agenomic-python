@@ -3497,3 +3497,36 @@ def test_api_clients_refuse_an_endpoint_the_adapter_would_refuse(endpoint: str, 
 
     with pytest.raises(ValueError, match="endpoint"):
         getattr(client_module, cls)(endpoint, "agmhr_x")
+
+
+@pytest.mark.parametrize("where", ["name", "toolset"])
+def test_credential_shaped_tool_identifiers_are_not_catalogued(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    import sys
+    import types
+
+    secret = "github_pat_" + "A1b2C3d4E5f6G7h8I9j0K1"
+    leaky_name = secret if where == "name" else "fetch_mcp"
+
+    class Registry:
+        def get_all_tool_names(self) -> list[str]:
+            return ["read_file", leaky_name]
+
+        def get_schema(self, name: str) -> dict[str, Any]:
+            return {"name": name, "parameters": {"type": "object"}}
+
+        def get_toolset_for_tool(self, name: str) -> str:
+            if name == leaky_name and where == "toolset":
+                return "mcp-" + secret
+            return "file"
+
+    fake = types.ModuleType("tools.registry")
+    fake.registry = Registry()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools.registry", fake)
+    adapter = make_adapter(server.url, tmp_path)
+    sent: list[Any] = []
+    monkeypatch.setattr(adapter.client, "tools_discovered", lambda tools: sent.extend(tools))
+    assert adapter.discover_tools() == 1
+    assert [t["tool_name"] for t in sent] == ["read_file"]
+    assert "A1b2C3d4E5f6G7h8I9j0K1" not in json.dumps(sent)
