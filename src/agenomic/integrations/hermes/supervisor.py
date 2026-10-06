@@ -194,10 +194,20 @@ _Connect = Callable[[tuple[str, int], float], _Closable]
 
 
 def _parse_host(spec: str) -> tuple[str, int]:
-    host, _, port = spec.rpartition(":")
+    """``(host, port)`` of a forbidden host entry (``host`` or ``host:port``, default 443).
+    Raises ``ValueError`` for an empty host or a port outside ``1..65535``: such an entry
+    tests nothing, so it can never attest restricted egress."""
+    host, sep, port_text = spec.rpartition(":")
+    if not sep:
+        host, port = spec, 443
+    else:
+        port = int(port_text)
+    host = host.strip().strip("[]")
     if not host:
-        return spec, 443
-    return host.strip("[]"), int(port)
+        raise ValueError("empty host")
+    if not 0 < port < 65536:
+        raise ValueError("port out of range")
+    return host, port
 
 
 def egress_restricted(

@@ -2003,3 +2003,11 @@ def test_a_launch_waiting_for_the_skills_sync_spends_no_restart(
         s.poll()
     assert s.restarts == 1
     assert not s.gave_up
+
+
+@pytest.mark.parametrize("spec", ["", ":443", "api.openai.com:65536", "api.openai.com:0", "[]:443"])
+def test_a_malformed_forbidden_host_never_attests_restricted_egress(spec: str) -> None:
+    def refuse(addr: tuple[str, int], timeout: float) -> Any:
+        raise OSError("unreachable")
+
+    assert not sup.egress_restricted([spec], connect=refuse)

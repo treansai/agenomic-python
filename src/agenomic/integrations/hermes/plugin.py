@@ -917,7 +917,8 @@ class HermesAdapter:
         if not isinstance(model, dict):
             return {}
         return {
-            "provider": _str(model.get("provider")) or None,
+            # Sent outside the event pipeline: a custom provider id can carry a credential.
+            "provider": mask_text(_str(model.get("provider"))) or None,
             "base_url": _str(model.get("base_url")) or None,
         }
 

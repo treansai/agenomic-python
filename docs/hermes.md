@@ -401,8 +401,8 @@ its retry queues (admissions, session ends, command acknowledgements, action
 reports) against a slow gateway, the guard status file is rewritten whenever a
 heartbeat interval has passed, so it never goes stale meanwhile. An
 interrupt that applies a cancel ends the session for the adapter.
-The admitted model id and the platform name (in the hello and the
-admission) are masked like any exported text.
+The admitted model id, the platform name (in the hello and the admission)
+and the provider id (in the hello) are masked like any exported text.
 An acknowledgement that fails on a transport error, a timeout, a 5xx or a
 transient 4xx (408, 425, 429) is queued and retried on the next heartbeat, by
 the plugin and the supervisor alike.
@@ -442,7 +442,8 @@ agenomic-hermes-supervisor --skills-dir /srv/hermes-skills \
 - Every heartbeat (`--interval-s`, default 15) sends the process state and an
   isolation self check: `provider_secrets_absent` (child environment),
   `egress_restricted` (true only if a TCP connect to every `--forbidden-host`
-  fails), `config_readonly` (every configuration source, additively:
+  fails; an entry with an empty host or a port outside 1..65535 makes it
+  false), `config_readonly` (every configuration source, additively:
   `$HERMES_HOME/config.yaml`, `$HERMES_HOME/.env`, each `--config-path` and the
   `AGENOMIC_HERMES_CONFIG` file passed to the child) and `skills_readonly` (mode bits and ownership of
   the files and their directories for the child uid, read only mounts;

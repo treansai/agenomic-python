@@ -4184,3 +4184,16 @@ def test_a_credential_shaped_platform_is_masked_in_hello_and_admission(
     adapter.on_session_start(session_id="s1", platform=f"custom-{secret}")
     assert len(bodies) >= 2
     assert secret not in json.dumps(bodies)
+
+
+def test_hello_masks_a_credential_shaped_provider_id(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "sk-" + "abcdefghijklmnop"
+    monkeypatch.setattr(
+        plugin_mod, "_hermes_config", lambda: {"model": {"provider": f"custom/{secret}"}}
+    )
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    hello = server.calls("/hello")[0].body
+    assert secret not in json.dumps(hello)
