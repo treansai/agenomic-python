@@ -11,7 +11,9 @@ that hides /run (no Docker socket), with HERMES_HOME config and skills owned
 by root. The supervisor attests this from inside the namespaces.
 
 Run as root on Linux with iproute2 and iptables, the gateway listening on
-0.0.0.0:18080 and the venv at /opt/agm-hermes-venv (docs/hermes.md):
+0.0.0.0:18080 with AGENOMIC_HERMES_ALLOW_PRIVATE_UPSTREAMS=1 (the scripted model
+upstream is on loopback; production upstreams must be public https) and the
+venv at /opt/agm-hermes-venv (docs/hermes.md):
 
     python live_demo.py --out ./evidence
 

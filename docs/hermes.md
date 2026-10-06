@@ -298,7 +298,8 @@ gateway and TUI; a bare programmatic `AIAgent` does not register them.
 ## Live demo and measurements
 
 `examples/12_hermes_agent/live_demo/live_demo.py` (root, Linux, a running
-agenomic-cloud gateway) runs the real pinned Hermes with this adapter under
+agenomic-cloud gateway started with `AGENOMIC_HERMES_ALLOW_PRIVATE_UPSTREAMS=1`,
+because the scripted model upstream listens on loopback) runs the real pinned Hermes with this adapter under
 `agenomic-hermes-supervisor`, as uid 10001, in a network namespace whose only
 route is the gateway port and a mount namespace without `/run`. It walks
 through enrollment, observe, catalog approval, enforce, an allowed call, a
