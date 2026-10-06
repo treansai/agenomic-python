@@ -3377,3 +3377,18 @@ def test_staged_empty_file_is_proposed_as_empty_not_as_its_diff(
     sent = server.calls("/proposals")
     assert len(sent) == 1
     assert sent[0].body["content"] == ""
+
+
+def test_unknown_state_applied_between_the_gates_blocks(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    assert adapter.pre_tool_call(args=args, **kw) is None  # cached enforce permit
+    adapter._set_state("something_new", adapter._state_request())  # a newer server's state
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, "an unknown state is never allowed"
+    assert "something_new" in json.loads(str(out))["error"]

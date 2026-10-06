@@ -838,6 +838,10 @@ def _open_regular_at(name: str, dir_fd: int) -> int:  # pragma: posix-only
     return fd
 
 
+def _raise_walk_error(error: OSError) -> None:
+    raise error
+
+
 def _managed_files(root: Path) -> set[str]:
     """Every node under ``root`` that is not a directory (regular files, symbolic links to
     files or directories, never followed, FIFOs, sockets, devices), the manifest excluded,
@@ -845,7 +849,9 @@ def _managed_files(root: Path) -> set[str]:
     on Windows. Every such node is listed so a full reconciliation removes it, or keeps the
     sync failed, instead of forgetting it."""
     found: set[str] = set()
-    for dirpath, dirs, files in os.walk(root):
+    # A directory that cannot be read fails the whole inventory: skipping it would let a
+    # revoked skill hide in it.
+    for dirpath, dirs, files in os.walk(root, onerror=_raise_walk_error):
         for name in dirs:
             full = Path(dirpath) / name
             if full.is_symlink():
@@ -864,7 +870,7 @@ def _managed_files_at(root_fd: int) -> set[str]:  # pragma: posix-only
     if sys.platform == "win32":
         raise NotImplementedError("directory descriptors are POSIX only")
     found: set[str] = set()
-    for dirpath, dirs, files, dfd in os.fwalk(".", dir_fd=root_fd):
+    for dirpath, dirs, files, dfd in os.fwalk(".", dir_fd=root_fd, onerror=_raise_walk_error):
         for name in [*dirs, *files]:
             if name == _MANIFEST and name in files:
                 continue
@@ -1875,9 +1881,14 @@ def main(
         logger.error("endpoint missing: pass --endpoint or set %s", ENDPOINT_ENV)
         return 2
     parsed = urlsplit(endpoint)
+    try:
+        port_ok = parsed.port is None or 0 < parsed.port < 65536
+    except ValueError:
+        port_ok = False
     if (
         parsed.scheme not in ("http", "https")
-        or not parsed.netloc
+        or not parsed.hostname
+        or not port_ok
         or parsed.query
         or parsed.fragment
     ):

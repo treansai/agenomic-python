@@ -1858,6 +1858,8 @@ def test_manifest_alias_of_an_approved_skill_never_removes_it(tmp_path: Path) ->
         "https://",
         "https://gw.example?x=y",
         "https://gw.example#f",
+        "http://:443",
+        "https://gw.example:99999",
     ],
 )
 def test_main_refuses_an_endpoint_that_is_not_an_http_url(
@@ -1873,3 +1875,23 @@ def test_main_refuses_an_endpoint_that_is_not_an_http_url(
         environ={"AGENOMIC_HERMES_SUPERVISOR_TOKEN": "agmhs_test", "PATH": "/bin"},
     )
     assert code == 2
+
+
+@posix_only
+def test_unreadable_skill_subtree_fails_the_sync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api = FakeApi()
+    api.skills = [_skill("a", "A")]
+    s = make_supervisor(tmp_path, api, SLEEPER)
+    assert s.sync_skills() == {"written": 1, "unchanged": 0, "removed": 0, "rejected": 0}
+    real_fwalk = os.fwalk
+
+    def fwalk_hitting_an_unreadable_directory(*args: Any, **kwargs: Any) -> Any:
+        onerror = kwargs.get("onerror")
+        if onerror is not None:
+            onerror(PermissionError(13, "Permission denied", "b"))
+        yield from real_fwalk(*args, **kwargs)
+
+    monkeypatch.setattr(sup.os, "fwalk", fwalk_hitting_an_unreadable_directory)
+    assert s.sync_skills() is None, "a subtree that cannot be read is a failed sync"

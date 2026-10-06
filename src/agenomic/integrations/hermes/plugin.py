@@ -101,7 +101,23 @@ OBSERVER_HOOKS = (
     "post_approval_response",
     "agent_loop_stopped",
 )
-_ENFORCE_LIKE = {"enforce", "enforce_blocked", "paused", "quarantined", "revoked"}
+_DECIDING_STATES = {"observe", "shadow", "enforce"}
+
+
+def _is_blocking_state(state: object) -> bool:
+    """Every known state but observe, shadow and enforce blocks, and so does any state this
+    adapter does not know (a newer server): an unknown value is never allowed.
+    ``None`` (no answer yet) is not a state: it means enforce without a decision.
+
+    Example:
+        >>> _is_blocking_state("paused"), _is_blocking_state("something_new")
+        (True, True)
+        >>> _is_blocking_state("enforce"), _is_blocking_state(None)
+        (False, False)
+    """
+    return isinstance(state, str) and bool(state) and state not in _DECIDING_STATES
+
+
 _BLOCKING_STATUS = {"paused", "quarantined", "revoked"}
 _WRITE_TOOLS = {"write_file", "patch"}
 _DELEGATE_TOOL = "delegate_task"
@@ -2229,7 +2245,7 @@ class HermesAdapter:
             )
         if decision == "observe" or effective_mode == "observe":
             current = self._effective_state
-            if current in _ENFORCE_LIKE - {"enforce"}:
+            if _is_blocking_state(current):
                 # A newer heartbeat already set a blocking state (enforce_blocked, paused,
                 # quarantined, revoked): this answer is stale, it never downgrades the state
                 # and the call does not run under it.
@@ -2250,7 +2266,7 @@ class HermesAdapter:
             return _Verdict()
         applied = True
         blocking = self._effective_state
-        if blocking in _ENFORCE_LIKE - {"enforce"}:
+        if _is_blocking_state(blocking):
             # A blocking state (enforce_blocked, paused, quarantined, revoked) is applied:
             # no answer, allow included, lets the call run under it. The newer request
             # still orders later answers.
@@ -2262,7 +2278,7 @@ class HermesAdapter:
         if effective_mode in ("shadow", "enforce"):
             # Also when the mode is unchanged: an older heartbeat must not override it.
             applied = self._set_state(effective_mode, seq)
-        if not applied and self._effective_state in _ENFORCE_LIKE - {"enforce"}:
+        if not applied and _is_blocking_state(self._effective_state):
             # A newer request applied a blocking state after the check above (it maps to
             # the enforce local mode, so the comparison below would not see it).
             blocked_now = self._effective_state
@@ -2756,7 +2772,7 @@ class HermesAdapter:
             if local_block is not None:
                 self._emit_local_block(sid, tool, tool_call_id, args, local_block)
                 return _block(local_block[0])
-            if raw_state in _ENFORCE_LIKE - {"enforce"}:
+            if _is_blocking_state(raw_state):
                 return _block(
                     f"Agenomic: the instance is {raw_state}; the action was not executed."
                 )
@@ -2856,7 +2872,7 @@ class HermesAdapter:
                 return False
             # A blocking raw state (enforce_blocked collapses to the enforce local mode)
             # also retires it: the gateway decides again under that state.
-            blocked = self._effective_state in _ENFORCE_LIKE - {"enforce"}
+            blocked = _is_blocking_state(self._effective_state)
             if not blocked and auth.effective_mode == self.local_mode():
                 return False
             auth.state = "done"
@@ -2912,7 +2928,7 @@ class HermesAdapter:
         if local_block is not None:
             self._emit_local_block(sid, tool, tool_call_id, args, local_block)
             return _ExecutionPlan(False, error=local_block[0], meta=meta)
-        if raw_state in _ENFORCE_LIKE - {"enforce"}:
+        if _is_blocking_state(raw_state):
             return _ExecutionPlan(
                 False,
                 error=f"Agenomic: the instance is {raw_state}; the action was not executed.",
@@ -2957,7 +2973,7 @@ class HermesAdapter:
                 self._emit_local_block(sid, tool, tool_call_id, args, local_block)
                 return _ExecutionPlan(False, error=local_block[0], meta=meta)
             if changed is not None:
-                if changed in _ENFORCE_LIKE - {"enforce"}:
+                if _is_blocking_state(changed):
                     error = f"Agenomic: the instance is {changed}; the action was not executed."
                 else:
                     error = (
@@ -3027,7 +3043,7 @@ class HermesAdapter:
                 local_block = self._local_blocker(sid)
                 raw_state = self._effective_state
                 if local_block is None:
-                    if raw_state in _ENFORCE_LIKE - {"enforce"}:
+                    if _is_blocking_state(raw_state):
                         rerun = _ExecutionPlan(
                             False,
                             error=f"Agenomic: the instance is {raw_state}; "
@@ -3051,7 +3067,7 @@ class HermesAdapter:
                 local_block = self._local_blocker(sid)
                 if local_block is not None:
                     auth.state = "done"
-                elif self._effective_state in _ENFORCE_LIKE - {"enforce"}:
+                elif _is_blocking_state(self._effective_state):
                     blocked_by = self._effective_state
                     auth.state = "done"
                 elif auth.effective_mode != "enforce" and self.local_mode() == "enforce":
