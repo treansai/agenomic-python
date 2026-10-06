@@ -268,6 +268,8 @@ def test_renderers_refuse_credential_names_for_the_runtime_token(name: str) -> N
         "http://[::1",
         "https://a.example:0",
         "https://a.example/?q=1",
+        "https://user:pw@a.example",
+        "https://user@a.example",
     ],
 )
 def test_render_hermes_config_refuses_an_endpoint_the_adapter_would_refuse(endpoint: str) -> None:
@@ -275,3 +277,30 @@ def test_render_hermes_config_refuses_an_endpoint_the_adapter_would_refuse(endpo
         render_hermes_config(endpoint)
     with pytest.raises(ValueError, match="endpoint"):
         render_adapter_config(endpoint)
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"unknown": True},
+        {"mode_hint": "invalid"},
+        {"timeouts": {"decision_s": 0}},
+        {"capture": {"content": "full"}},
+        {"fail_mode": "open"},
+    ],
+)
+def test_render_hermes_config_refuses_settings_the_adapter_would_refuse(
+    settings: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="setting"):
+        render_hermes_config("https://a.example", settings=settings)
+
+
+def test_render_hermes_config_keeps_env_references_for_load_time() -> None:
+    cfg = render_hermes_config(
+        "https://a.example",
+        settings={"mode_hint": "shadow", "buffer": {"spool_path": "${env:SPOOL}"}},
+    )
+    entry = cfg["plugins"]["entries"]["agenomic"]["settings"]  # type: ignore[index,call-overload]
+    assert entry["buffer"] == {"spool_path": "${SPOOL}"}
+    assert entry["mode_hint"] == "shadow"

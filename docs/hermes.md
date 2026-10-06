@@ -71,9 +71,11 @@ from agenomic.integrations.hermes.config import render_hermes_config
 print(yaml.safe_dump(render_hermes_config("https://agenomic.example", model="demo-model")))
 ```
 
-The endpoint is validated first (absolute http(s) URL, no query or fragment),
-as the adapter does, so a configuration Hermes could not load is never
-rendered. It produces:
+The endpoint is validated first (absolute http(s) URL, no credentials, query
+or fragment), as the adapter and the supervisor do, and so are the plugin
+`settings`: unknown keys and literal values the adapter would refuse are
+rejected, while `${env:VAR}` references are checked when the adapter loads. A
+configuration Hermes could not load is never rendered. It produces:
 
 ```yaml
 model:

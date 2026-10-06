@@ -1861,6 +1861,8 @@ def test_manifest_alias_of_an_approved_skill_never_removes_it(tmp_path: Path) ->
         "http://:443",
         "https://gw.example:99999",
         "http://[::1",
+        "https://user:pw@gw.example",
+        "https://user@gw.example",
     ],
 )
 def test_main_refuses_an_endpoint_that_is_not_an_http_url(

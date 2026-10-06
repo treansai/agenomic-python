@@ -45,7 +45,6 @@ from collections import OrderedDict, deque
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError, field_validator
 
@@ -57,6 +56,7 @@ from agenomic.integrations.hermes.config import (
     RUNTIME_TOKEN_PREFIX,
     SUPERVISOR_TOKEN_ENV,
     SUPERVISOR_TOKEN_PREFIX,
+    check_endpoint,
     runtime_token_env_problem,
 )
 from agenomic.integrations.hermes.exporter import now_iso
@@ -1881,21 +1881,11 @@ def main(
         logger.error("endpoint missing: pass --endpoint or set %s", ENDPOINT_ENV)
         return 2
     try:
-        parsed = urlsplit(endpoint)
-        port_ok = parsed.port is None or 0 < parsed.port < 65536
-    except ValueError:  # a malformed URL (an unmatched IPv6 bracket) or port
-        logger.error("endpoint must be an absolute http(s) URL")
-        return 2
-    if (
-        parsed.scheme not in ("http", "https")
-        or not parsed.hostname
-        or not port_ok
-        or parsed.query
-        or parsed.fragment
-    ):
         # A client that can never reach the gateway would start Hermes with no way to
-        # receive a quarantine or revoke.
-        logger.error("endpoint must be an absolute http(s) URL")
+        # receive a quarantine or revoke. Same rule as the adapter's endpoint.
+        check_endpoint(endpoint)
+    except ValueError as exc:  # the message names the rule, never the value
+        logger.error("%s", exc)
         return 2
     if not token:
         logger.error("supervisor credential missing: set %s", SUPERVISOR_TOKEN_ENV)

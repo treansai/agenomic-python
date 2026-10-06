@@ -137,6 +137,9 @@ def check_endpoint(value: str) -> str:
         raise ValueError("endpoint must be an absolute http(s) URL") from None
     if parts.scheme not in ("https", "http") or not parts.hostname or not port_ok:
         raise ValueError("endpoint must be an absolute http(s) URL")
+    if parts.username is not None or parts.password is not None:
+        # HTTPX would send them as Basic credentials in place of the bearer token.
+        raise ValueError("endpoint must not carry credentials (user:password@)")
     if parts.query or parts.fragment:
         raise ValueError("endpoint must not carry a query or fragment")
     if parts.scheme == "http" and parts.hostname not in _LOOPBACK:
@@ -383,6 +386,18 @@ def settings_from_context(ctx: object) -> dict[str, object]:
     return out
 
 
+def _without_env_refs(value: Any) -> Any:
+    """``value`` with the entries holding an ``${env:VAR}`` reference left out (their
+    defaults are validated instead)."""
+    if isinstance(value, dict):
+        return {
+            k: _without_env_refs(v)
+            for k, v in value.items()
+            if not (isinstance(v, str) and _ANY_ENV_REF.search(v))
+        }
+    return value
+
+
 def _to_hermes_refs(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: _to_hermes_refs(v) for k, v in value.items()}
@@ -457,14 +472,25 @@ def render_hermes_config(
     if guard_timeout_s < 1 or guard_timeout_s > 300:
         raise ValueError("guard_timeout_s must be within [1, 300] (the Hermes clamp)")
     plugin_settings: dict[str, Any] = {"endpoint": base}
+    literal: dict[str, Any] = {"endpoint": base}
     for key, value in (settings or {}).items():
         if key == "runtime_token":
             raise ValueError(
                 f"runtime_token cannot be rendered into Hermes settings; use {CONFIG_ENV}"
             )
+        if key not in _SETTINGS_KEYS:
+            # The adapter reads only its own keys from the plugin settings.
+            raise ValueError(f"{key} is not an adapter setting")
         if key == "endpoint":
             continue
         plugin_settings[key] = _to_hermes_refs(value)
+        literal[key] = _without_env_refs(value)
+    # Values known now are validated as the adapter will; ${env:VAR} references are
+    # only known in the Hermes environment and are checked when the adapter loads.
+    try:
+        AdapterConfig.model_validate(literal)
+    except ValidationError as e:
+        raise ValueError(f"invalid adapter settings: {_format_errors(e)}") from None
     model_block: dict[str, Any] = {
         "provider": "custom",
         "base_url": base + MODEL_GATEWAY_PATH,
