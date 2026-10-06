@@ -248,6 +248,9 @@ skip the frame and execute: fail open); it returns
 - Other plugins' `pre_tool_call` callbacks and `tool_request`/`tool_execution`
   middleware can change arguments after the decision. They are reported in
   `/hello` as `foreign_mutators`; the server refuses enforce while any exists.
+  Only the exact guard shell hook (`agenomic-hermes-guard`, or an absolute path
+  to it) is excluded: a wrapper or compound command mentioning it is reported.
+  The provider `base_url` in `/hello` has its userinfo and query values masked.
   The list is re-read before every authorization: when it differs from the
   one the server last confirmed, a `/hello` is sent first; if that hello is
   not delivered the call is blocked in enforce (in shadow it proceeds), and a

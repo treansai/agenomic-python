@@ -44,6 +44,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, cast
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import JsonValue, SecretStr
 
@@ -261,6 +262,48 @@ def _add_once(waiting: dict[str, list[str]], target: str, command_id: str) -> No
 
 def _str(value: object) -> str:
     return value if isinstance(value, str) else ""
+
+
+def _is_guard_command(command: str) -> bool:
+    """The configured guard and nothing else: ``agenomic-hermes-guard`` or an absolute path
+    to it, one word. A wrapper or a compound command that merely mentions it is not.
+
+    Example:
+        >>> _is_guard_command("agenomic-hermes-guard"), _is_guard_command("/usr/bin/agenomic-hermes-guard")
+        (True, True)
+        >>> _is_guard_command("agenomic-hermes-guard && other-check")
+        False
+    """
+    command = command.strip()
+    if not command or any(c.isspace() for c in command):
+        return False
+    if command == GUARD_COMMAND:
+        return True
+    return os.path.isabs(command) and os.path.basename(command) == GUARD_COMMAND
+
+
+def _redact_url(url: str) -> str:
+    """``url`` without credentials: userinfo removed and every query value masked.
+
+    Example:
+        >>> _redact_url("https://u:p@gw.example/v1?key=abc&mode=x")
+        'https://***@gw.example/v1?key=***&mode=***'
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "***"
+    netloc = parts.netloc
+    if "@" in netloc:
+        netloc = "***@" + netloc.rsplit("@", 1)[1]
+    query = (
+        "&".join(
+            f"{pair.split('=', 1)[0]}=***" if pair else pair for pair in parts.query.split("&")
+        )
+        if parts.query
+        else ""
+    )
+    return mask_text(urlunsplit((parts.scheme, netloc, parts.path, query, "")))
 
 
 def _block(message: str) -> dict[str, str]:
@@ -620,7 +663,14 @@ class HermesAdapter:
                     or getattr(cb, "__name__", None)
                     or f"<{type(cb).__qualname__} instance>"
                 )
-                if label.startswith("shell_hook[pre_tool_call:") and GUARD_COMMAND in label:
+                # Only the guard itself is ours: a wrapper or a compound command that merely
+                # mentions it (``agenomic-hermes-guard && other``) is foreign.
+                prefix = "shell_hook[pre_tool_call:"
+                if (
+                    label.startswith(prefix)
+                    and label.endswith("]")
+                    and _is_guard_command(label[len(prefix) : -1])
+                ):
                     continue
                 found.append(
                     {
@@ -834,7 +884,7 @@ class HermesAdapter:
         guard = [
             e
             for e in (entries if isinstance(entries, list) else [])
-            if isinstance(e, dict) and GUARD_COMMAND in _str(e.get("command"))
+            if isinstance(e, dict) and _is_guard_command(_str(e.get("command")))
         ]
         add(
             "guard_hook_configured",
@@ -864,12 +914,18 @@ class HermesAdapter:
         return results
 
     def _hello_body(self, foreign: list[dict[str, str]]) -> dict[str, Any]:
+        provider = self._provider()
+        if provider.get("base_url"):
+            # Sent without the event redaction pipeline: userinfo and query values (an
+            # api_key, a signed parameter) never leave the process. The compatibility
+            # check above uses the local, unredacted value.
+            provider = {**provider, "base_url": _redact_url(_str(provider["base_url"]))}
         return {
             "hermes": self._identity,
             "adapter": {"version": ADAPTER_VERSION, "config_schema": CONFIG_SCHEMA},
             "contracts": self._contracts,
             "foreign_mutators": foreign,
-            "provider": self._provider(),
+            "provider": provider,
             "compat_results": self._compat_results(),
             "platform": self._platform or "cli",
         }

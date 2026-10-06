@@ -2847,3 +2847,39 @@ def test_staged_skill_carrying_a_credential_is_never_proposed(
     assert secret not in json.dumps([r.body for r in server.requests])
     refused = [e for e in server.events if e["type"] == "skill.proposal.refused"]
     assert refused[0]["extra"]["reason_codes"] == ["credential_detected"]
+
+
+def test_hello_never_sends_provider_url_credentials(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = "https://user:pa55word@gw.example/v1?key=xyz123secret"
+    monkeypatch.setattr(
+        plugin_mod,
+        "_hermes_config",
+        lambda: {"model": {"provider": "custom", "base_url": url}},
+    )
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    hello = server.calls("/hello")[0].body
+    sent = json.dumps(hello)
+    assert "pa55word" not in sent
+    assert "xyz123secret" not in sent
+    assert hello["provider"]["base_url"].startswith("https://***@gw.example/v1")
+
+
+def test_compound_command_mentioning_the_guard_is_a_foreign_mutator(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+
+    def guard(**kwargs: Any) -> None:
+        return None
+
+    def wrapper(**kwargs: Any) -> None:
+        return None
+
+    guard.__qualname__ = "shell_hook[pre_tool_call:agenomic-hermes-guard]"
+    wrapper.__qualname__ = "shell_hook[pre_tool_call:agenomic-hermes-guard && other-check]"
+    adapter.ctx._manager._hooks["pre_tool_call"] += [guard, wrapper]
+    found = adapter.foreign_mutators()
+    assert [f["callback"] for f in found] == [wrapper.__qualname__]
