@@ -80,7 +80,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `client.experiments` with `create`, `update`, `preflight`, `launch`,
   `cancel`, `get`, `results` and `events`, each with an `a*` twin. `launch`
   cites the preflight `spec_digest`, and every frozen spec read is checked
-  against its digest (`experiment_spec_digest_mismatch`).
+  against its digest (`experiment_spec_digest_mismatch`); a missing or
+  malformed spec or digest is `invalid_response`.
 - `ExperimentRunner` and `GraphTarget`, the runner that executes trials on
   your machines with a runner token (`AGENOMIC_RUNNER_TOKEN`): each trial
   runs on a fresh thread, checkpointer and store with the pinned prompts of

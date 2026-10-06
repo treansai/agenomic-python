@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import threading
 import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Mapping
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import quote
@@ -37,15 +38,22 @@ def segment(value: str) -> str:
     return quote(value, safe="")
 
 
+async def _close_with_loop(client: httpx.AsyncClient) -> AsyncGenerator[None, None]:
+    try:
+        yield
+    finally:
+        await client.aclose()
+
+
 class HttpPool:
     def __init__(self, kwargs: Mapping[str, Any], transport: Any) -> None:
         self._kwargs = dict(kwargs)
         self._transport = transport
         self._lock = threading.Lock()
         self._sync: Optional[httpx.Client] = None
-        self._async: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient] = (
-            weakref.WeakKeyDictionary()
-        )
+        self._async: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop, tuple[httpx.AsyncClient, AsyncGenerator[None, None]]
+        ] = weakref.WeakKeyDictionary()
 
     def sync(self) -> httpx.Client:
         with self._lock:
@@ -59,21 +67,28 @@ class HttpPool:
     def current(self) -> httpx.AsyncClient:
         loop = asyncio.get_running_loop()
         with self._lock:
-            client = self._async.get(loop)
-            if client is None:
+            entry = self._async.get(loop)
+            if entry is None:
                 kwargs = dict(self._kwargs)
                 if isinstance(self._transport, httpx.AsyncBaseTransport):
                     kwargs["transport"] = self._transport
                 client = httpx.AsyncClient(**kwargs)
-                self._async[loop] = client
-            return client
+                # httpx cannot close a client once its loop is closed, so the client must be
+                # closed during loop shutdown. Starting this generator registers it with the
+                # running loop, and asyncio.run's shutdown_asyncgens then runs its finally.
+                guard = _close_with_loop(client)
+                with contextlib.suppress(StopIteration):
+                    guard.asend(None).send(None)
+                entry = (client, guard)
+                self._async[loop] = entry
+            return entry[0]
 
     def _detach(
         self,
     ) -> tuple[Optional[httpx.Client], list[tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]]]:
         with self._lock:
             sync, self._sync = self._sync, None
-            clients = list(self._async.items())
+            clients = [(loop, client) for loop, (client, _) in self._async.items()]
             self._async = weakref.WeakKeyDictionary()
         return sync, clients
 

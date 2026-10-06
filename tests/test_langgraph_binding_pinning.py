@@ -525,6 +525,38 @@ def test_local_binding_store_crash_between_create_and_write(tmp_path: Path) -> N
     assert memory.find(WORKSPACE, AGENT, "bnd_missing") is None
 
 
+def test_stored_binding_with_other_child_pins_is_refused(tmp_path: Path) -> None:
+    world = World.create()
+    key = SigningKey.generate("orgkey_offline")
+    path = world.export(tmp_path / "bundle.json", key)
+    trust = BundleTrust({key.key_id: key.public_key()})
+    store = LocalBindingStore.in_memory()
+    managed = world.bind(
+        two_node_graph(),
+        bundle=path,
+        offline=True,
+        workspace_id=WORKSPACE,
+        trust=trust,
+        binding_store=store,
+    )
+    assert managed.invoke({"log": []}, thread("t"))["log"][-1] == "sup:SUP v1"
+    pinned = store.get(WORKSPACE, AGENT, thread_key(WORKSPACE, "t"))
+    assert pinned is not None
+    assert pinned.children
+    store.put(
+        pinned.model_copy(
+            update={
+                "binding_id": "bnd_" + "1" * 26,
+                "thread_key": thread_key(WORKSPACE, "u"),
+                "children": {},
+            }
+        )
+    )
+    with pytest.raises(PromptIntegrityError) as refused:
+        managed.invoke({"log": []}, thread("u"))
+    assert refused.value.code == "manifest_digest_mismatch"
+
+
 def test_async_offline_store_and_execution_recovery(tmp_path: Path) -> None:
     world = World.create()
     key = SigningKey.generate("orgkey_offline")

@@ -40,17 +40,26 @@ def _verified(response: ApiResponse) -> dict[str, Any]:
         raise ApiError(
             "invalid_response", response.status, "the experiment revision differs from the ETag"
         )
-    spec = experiment.get("spec")
-    digest = experiment.get("spec_digest")
-    if isinstance(spec, Mapping) and isinstance(digest, str):
-        actual = spec_digest(spec)
-        if actual != digest:
-            raise ApiError(
-                "experiment_spec_digest_mismatch",
-                response.status,
-                "the frozen spec does not hash to its spec_digest",
-                {"expected": digest, "actual": actual},
-            )
+    if "spec" not in experiment or "spec_digest" not in experiment:
+        raise ApiError(
+            "invalid_response", response.status, "the experiment carries no spec or spec_digest"
+        )
+    spec = experiment["spec"]
+    digest = experiment["spec_digest"]
+    if spec is None and digest is None:
+        return experiment
+    if not isinstance(spec, Mapping) or not isinstance(digest, str):
+        raise ApiError(
+            "invalid_response", response.status, "the experiment spec or spec_digest is malformed"
+        )
+    actual = spec_digest(spec)
+    if actual != digest:
+        raise ApiError(
+            "experiment_spec_digest_mismatch",
+            response.status,
+            "the frozen spec does not hash to its spec_digest",
+            {"expected": digest, "actual": actual},
+        )
     return experiment
 
 

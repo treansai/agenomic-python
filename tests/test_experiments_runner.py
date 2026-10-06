@@ -627,6 +627,48 @@ def test_assignment_checks_before_execution(world: World, server: FakeRunnerServ
     assert built == []
 
 
+def test_assignment_binding_must_name_the_arm_and_its_children(
+    world: World, server: FakeRunnerServer
+) -> None:
+    def binding_of(trial: str) -> dict[str, Any]:
+        return server.trials[trial].assignment["view"]["binding"]
+
+    unpinned = server.add_trial("v1", agent_case("unpinned"))
+    binding_of(unpinned)["children"] = {}
+    extra = server.add_trial("v1", agent_case("extra"))
+    children = binding_of(extra)["children"]
+    children["0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b"] = dict(next(iter(children.values())))
+    moved = server.add_trial("v1", agent_case("moved"))
+    next(iter(binding_of(moved)["children"].values()))["prompt_manifest_digest"] = (
+        "sha256:" + "2" * 64
+    )
+    armless = server.add_trial("v1", agent_case("armless"))
+    binding_of(armless)["experiment"] = None
+    keyless = server.add_trial("v1", agent_case("keyless"))
+    del binding_of(keyless)["experiment"]["arm_key"]
+    trials = (unpinned, extra, moved, armless, keyless)
+    built: list[str] = []
+
+    def factory(ctx: TrialContext) -> Any:
+        built.append(ctx.case.case_id)
+        return single_node(render_plan)(ctx)
+
+    assert serve(make_runner(server, factory)) == len(trials)
+    codes = {
+        server.trials[trial].view["case"]["case_id"]: server.trials[trial].failures[0]["error_code"]
+        for trial in trials
+        if server.trials[trial].failures
+    }
+    assert codes == {
+        "unpinned": "artifact_digest_mismatch",
+        "extra": "artifact_digest_mismatch",
+        "moved": "artifact_digest_mismatch",
+        "armless": "binding_mismatch",
+        "keyless": "binding_mismatch",
+    }
+    assert built == []
+
+
 def test_node_entry_point_runs_only_the_node(world: World, server: FakeRunnerServer) -> None:
     def factory(ctx: TrialContext) -> Any:
         def intake(state: dict[str, Any]) -> dict[str, Any]:

@@ -419,7 +419,6 @@ def test_names_outside_the_report_bounds_are_never_reported(tmp_path: Path) -> N
         f"def {long_function}():\n"
         '    return PromptTemplate.from_template("Inside {e}.")\n',
     )
-    write(tmp_path, "odd\\name.py", 'ODD_PROMPT = "Odd {x}."\n')
     result = scan_paths([tmp_path], root=tmp_path, now=NOW)
     assert schema_errors(result) == []
     assert [entry["path"] for entry in result["files"]] == ["graph.py", "names.py"]
@@ -433,6 +432,18 @@ def test_names_outside_the_report_bounds_are_never_reported(tmp_path: Path) -> N
     inner = candidate(result, "names.py", construct="langchain.prompt_template")
     assert inner["source"]["enclosing_function"] is None
     assert inner["status"] == "supported"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows treats a backslash as a path separator, so no such file name can exist",
+)
+def test_file_names_with_a_backslash_are_never_reported(tmp_path: Path) -> None:
+    write(tmp_path, "plain.py", 'PLAIN_PROMPT = "Plain {x}."\n')
+    write(tmp_path, "odd\\name.py", 'ODD_PROMPT = "Odd {x}."\n')
+    result = scan_paths([tmp_path], root=tmp_path, now=NOW)
+    assert schema_errors(result) == []
+    assert [entry["path"] for entry in result["files"]] == ["plain.py"]
 
 
 FAKE_AWS_KEY = "AKIA" + "TESTFAKEKEY00000"

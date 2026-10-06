@@ -52,6 +52,7 @@ from agenomic.prompts.models import ExecutionBinding, ManagedPromptVersion, Plac
 from agenomic.prompts.pinned import PinnedPromptSet, execution_key, thread_key
 from agenomic.prompts.refs import is_uuid
 from agenomic.prompts.render import RenderedPrompt, render_validated
+from agenomic.prompts.resources import check_child_pins
 
 if TYPE_CHECKING:
     from agenomic._client import Client
@@ -506,16 +507,7 @@ def _check_resolution(binding: ExecutionBinding, resolution: PromptBundle) -> No
             expected=binding.prompt_manifest_digest,
             actual=resolution.prompt_manifest_digest,
         )
-    digests = resolution.child_manifest_digests
-    for child_id, child in binding.children.items():
-        if digests.get(child_id) != child.get("prompt_manifest_digest"):
-            raise integrity_error(
-                "manifest_digest_mismatch",
-                "a child manifest differs from the binding pin",
-                child_agent_id=child_id,
-                expected=child.get("prompt_manifest_digest"),
-                actual=digests.get(child_id),
-            )
+    check_child_pins(binding, resolution)
 
 
 class PreissuedBindingAuthority:
@@ -1052,6 +1044,7 @@ class _Binder:
                 "the pinned artifacts belong to another release or manifest than the binding",
                 binding_id=binding.binding_id,
             )
+        check_child_pins(binding, bundle)
         resolved = dict(binding.resolved_from)
         if self.preissued_binding_id is not None:
             matches = binding.binding_id == self.preissued_binding_id

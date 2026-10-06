@@ -451,6 +451,8 @@ class FakeExperimentApi:
                 "revision": 1,
                 "status": "draft",
                 "draft": body,
+                "spec": None,
+                "spec_digest": None,
             }
             self.experiments[experiment_id] = experiment
             return httpx.Response(201, headers={"etag": '"1"'}, json={"experiment": experiment})
@@ -474,7 +476,13 @@ class FakeExperimentApi:
                     "experiment_revision_conflict", 409, current=experiment["revision"]
                 )
             if action is None:
-                experiment.update(revision=experiment["revision"] + 1, status="draft", draft=body)
+                experiment.update(
+                    revision=experiment["revision"] + 1,
+                    status="draft",
+                    draft=body,
+                    spec=None,
+                    spec_digest=None,
+                )
                 return httpx.Response(
                     200,
                     headers={"etag": f'"{experiment["revision"]}"'},

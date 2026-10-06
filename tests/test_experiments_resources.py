@@ -187,6 +187,41 @@ def test_invalid_response_shapes() -> None:
             assert invalid.value.code == "invalid_response"
 
 
+@pytest.mark.parametrize(
+    "members",
+    [
+        {},
+        {"spec": None},
+        {"spec_digest": None},
+        {"spec": None, "spec_digest": SPEC_DIGEST},
+        {"spec": "frozen", "spec_digest": SPEC_DIGEST},
+        {"spec": {"repetitions": 6}, "spec_digest": None},
+        {"spec": {"repetitions": 6}, "spec_digest": 7},
+    ],
+)
+def test_experiment_without_a_verifiable_spec_is_invalid(members: dict[str, object]) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        experiment = {"experiment_id": "exp_1", "revision": 1, **members}
+        return httpx.Response(200, json={"experiment": experiment})
+
+    with Client(api_key="agm_test", base_url=BASE, transport=httpx.MockTransport(handler)) as cloud:
+        for call in (
+            lambda: cloud.experiments.get("exp_1"),
+            lambda: cloud.experiments.create(DRAFT),
+            lambda: cloud.experiments.update("exp_1", DRAFT, expected_revision=1),
+            lambda: cloud.experiments.launch(
+                "exp_1",
+                expected_revision=1,
+                spec_digest=SPEC_DIGEST,
+                authorization=AUTHORIZATION,
+                idempotency_key="launch-1",
+            ),
+        ):
+            with pytest.raises(ApiError) as invalid:
+                call()
+            assert invalid.value.code == "invalid_response"
+
+
 def test_rmp_session_carries_candidate_release_id() -> None:
     seen: list[dict[str, object]] = []
 

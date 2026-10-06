@@ -80,6 +80,7 @@ from agenomic.integrations.langgraph_binding import ManagedGraph, bind_langgraph
 from agenomic.prompts.bundle import PromptBundle
 from agenomic.prompts.local import LocalPromptEngine
 from agenomic.prompts.models import ExecutionBinding, ManagedPromptVersion, PromptVersionRecord
+from agenomic.prompts.resources import binding_bundle
 
 __all__ = [
     "CallableEntryPoint",
@@ -585,12 +586,13 @@ class ExperimentRunner:
                 tool_mode=view.tools.mode,
             )
         expected_key = f"exp:{view.experiment_id}:{view.trial_id}:a{view.attempt}"
-        experiment = binding.experiment or {}
+        experiment = binding.experiment
         if (
             binding.thread_key != expected_key
             or binding.scope != "thread"
             or binding.release_id != view.arm.release_id
-            or experiment.get("arm_key", view.arm.arm_key) != view.arm.arm_key
+            or not isinstance(experiment, Mapping)
+            or experiment.get("arm_key") != view.arm.arm_key
         ):
             raise RunnerConfigurationError(
                 "binding_mismatch", "the trial binding does not match the assignment"
@@ -605,12 +607,7 @@ class ExperimentRunner:
                 "artifact_digest_mismatch", "the arm, binding and prompts name different manifests"
             )
         try:
-            bundle = PromptBundle.from_online_response(
-                view.prompts,
-                expected_workspace_id=binding.workspace_id,
-                expected_agent_id=binding.agent_id,
-                expected_manifest_digest=manifest,
-            )
+            bundle = binding_bundle(binding, view.prompts)
         except ApiError as error:
             raise RunnerConfigurationError("artifact_digest_mismatch", error.message) from error
         return binding.agent_id, target, binding, bundle

@@ -179,6 +179,20 @@ def test_experiment_arms_isolated_state_and_store() -> None:
     assert production.invoke({"log": []}, thread("prod"))["log"][-1] == "sup:SUP v1"
 
 
+def test_preissued_binding_must_pin_every_child_of_the_resolution() -> None:
+    world = World.create()
+    binding, bundle = preissued(world, "v1", "extr_children")
+    assert binding.children
+    with pytest.raises(PromptIntegrityError) as refused:
+        bind_langgraph(
+            two_node_graph(),
+            agent_id=AGENT,
+            binding=binding.model_copy(update={"children": {}}),
+            resolution=bundle,
+        )
+    assert refused.value.code == "manifest_digest_mismatch"
+
+
 def test_preissued_arm_leaves_production_thread_store_and_channel_unchanged() -> None:
     world = World.create()
     saver = InMemorySaver()

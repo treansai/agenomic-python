@@ -572,6 +572,11 @@ def binding_bundle(binding: ExecutionBinding, artifacts: Any) -> PromptBundle:
             "the artifacts belong to another release than the binding",
             binding_id=binding.binding_id,
         )
+    check_child_pins(binding, bundle)
+    return bundle
+
+
+def check_child_pins(binding: ExecutionBinding, bundle: PromptBundle) -> None:
     digests = bundle.child_manifest_digests
     if digests.keys() != binding.children.keys():
         raise integrity_error(
@@ -589,7 +594,6 @@ def binding_bundle(binding: ExecutionBinding, artifacts: Any) -> PromptBundle:
                 expected=child.get("prompt_manifest_digest"),
                 actual=digests.get(child_id),
             )
-    return bundle
 
 
 def _runtime_client(overrides: Optional[Mapping[str, Optional[str]]]) -> dict[str, Optional[str]]:

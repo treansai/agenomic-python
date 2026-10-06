@@ -284,6 +284,32 @@ def test_async_requests_use_one_client_per_loop(client: Client, server: FakeProm
     asyncio.run(closing())
 
 
+class ClosingTransport(httpx.AsyncBaseTransport):
+    def __init__(self) -> None:
+        self.closed_on: list[asyncio.AbstractEventLoop] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    async def aclose(self) -> None:
+        self.closed_on.append(asyncio.get_running_loop())
+
+
+def test_clients_close_with_their_event_loop() -> None:
+    transport = ClosingTransport()
+    client = Client(api_key="key", base_url="https://api.test", transport=transport)
+
+    async def call() -> asyncio.AbstractEventLoop:
+        await aapi_request(client, "GET", "/v1/whoami")
+        return asyncio.get_running_loop()
+
+    loops = [asyncio.run(call()), asyncio.run(call())]
+    assert all(loop.is_closed() for loop in loops)
+    assert transport.closed_on == loops
+    close_pool(client)
+    assert transport.closed_on == loops
+
+
 def test_closing_a_pool_releases_clients_of_other_loops(client: Client) -> None:
     loops: dict[str, Any] = {}
     ready = threading.Event()

@@ -179,7 +179,13 @@ rule of the engineering rules above.
 - `_transport.py` keeps one pooled `httpx.Client` per `Client`, and one
   `httpx.AsyncClient` per running event loop, in weak maps keyed by the
   `Client`, so the client facade does not need to change for pooling;
-  `close_pool` and `aclose_pool` release them. Retries happen only with
+  `close_pool` and `aclose_pool` release them. httpx cannot close an
+  `AsyncClient` once its loop is closed (`Event loop is closed`, the sockets
+  stay open), so each one is also closed while its loop shuts down: a started
+  async generator registers with the loop, and `shutdown_asyncgens` (run by
+  `asyncio.run` and `asyncio.Runner`) runs its `finally`. A loop closed
+  without `shutdown_asyncgens` leaves its client to garbage collection.
+  Retries happen only with
   `retry=True`, on transport errors and on 429, 502, 503 and 504, with the CLI
   schedule (0.2 s, 0.8 s, 3.2 s) and `Retry-After` seconds when present; a 500
   is never retried because `artifact_integrity_error` is a 500. A final
@@ -248,9 +254,11 @@ rule of the engineering rules above.
   `from_online_response` pinned to the binding's manifest digest. It also
   refuses an answer whose workspace, agent, thread key or scope differs from
   the request, whose artifacts name another release than the binding, or whose
-  child manifest digests differ from `binding.children` (`binding_mismatch`,
-  `manifest_digest_mismatch`). Comparing `resolved_from` with the requested
-  selector is the adapter's target check, not this resource's.
+  child set or child manifest digests differ from `binding.children`
+  (`binding_mismatch`, `manifest_digest_mismatch`). That child comparison is
+  `check_child_pins`, which a pre-issued resolution and every adapter
+  admission also run. Comparing `resolved_from` with the requested selector
+  is the adapter's target check, not this resource's.
 - `client.bindings.create` never falls back: the outage policy lives in
   `CloudBindingAuthority` (`prompts/authority.py`). On `registry_unavailable`
   it serves a binding only when the same thread key is cached with the same
@@ -358,7 +366,8 @@ rule of the engineering rules above.
   pattern is listed as `excluded`. Symlinks that leave the root are ignored.
 - Everything the scanner reports fits the SPEC report schema, because the
   registry refuses a whole report when one member does not: a file whose
-  relative path holds a backslash is left out, a node name that is empty,
+  relative path holds a backslash is left out (only POSIX can name such a
+  file, so its test skips on Windows), a node name that is empty,
   longer than 256 code points or holds a NUL is treated like a dynamic node
   name (`node_unresolved`), and a longer symbol or enclosing function is
   reported as `null`. The root label follows the schema rule (1 to 128 code
@@ -736,7 +745,10 @@ rule of the engineering rules above.
   the preflight `spec_digest` and carries the body `idempotency_key` (it
   retries like a read), never the header. Every experiment read recomputes
   `spec_digest` (sha256 of `canonical_json_v1` of the spec without
-  `identity`) and raises `experiment_spec_digest_mismatch` on a difference;
+  `identity`) and raises `experiment_spec_digest_mismatch` on a difference.
+  Both members must be present: both null is accepted on purpose, because
+  the gateway renders a draft or a failed preflight that way; a missing
+  member, a single null or a wrong type is `invalid_response`;
   `tests/fixtures/experiments/` holds the SPEC 7540bbd fixtures whose digest
   two implementations recorded. Only the 04 section 3.10 methods exist, so
   datasets and runners are managed in the web app or over HTTP. Local mode
@@ -749,10 +761,12 @@ rule of the engineering rules above.
   `workspace_id=`) and any other workspace is `workspace_mismatch`.
 - Before anything runs, an assignment must agree with itself: view and
   envelope name the same trial and attempt; the binding is thread scope with
-  the key `exp:<experiment>:<trial>:a<attempt>`, the arm's release and arm
-  key; arm, binding and prompts name one manifest digest; the arm runtime
-  digest is the target's. The prompts load with `from_online_response`
-  pinned to that digest. Any mismatch is
+  the key `exp:<experiment>:<trial>:a<attempt>`, the arm's release and an
+  `experiment.arm_key` equal to the arm's (a binding without one is refused);
+  arm, binding and prompts name one manifest digest; the arm runtime digest
+  is the target's. The prompts load with `binding_bundle`, the check of
+  `client.bindings` (root digest, release, child set and child digests).
+  Any mismatch is
   `failure(runner_configuration, ...)` and the factory is never called. The
   runner echoes `runner_view_digest` and never recomputes it (cases may
   hold floats).
