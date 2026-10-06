@@ -2458,6 +2458,31 @@ class HermesAdapter:
     # ------------------------------------------------------------------
     # execution and reporting
     # ------------------------------------------------------------------
+    def _observe_cached(self, meta: dict[str, Any]) -> Optional[_Authorization]:
+        """Observe after ``pre_tool_call`` authorized this call in enforce or shadow (the
+        state changed between the gates): the authorization is never left reusable. Same
+        arguments: it is this execution's, retired and reported after it like any other,
+        and its children take its reservation. Other arguments: it is retired unused."""
+        tool_call_id = _str(meta.get("tool_call_id"))
+        if not tool_call_id:
+            return None
+        key = (_str(meta.get("sid")), _str(meta.get("tool")), tool_call_id)
+        try:
+            local_hash: Optional[str] = arguments_hash(meta.get("args") or {})
+        except CanonicalError:
+            local_hash = None
+        with self._lock:
+            auth = self._auth.get(key)
+            if auth is None or auth.state != "authorized":
+                return None
+            if auth.local_hash == local_hash:
+                auth.state = "executing"
+                meta["local_hash"] = local_hash
+                return auth
+            auth.state = "done"
+        self._drop_delegation(auth)
+        return None
+
     def _execution_gate(self, kwargs: Mapping[str, Any]) -> _ExecutionPlan:
         tool = _str(kwargs.get("tool_name"))
         sid = _str(kwargs.get("session_id"))
@@ -2471,7 +2496,7 @@ class HermesAdapter:
             return _ExecutionPlan(False, error=cancelled, meta=meta)
         if self.local_mode() == "observe":
             self._observe_local_checks(sid, tool, tool_call_id, args, "execution")
-            return _ExecutionPlan(True, observe=True, meta=meta)
+            return _ExecutionPlan(True, observe=True, auth=self._observe_cached(meta), meta=meta)
         try:
             local_hash = arguments_hash(args)
         except CanonicalError:

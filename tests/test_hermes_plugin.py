@@ -2065,3 +2065,26 @@ def test_call_blocked_before_the_middleware_retires_its_authorization(
     assert admitted["c1"] is None
     adapter.exporter.flush(3.0)
     assert [e for e in server.events if e.get("type") == "tool.call.not_executed"]
+
+
+@pytest.mark.parametrize("same_args", [True, False], ids=["same_args", "other_args"])
+def test_observe_between_the_gates_never_leaves_the_authorization_reusable(
+    server: FakeAgenomic, tmp_path: Path, same_args: bool
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    assert adapter.pre_tool_call(args=args, **kw) is None
+    first = len(server.authorize_calls())
+    # The server switches to observe before the execution gate runs.
+    adapter._set_state("observe")
+    exec_args = args if same_args else {"path": "/tmp/b"}
+    adapter.tool_execution(args=exec_args, next_call=lambda *_: "{}", **kw)
+    assert adapter._auth[("s1", "read_file", "call_1")].state == "done"
+    # Back in enforce, a call reusing the id asks the gateway again.
+    adapter._set_state("enforce")
+    runner.direct("read_file", args, tcid="call_1")
+    assert len(server.authorize_calls()) == first + 1, "no reuse of the old permit"
