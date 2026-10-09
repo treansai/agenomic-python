@@ -495,7 +495,7 @@ def _query_flow(client: Client, kb_id: str, body: Mapping[str, Any]) -> Flow[Que
 
 def _answer_flow(client: Client, kb_id: str, body: Mapping[str, Any]) -> Flow[AnswerResponse]:
     _require_cloud(client, "knowledge.answer")
-    response = yield Call("POST", _kb_path(kb_id, "answer"), dict(body), retry=True)
+    response = yield Call("POST", _kb_path(kb_id, "answer"), dict(body), retry=False)
     return _bare(AnswerResponse, response, "answer response")
 
 

@@ -709,6 +709,62 @@ def test_search_retries_unavailable_answers(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(api.requests) == 2
 
 
+def test_answer_is_sent_once_on_ambiguous_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agenomic import _transport
+
+    monkeypatch.setattr(_transport, "_sleep", lambda _: None)
+
+    def timeout(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("the answer took too long", request=request)
+
+    answer = f"/v1/knowledge-bases/{KB}/answer"
+    for reply in (
+        lambda _: httpx.Response(502),
+        lambda _: httpx.Response(504),
+        lambda _: error_response("internal_error", 500),
+        timeout,
+    ):
+        api = FakeKnowledgeApi()
+        api.override("POST", answer, reply)
+        with api.client() as cloud, pytest.raises(ApiError):
+            cloud.knowledge.answer(KB, "refund window?")
+        assert api.paths() == [f"POST {answer}"]
+
+
+def test_async_answer_is_sent_once_on_ambiguous_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agenomic import _transport
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(_transport, "_asleep", no_sleep)
+    answer = f"/v1/knowledge-bases/{KB}/answer"
+    api = FakeKnowledgeApi()
+    api.override("POST", answer, lambda _: httpx.Response(503))
+
+    async def run() -> None:
+        async with api.client() as cloud:
+            with pytest.raises(ApiError):
+                await cloud.knowledge.aanswer(KB, "refund window?")
+
+    asyncio.run(run())
+    assert api.paths() == [f"POST {answer}"]
+
+
+def test_idempotent_reads_still_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agenomic import _transport
+
+    monkeypatch.setattr(_transport, "_sleep", lambda _: None)
+    api = FakeKnowledgeApi()
+    replies = iter([httpx.Response(502), httpx.Response(200, json=fixture("knowledge_base"))])
+    api.override("GET", f"/v1/knowledge-bases/{KB}", lambda _: next(replies))
+    with api.client() as cloud:
+        assert cloud.knowledge.get(KB).kb_id == KB
+    assert api.paths() == [f"GET /v1/knowledge-bases/{KB}"] * 2
+
+
 def test_invalid_response_shapes_are_refused() -> None:
     api = FakeKnowledgeApi()
     api.override("POST", f"/v1/knowledge-bases/{KB}/search", lambda _: {"results": "nope"})

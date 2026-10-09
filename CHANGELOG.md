@@ -117,10 +117,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   publish and rollback with `If-Match`), `jobs` (`wait_for`), `retrievals`
   (events and snapshots), `agents` (get, put, attach, detach) and
   `agent_search` with an execution context; each call has an `a*` twin.
-  `client.knowledge.get(kb_id)` returns a `KnowledgeBase` handle with
-  `search`, `get_document`, `get_section` (by section id or heading),
-  `versions` and `publish`. Versions are given as `3`, `"3"`, `"v3"`,
-  `"published"` or `"draft"`.
+  `answer` is sent once and never retried, since each call runs and bills
+  a model call. `client.knowledge.get(kb_id)` returns a `KnowledgeBase`
+  handle with `search`, `get_document`, `get_section` (by section id or
+  heading), `versions` and `publish`. Versions are given as `3`, `"3"`,
+  `"v3"`, `"published"` or `"draft"`.
 - `knowledge_tool` (`agenomic.knowledge`, `agenomic.integrations`) with the
   `langchain` extra: a LangChain tool, sync and async, that returns the
   delimited evidence the gateway renders and a citation list, works in
