@@ -369,6 +369,16 @@ from agenomic.experiments import (RunnerConfigurationError,
 from agenomic.experiments.resources import ExperimentsResource
 ```
 
+Knowledge bases (`docs/knowledge.md`, Agenomic Cloud only). The tool and
+the retriever need `agenomic[langchain]`:
+
+```python
+from agenomic.knowledge import (KnowledgeBase, SearchResponse,
+                                AgentSearchResponse, normalize_version,
+                                knowledge_tool, KnowledgeRetriever)
+from agenomic.integrations import knowledge_tool
+```
+
 The top-level package intentionally exports only `Client` and
 `__version__`; everything else is imported from its subpackage.
 
@@ -477,5 +487,6 @@ or to `Client.from_env()` through the variables above.
 | Errors & logging | `docs/errors.md` |
 | Managed prompts | `docs/prompts.md` |
 | Prompt experiments and the runner | `docs/experiments.md` |
+| Knowledge bases and `knowledge_tool` | `docs/knowledge.md` |
 | Hermes Agent adapter | `docs/hermes.md` |
 | Runnable code | `examples/01`–`09` (offline ones run with zero setup) |

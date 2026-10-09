@@ -1,0 +1,102 @@
+{
+  "event": {
+    "action": "publish",
+    "actor": {
+      "api_key_id": null,
+      "user_id": "8e4a2c6b-1d3f-4a5c-8b7e-9f0a1b2c3d4e"
+    },
+    "created_at": "2026-10-08T15:20:00Z",
+    "from_version": 3,
+    "generation": 5,
+    "reason": "Refund window extended to 30 days",
+    "to_version": 4
+  },
+  "knowledge_base": {
+    "agenomic_uri": "agenomic://knowledge-bases/kb_customer_support",
+    "agent_count": 2,
+    "archive_reason": null,
+    "archived_at": null,
+    "created_at": "2026-10-01T09:12:00Z",
+    "created_by": {
+      "api_key_id": null,
+      "user_id": "5d0b0e7c-3c1a-4b0e-9d77-1f2e3a4b5c6d"
+    },
+    "description": "Refund, shipping and account policies used by the support agents.",
+    "document_count": 7,
+    "draft_revision": 61,
+    "health": "healthy",
+    "kb_id": "kb_customer_support",
+    "labels": {
+      "domain": "support",
+      "region": "eu"
+    },
+    "last_sync_at": "2026-10-08T09:30:00Z",
+    "latest_version": 4,
+    "metadata_revision": 5,
+    "name": "Customer Support",
+    "owner": "team-support",
+    "publication_generation": 5,
+    "published_version": 4,
+    "settings": {
+      "access": {
+        "api_key_access": "read",
+        "max_classification_by_role": {
+          "maintainer": "confidential",
+          "owner": "restricted",
+          "viewer": "internal"
+        },
+        "read_roles": [
+          "owner",
+          "maintainer",
+          "viewer"
+        ]
+      },
+      "default_classification": "internal",
+      "index": {
+        "chunking": {
+          "child_max_tokens": 256,
+          "max_tokens": 512,
+          "min_tokens": 32,
+          "overlap_tokens": 64,
+          "parent_max_tokens": 2048,
+          "strategy": "heading_aware"
+        },
+        "embedding": {
+          "connection_id": null,
+          "dimensions": 384,
+          "model": "local-hash",
+          "model_version": "1",
+          "normalization": "l2",
+          "provider": "local-hash"
+        },
+        "text_search_config": "simple"
+      },
+      "injection_policy": "annotate",
+      "publication": {
+        "allow_api_key_publish": false,
+        "approvals_required": 1,
+        "require_approval": true,
+        "require_review_evaluation": false
+      },
+      "query_logging": "digest",
+      "retention": {
+        "keep_versions": 50
+      },
+      "retrieval": {
+        "max_context_tokens": 4000,
+        "min_evidence_score": 0.35,
+        "rerank": "lexical",
+        "strategy": "hybrid",
+        "top_k": 8
+      }
+    },
+    "status": "active",
+    "storage_bytes": 2418906,
+    "tags": [
+      "support",
+      "customer"
+    ],
+    "updated_at": "2026-10-08T15:20:00Z",
+    "uri": "kb://0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f/kb_customer_support"
+  }
+}

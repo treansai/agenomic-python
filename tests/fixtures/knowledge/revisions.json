@@ -1,0 +1,50 @@
+{
+  "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+  "next_cursor": null,
+  "revisions": [
+    {
+      "blob_digest": "sha256:9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+      "byte_size": 6214,
+      "change_message": "Extend the refund window to 30 days",
+      "content_digest": "sha256:a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+      "created_at": "2026-10-07T16:12:00Z",
+      "created_by": {
+        "api_key_id": null,
+        "user_id": "5d0b0e7c-3c1a-4b0e-9d77-1f2e3a4b5c6d"
+      },
+      "format": "markdown",
+      "media_type": "text/markdown",
+      "parse_error_code": null,
+      "parse_status": "parsed",
+      "parsed_at": "2026-10-07T16:12:00Z",
+      "parser_version": "markdown/1",
+      "revision": 7,
+      "secret_findings": 0,
+      "section_count": 5,
+      "source": "upload",
+      "token_count": 962
+    },
+    {
+      "blob_digest": "sha256:9696969696969696969696969696969696969696969696969696969696969696",
+      "byte_size": 6198,
+      "change_message": "Clarify the inspection delay",
+      "content_digest": "sha256:a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6a6",
+      "created_at": "2026-10-04T15:48:00Z",
+      "created_by": {
+        "api_key_id": null,
+        "user_id": "5d0b0e7c-3c1a-4b0e-9d77-1f2e3a4b5c6d"
+      },
+      "format": "markdown",
+      "media_type": "text/markdown",
+      "parse_error_code": null,
+      "parse_status": "parsed",
+      "parsed_at": "2026-10-04T15:48:00Z",
+      "parser_version": "markdown/1",
+      "revision": 6,
+      "secret_findings": 0,
+      "section_count": 5,
+      "source": "inline",
+      "token_count": 958
+    }
+  ]
+}

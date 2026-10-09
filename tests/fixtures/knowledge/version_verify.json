@@ -1,0 +1,13 @@
+{
+  "digest_errors": [],
+  "documents_checked": 5,
+  "kb_id": "kb_customer_support",
+  "manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "manifest_digest_valid": true,
+  "signature": {
+    "key_id": "key_7c1d",
+    "present": true,
+    "valid": true
+  },
+  "version": 3
+}

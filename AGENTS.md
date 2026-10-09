@@ -902,6 +902,119 @@ rule of the engineering rules above.
   `tests/experiment_fakes.py` is a strict in-process runner tier (unknown
   members refused, lease fencing, the duplicate, conflict and stale table, a
   minimal tool proxy) built on those views.
+## Knowledge bases
+
+Reasons behind `agenomic.knowledge`, which follows the managed prompts
+style: no comments and no docstrings in the package, its decisions here.
+The HTTP contract is the Agenomic Cloud knowledge base API; the
+`tests/fixtures/knowledge/` files are copies of its API contract fixtures,
+byte for byte, and are refreshed only when that contract changes.
+
+- `agenomic.knowledge` imports no framework: `models`, `resources` and
+  `tools` use the core dependencies, so `Client` wires `client.knowledge`.
+  `_langchain.py` imports `langchain_core` at module import and is loaded
+  only by `knowledge_tool` and by the module `__getattr__` of
+  `agenomic.knowledge`, `agenomic.knowledge.tools` and
+  `agenomic.integrations` (`KnowledgeRetriever`, `KnowledgeTool`,
+  `KnowledgeQuery`, kept out of `__all__` where a star import would load
+  them); a subprocess test checks that importing the packages leaves
+  LangChain unloaded.
+- Every call is a flow like `client.experiments`, with an `a*` twin, and
+  checks its arguments (`ValueError`) and the cloud mode (`cloud_required`,
+  there is no local engine) before the first request. Server refusals stay
+  plain `ApiError` with the gateway code, as for experiments: no typed
+  classes, which would also make `prompts.errors` import this package.
+- Raw uploads go through `Call(content=..., content_type=..., headers=...)`,
+  which `run_flow` sends with `_transport.api_request_bytes` (async:
+  `aapi_request_bytes`). Those share the retry loop of `api_request`, whose
+  signature and JSON behaviour are unchanged. Reading a file is a flow step,
+  so `aupload` reads it in a worker thread.
+- Responses are read in the shapes of the contract: wrapped single records
+  (`{knowledge_base}`, `{collection}`, `{job}`, `{event}`), bare ones
+  (search, query, answer, versions, publication, agent knowledge) and lists
+  under their documented key with `next_cursor`. A missing key or a
+  mismatched member is `invalid_response`, and an answer for another
+  `kb_id`, document, section, version, job or event than requested is
+  refused. Writes whose answer has no fixture (document PATCH and restore,
+  collection writes, version decisions, agent PUT) read only the members the
+  SDK returns; an agent PUT answer is accepted bare or under `knowledge`, and
+  deletes and detaches ignore their body. Models are frozen pydantic views
+  with `extra="allow"`, timestamps stay strings, and most members default so
+  an additive contract change does not break a reader.
+- Versions: `normalize_version` takes `3`, `"3"`, `"v3"` (the server
+  grammar: `[1-9][0-9]{0,9}` up to 2147483647, lowercase `v`), `"published"`
+  and `"draft"`, and sends numbers on the wire; route paths take numbers
+  only (`version_number`). An omitted version is left out, so the gateway
+  answers with the published version; the docs tell callers to pin.
+- Request bodies omit absent members instead of sending `null` (the
+  gateway refuses unknown members), except the tri-state fields
+  (`description`, `owner`, `title`, `collection`, `classification` of a
+  collection), where `None` clears and `UNSET` leaves out. Filters and the
+  execution context are checked against their member lists before sending.
+  `include_context` and `debug` are sent only when true.
+- `If-Match` carries the counter the contract names: `metadata_revision`
+  for a knowledge base or document PATCH, `current_revision` for content
+  and revision uploads, `publication_generation` for publish and rollback,
+  the agent config `revision` for an agent PUT. No `Idempotency-Key` header
+  is ever sent; version creation carries the body `idempotency_key` and then
+  retries like a read. Reads, search, query, answer and agent search retry
+  (POST reads are idempotent); a new-document upload retries too, because
+  identical bytes on the same path answer `created: false`, while revision
+  uploads and other writes never retry.
+- Uploads send `application/octet-stream` unless the caller declares a
+  type, which the gateway treats as undeclared and infers from the path
+  extension. Every `x-agenomic-*` header value is percent-encoded UTF-8
+  (RFC 3986 unreserved characters kept, `quote(value, safe="")`) and the
+  gateway percent-decodes them all; only the document path keeps `/`
+  unencoded. Tags are encoded one by one and joined with literal commas,
+  so a tag may not hold a comma: whether the gateway splits before or
+  after decoding is not something the SDK relies on.
+- `KnowledgeBase.get_section` with a heading uses the query route
+  `get_section` operation, which matches `document` against the document id
+  first, then path, file name and title. Given `document_id`, the SDK sends
+  that id as `document` in one request and keeps only matches of that id,
+  so a homonymous section of another document is never returned; no match
+  raises `knowledge_section_not_found` with status 0. A `sec_` id goes to
+  the section route directly.
+- `jobs.wait_for` and `await_for` poll `GET /v1/knowledge-jobs/:job_id`
+  until `succeeded`, `failed` or `cancelled` and return the job (a failed
+  job is a result, not an exception); past `timeout` they raise
+  `knowledge_job_timeout` with status 0. Tests replace `_sleep`, `_asleep`
+  and `_monotonic`.
+- `knowledge_tool` returns `KnowledgeTool`, a `BaseTool` subclass with the
+  `KnowledgeQuery` arguments (`query`, optional `top_k`) and real `_run`
+  and `_arun`; LangChain injects the run config because they declare a
+  `RunnableConfig` parameter. Its output is the context the gateway
+  rendered (delimiters, escaping and the untrusted-data preamble are the
+  server's) followed by one citation line per result built from ids,
+  path and URI with control characters removed; headings are not repeated
+  outside the escaped context. `include_context=False` returns citations
+  only. Server refusals become `ToolException` with the code and
+  `handle_tool_error=True`, so the model reads the refusal instead of the
+  graph failing; `cloud_required` and argument errors still raise.
+- Agent-scoped tools and retrievers read `agenomic_binding_id` from the run
+  config only when `agenomic_agent_id` there equals their `agent_id`, since
+  the gateway verifies that the binding belongs to the agent and a
+  subagent's binding would be refused. An explicit `execution` member wins.
+  `version` is refused with `agent_id`, because the execution pin decides
+  the versions. The tool adds no reserved configurable key, writes nothing
+  to graph state, checkpoints or stores, and the client lives in the tool
+  object, never in the config.
+- Experiment runner tokens have no knowledge route, so inside a trial a
+  `knowledge_tool` goes through `ctx.wrap_tools` like any tool (recorded or
+  mocked); knowledge comparisons use two agent versions.
+- Tracking: `knowledge.retrieve` joins `TRACKING_EVENT_TYPES`.
+  `CanonicalRun.log_knowledge` keeps only the reference members of each
+  retrieval (`event_id`, `kb_id`, `version`, `version_manifest_digest`,
+  `index_config_digest`, `mode`) and citation (`uri`, `kb_id`, `version`,
+  `document_id`, `document_revision`, `section_id`, `chunk_id`,
+  `content_digest`), whatever the caller passes, and stores a query as its
+  sha256 digest. `knowledge_refs()` on search, answer and agent search
+  answers builds those lists. `knowledge_manifest_digest` (constructor) or
+  an `agent_manifest_digest` sets the `knowledge_version` component; without
+  either the placeholder stays, so existing trace hashes do not move, and a
+  second, different digest in one run raises.
+
 ## Hermes
 
 - `agenomic.integrations.hermes` targets Hermes v2026.9.24 (0.21.5, commit

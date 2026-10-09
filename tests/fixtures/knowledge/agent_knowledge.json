@@ -1,0 +1,94 @@
+{
+  "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+  "bindings": [
+    {
+      "access": "read",
+      "binding_id": "kbnd_01jb3m5q7s9v1x3z5b7d9f0011",
+      "collections": [
+        "faq",
+        "product_documentation"
+      ],
+      "created_at": "2026-10-02T10:00:00Z",
+      "enabled": true,
+      "knowledge_base": "kb_customer_support",
+      "knowledge_base_name": "Customer Support",
+      "max_classification": "internal",
+      "resolved_version": 3,
+      "updated_at": "2026-10-06T09:15:00Z",
+      "version": 3
+    },
+    {
+      "access": "read",
+      "binding_id": "kbnd_01jb3m5q7s9v1x3z5b7d9f0012",
+      "collections": [
+        "policies"
+      ],
+      "created_at": "2026-10-06T09:15:00Z",
+      "enabled": true,
+      "knowledge_base": "kb_compliance",
+      "knowledge_base_name": "Compliance Policies",
+      "max_classification": "internal",
+      "resolved_version": 2,
+      "updated_at": "2026-10-06T09:15:00Z",
+      "version": 2
+    }
+  ],
+  "config": {
+    "enabled": true,
+    "retrieval": {
+      "insufficient_evidence": "abstain",
+      "max_context_tokens": 4000,
+      "require_citations": true,
+      "rerank": true,
+      "strategy": "hybrid",
+      "top_k": 5
+    },
+    "revision": 4
+  },
+  "drift": "in_sync",
+  "manifest": {
+    "digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    "document": {
+      "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+      "bases": {
+        "kb_compliance": {
+          "collections": [
+            "policies"
+          ],
+          "index_config_digest": "sha256:1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "max_classification": "internal",
+          "version": 2,
+          "version_manifest_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "kb_customer_support": {
+          "collections": [
+            "faq",
+            "product_documentation"
+          ],
+          "index_config_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "max_classification": "internal",
+          "version": 3,
+          "version_manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+        }
+      },
+      "enabled": true,
+      "retrieval": {
+        "injection_policy": "annotate",
+        "insufficient_evidence": "abstain",
+        "max_context_tokens": 4000,
+        "require_citations": true,
+        "rerank": true,
+        "strategy": "hybrid",
+        "top_k": 5
+      },
+      "schema": "agenomic.agent_knowledge_manifest/v1",
+      "workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f"
+    }
+  },
+  "release": {
+    "genome_version": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+    "knowledge_manifest_digest": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    "release_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+    "release_name": "av_0043"
+  }
+}

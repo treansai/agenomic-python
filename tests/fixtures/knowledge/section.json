@@ -1,0 +1,88 @@
+{
+  "children": [
+    {
+      "anchor": "eligibility",
+      "content": "Items must be unused and returned in their original packaging. Proof of purchase is required for every refund request.",
+      "content_digest": "sha256:2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c",
+      "depth": 2,
+      "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+      "heading": "Eligibility",
+      "heading_path": [
+        "Refunds and Returns",
+        "Refund Policy",
+        "Eligibility"
+      ],
+      "kind": "heading",
+      "line_end": 18,
+      "line_start": 9,
+      "ordinal": 2,
+      "page_end": null,
+      "page_start": null,
+      "parent_section_id": "sec_c41e8a5f2b9d7036",
+      "section_id": "sec_19d6b3e7a0c45f82",
+      "section_version": 5,
+      "tags": [
+        "refunds",
+        "returns"
+      ],
+      "token_count": 214
+    },
+    {
+      "anchor": "exceptions",
+      "content": "Personalized items, gift cards and digital downloads cannot be refunded once delivered.",
+      "content_digest": "sha256:3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
+      "depth": 2,
+      "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+      "heading": "Exceptions",
+      "heading_path": [
+        "Refunds and Returns",
+        "Refund Policy",
+        "Exceptions"
+      ],
+      "kind": "heading",
+      "line_end": 31,
+      "line_start": 19,
+      "ordinal": 3,
+      "page_end": null,
+      "page_start": null,
+      "parent_section_id": "sec_c41e8a5f2b9d7036",
+      "section_id": "sec_e85c2a91f7d3b640",
+      "section_version": 2,
+      "tags": [
+        "refunds",
+        "returns"
+      ],
+      "token_count": 287
+    }
+  ],
+  "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+  "revision": 6,
+  "section": {
+    "anchor": "refund-policy",
+    "content": "Customers can request a full refund within 14 days of delivery. Refunds are issued to the original payment method within 5 business days after the returned item is inspected.",
+    "content_digest": "sha256:1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+    "depth": 1,
+    "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+    "heading": "Refund Policy",
+    "heading_path": [
+      "Refunds and Returns",
+      "Refund Policy"
+    ],
+    "kind": "heading",
+    "line_end": 8,
+    "line_start": 3,
+    "ordinal": 1,
+    "page_end": null,
+    "page_start": null,
+    "parent_section_id": "sec_7a3f19c2e48b5d06",
+    "section_id": "sec_c41e8a5f2b9d7036",
+    "section_version": 4,
+    "tags": [
+      "refunds",
+      "returns",
+      "policy"
+    ],
+    "token_count": 96
+  },
+  "version": 3
+}
