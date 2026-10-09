@@ -17,7 +17,7 @@
     },
     "retry_at": null,
     "started_at": null,
-    "status": "queued",
+    "status": "pending",
     "subject": {
       "version": 4
     }

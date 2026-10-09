@@ -54,7 +54,7 @@
     },
     "retry_at": null,
     "started_at": null,
-    "status": "queued",
+    "status": "pending",
     "subject": {
       "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0009",
       "revision": 1

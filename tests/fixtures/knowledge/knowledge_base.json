@@ -33,7 +33,7 @@
     "published_version": 3,
     "settings": {
       "access": {
-        "api_key_access": "read",
+        "api_key_access": true,
         "max_classification_by_role": {
           "maintainer": "confidential",
           "owner": "restricted",
@@ -53,12 +53,14 @@
           "min_tokens": 32,
           "overlap_tokens": 64,
           "parent_max_tokens": 2048,
-          "strategy": "heading_aware"
+          "strategy": "heading_aware",
+          "token_counter": "approx-v1"
         },
         "embedding": {
+          "base_url": null,
           "connection_id": null,
           "dimensions": 384,
-          "model": "local-hash",
+          "model": "agenomic-local-hash",
           "model_version": "1",
           "normalization": "l2",
           "provider": "local-hash"
@@ -77,9 +79,11 @@
         "keep_versions": 50
       },
       "retrieval": {
+        "keyword_weight_ppm": 500000,
         "max_context_tokens": 4000,
-        "min_evidence_score": 0.35,
+        "min_evidence_score_ppm": 350000,
         "rerank": "lexical",
+        "semantic_weight_ppm": 500000,
         "strategy": "hybrid",
         "top_k": 8
       }

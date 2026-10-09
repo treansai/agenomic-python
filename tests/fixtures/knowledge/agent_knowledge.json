@@ -36,8 +36,10 @@
   "config": {
     "enabled": true,
     "retrieval": {
+      "injection_policy": "annotate",
       "insufficient_evidence": "abstain",
       "max_context_tokens": 4000,
+      "min_evidence_score_ppm": 0,
       "require_citations": true,
       "rerank": true,
       "strategy": "hybrid",
@@ -76,6 +78,7 @@
         "injection_policy": "annotate",
         "insufficient_evidence": "abstain",
         "max_context_tokens": 4000,
+        "min_evidence_score_ppm": 0,
         "require_citations": true,
         "rerank": true,
         "strategy": "hybrid",
