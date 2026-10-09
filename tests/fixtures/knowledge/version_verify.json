@@ -4,6 +4,7 @@
   "kb_id": "kb_customer_support",
   "manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
   "manifest_digest_valid": true,
+  "omitted_documents": 0,
   "signature": {
     "key_id": "key_7c1d",
     "present": true,

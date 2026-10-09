@@ -56,6 +56,11 @@
       "page_end": null,
       "page_start": null,
       "parent_section_id": "sec_7a3f19c2e48b5d06",
+      "risk": {
+        "flags": [],
+        "level": "low",
+        "score": 0
+      },
       "section_id": "sec_c41e8a5f2b9d7036",
       "section_version": 4,
       "tags": [

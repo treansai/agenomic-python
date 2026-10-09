@@ -98,6 +98,7 @@
     "version": 4,
     "workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f"
   },
+  "omitted_documents": 0,
   "version": {
     "change_message": "Extend the refund window to 30 days and add the international shipping FAQ",
     "counts": {
