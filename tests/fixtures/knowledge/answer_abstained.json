@@ -1,0 +1,28 @@
+{
+  "abstained": true,
+  "answer": null,
+  "citations": [],
+  "conflicts": [],
+  "evidence": [],
+  "invalid_citations": [],
+  "model": null,
+  "reason": "insufficient_evidence",
+  "retrieval": {
+    "candidates": {
+      "keyword": 3,
+      "semantic": 50
+    },
+    "event_id": "kret_01jb3m5q7s9v1x3z5b7d9f0004",
+    "excluded_for_risk": 0,
+    "filtered_count": 0,
+    "index_config_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "kb_id": "kb_customer_support",
+    "keyword_truncated": false,
+    "latency_ms": 41,
+    "mode": "hybrid",
+    "tokens_returned": 0,
+    "vector_backend": "exact",
+    "version": 3,
+    "version_manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+  }
+}

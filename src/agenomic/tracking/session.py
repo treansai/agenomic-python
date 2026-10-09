@@ -56,6 +56,7 @@ TRACKING_EVENT_TYPES = frozenset(
         "retrieval.started",
         "retrieval.completed",
         "retrieval.failed",
+        "knowledge.retrieve",
     }
 )
 

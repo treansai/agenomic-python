@@ -1,0 +1,130 @@
+{
+  "health": {
+    "reasons": [
+      "version_awaiting_approval"
+    ],
+    "status": "review_required"
+  },
+  "knowledge_base": {
+    "agenomic_uri": "agenomic://knowledge-bases/kb_customer_support",
+    "agent_count": 2,
+    "archive_reason": null,
+    "archived_at": null,
+    "created_at": "2026-10-01T09:12:00Z",
+    "created_by": {
+      "api_key_id": null,
+      "user_id": "5d0b0e7c-3c1a-4b0e-9d77-1f2e3a4b5c6d"
+    },
+    "description": "Refund, shipping and account policies used by the support agents.",
+    "document_count": 7,
+    "draft_revision": 61,
+    "health": "review_required",
+    "kb_id": "kb_customer_support",
+    "labels": {
+      "domain": "support",
+      "region": "eu"
+    },
+    "last_sync_at": "2026-10-08T09:30:00Z",
+    "latest_version": 4,
+    "metadata_revision": 5,
+    "name": "Customer Support",
+    "owner": "team-support",
+    "publication_generation": 4,
+    "published_version": 3,
+    "settings": {
+      "access": {
+        "api_key_access": true,
+        "max_classification_by_role": {
+          "maintainer": "confidential",
+          "owner": "restricted",
+          "viewer": "internal"
+        },
+        "read_roles": [
+          "owner",
+          "maintainer",
+          "viewer"
+        ]
+      },
+      "default_classification": "internal",
+      "index": {
+        "chunking": {
+          "child_max_tokens": 256,
+          "max_tokens": 512,
+          "min_tokens": 32,
+          "overlap_tokens": 64,
+          "parent_max_tokens": 2048,
+          "strategy": "heading_aware",
+          "token_counter": "approx-v1"
+        },
+        "embedding": {
+          "base_url": null,
+          "connection_id": null,
+          "dimensions": 384,
+          "model": "agenomic-local-hash",
+          "model_version": "1",
+          "normalization": "l2",
+          "provider": "local-hash"
+        },
+        "text_search_config": "simple"
+      },
+      "injection_policy": "annotate",
+      "publication": {
+        "allow_api_key_publish": false,
+        "approvals_required": 1,
+        "require_approval": true,
+        "require_review_evaluation": false
+      },
+      "query_logging": "digest",
+      "retention": {
+        "keep_versions": 50
+      },
+      "retrieval": {
+        "keyword_weight_ppm": 500000,
+        "max_context_tokens": 4000,
+        "min_evidence_score_ppm": 350000,
+        "rerank": "lexical",
+        "semantic_weight_ppm": 500000,
+        "strategy": "hybrid",
+        "top_k": 8
+      }
+    },
+    "status": "active",
+    "storage_bytes": 2418906,
+    "tags": [
+      "support",
+      "customer"
+    ],
+    "updated_at": "2026-10-08T10:34:00Z",
+    "uri": "kb://0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f/kb_customer_support"
+  },
+  "published": {
+    "change_message": "Add the chargeback playbook",
+    "created_at": "2026-10-05T14:00:00Z",
+    "document_count": 5,
+    "manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "ready_at": "2026-10-05T14:03:00Z",
+    "status": "approved",
+    "version": 3
+  },
+  "stats": {
+    "collection_count": 3,
+    "deleted_document_count": 1,
+    "documents_by_classification": {
+      "confidential": 1,
+      "internal": 4,
+      "public": 2
+    },
+    "documents_by_parse_status": {
+      "parsed": 7
+    },
+    "documents_with_secret_findings": 0,
+    "failed_jobs": 0,
+    "last_retrieval_at": "2026-10-08T10:52:00Z",
+    "pending_jobs": 0,
+    "retrievals_24h": 342,
+    "section_count": 41,
+    "source_count": 1,
+    "token_count": 14920,
+    "version_count": 4
+  }
+}

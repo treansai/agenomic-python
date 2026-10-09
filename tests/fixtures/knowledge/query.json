@@ -1,0 +1,74 @@
+{
+  "documents": [],
+  "matches": [
+    {
+      "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+      "document_revision": 6,
+      "heading_path": [
+        "Refunds and Returns",
+        "Refund Policy"
+      ],
+      "match_kind": "exact",
+      "path": "faq/refunds-and-returns.md",
+      "score": 1.0,
+      "section_id": "sec_c41e8a5f2b9d7036"
+    }
+  ],
+  "operation": {
+    "document": "Refunds and Returns",
+    "op": "get_section",
+    "section": "Refund Policy"
+  },
+  "retrieval": {
+    "candidates": {
+      "keyword": 0,
+      "semantic": 0
+    },
+    "event_id": "kret_01jb3m5q7s9v1x3z5b7d9f0002",
+    "excluded_for_risk": 0,
+    "filtered_count": 0,
+    "index_config_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "kb_id": "kb_customer_support",
+    "keyword_truncated": false,
+    "latency_ms": 6,
+    "mode": "exact",
+    "tokens_returned": 96,
+    "vector_backend": null,
+    "version": 3,
+    "version_manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "sections": [
+    {
+      "anchor": "refund-policy",
+      "content": "Customers can request a full refund within 14 days of delivery. Refunds are issued to the original payment method within 5 business days after the returned item is inspected.",
+      "content_digest": "sha256:1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+      "depth": 1,
+      "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+      "heading": "Refund Policy",
+      "heading_path": [
+        "Refunds and Returns",
+        "Refund Policy"
+      ],
+      "kind": "heading",
+      "line_end": 8,
+      "line_start": 3,
+      "ordinal": 1,
+      "page_end": null,
+      "page_start": null,
+      "parent_section_id": "sec_7a3f19c2e48b5d06",
+      "risk": {
+        "flags": [],
+        "level": "low",
+        "score": 0
+      },
+      "section_id": "sec_c41e8a5f2b9d7036",
+      "section_version": 4,
+      "tags": [
+        "refunds",
+        "returns",
+        "policy"
+      ],
+      "token_count": 96
+    }
+  ]
+}

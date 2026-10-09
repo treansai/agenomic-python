@@ -246,6 +246,33 @@ agenomic-py experiment snapshot --graph support_agent.graph:graph \
 `experiment snapshot` freezes a production thread into a counterfactual case.
 See [docs/experiments.md](docs/experiments.md).
 
+## Knowledge bases
+
+`client.knowledge` reads and manages governed knowledge bases in Agenomic
+Cloud: documents, immutable versions, publication, agent bindings and
+retrieval with citations. `knowledge_tool` turns a knowledge base into a
+LangChain tool that `create_react_agent` and `ToolNode` use unchanged.
+
+```python
+from agenomic import Client
+from agenomic.integrations import knowledge_tool
+
+client = Client(api_key="agm_...", base_url="https://agenomic.example")
+kb = client.knowledge.get("kb_customer_support")
+found = kb.search("How long is the refund window?", version="v3", top_k=5)
+print(found.results[0].citation.uri)
+
+search_kb = knowledge_tool(
+    knowledge_base="kb_customer_support", version="v3", client=client
+)
+```
+
+Retrieved text is untrusted data: the tool returns the delimited evidence
+the gateway renders, with citations. Agent-scoped retrieval follows the
+knowledge pinned for each execution, and inside `bind_langgraph` the tool
+passes the thread's pinned binding. See
+[docs/knowledge.md](docs/knowledge.md).
+
 ## Examples
 
 See [`examples/`](examples/): minimal trace, decorator + JSONL, ATEP local,

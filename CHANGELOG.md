@@ -107,9 +107,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   counterfactual offline.
 - `client.rmp.start(candidate_release_id=...)` links an RMP session to a
   candidate release.
+- Knowledge bases (`agenomic.knowledge`, Agenomic Cloud only):
+  `client.knowledge` lists, reads, creates, updates, archives, restores and
+  deletes knowledge bases, with `collections`, `documents` (inline
+  creation, raw byte uploads of bytes or files, new revisions and content
+  edits with `If-Match`, metadata, duplicates, revisions, section trees,
+  sections and backlinks), `search`, `query` (text form or operation),
+  `answer`, `versions` (create, get, diff, verify, approve, reject,
+  publish and rollback with `If-Match`), `jobs` (`wait_for`), `retrievals`
+  (events and snapshots), `agents` (get, put, attach, detach) and
+  `agent_search` with an execution context; each call has an `a*` twin.
+  `answer` is sent once and never retried, since each call runs and bills
+  a model call. `client.knowledge.get(kb_id)` returns a `KnowledgeBase`
+  handle with `search`, `get_document`, `get_section` (by section id or
+  heading), `versions` and `publish`. Versions are given as `3`, `"3"`,
+  `"v3"`, `"published"` or `"draft"`.
+- `knowledge_tool` (`agenomic.knowledge`, `agenomic.integrations`) with the
+  `langchain` extra: a LangChain tool, sync and async, that returns the
+  delimited evidence the gateway renders and a citation list, works in
+  `create_react_agent` and `ToolNode` unchanged, and, scoped to an agent,
+  passes the binding pinned by `bind_langgraph` as the execution identity.
+  `KnowledgeRetriever` returns LangChain documents with citation metadata.
+- `knowledge.retrieve` joins the tracking event types, and
+  `CanonicalRun.log_knowledge` records references and digests only (never
+  retrieved text); `CanonicalRun(knowledge_manifest_digest=...)` and an
+  agent knowledge manifest digest set the `knowledge_version` component.
 - Documentation: `docs/prompts.md`, `docs/experiments.md`,
-  `docs/langgraph-matrix.md` and a LangGraph managed prompts section in
-  `docs/integrations.md`; the `docs/README.md` index lists the new pages.
+  `docs/knowledge.md`, `docs/langgraph-matrix.md` and a LangGraph managed
+  prompts section in `docs/integrations.md`; the `docs/README.md` index
+  lists the new pages.
 
 ### Changed
 

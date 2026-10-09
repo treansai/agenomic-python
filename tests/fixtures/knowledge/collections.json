@@ -1,0 +1,41 @@
+{
+  "collections": [
+    {
+      "classification": "confidential",
+      "collection_id": "escalations",
+      "created_at": "2026-10-01T09:20:00Z",
+      "description": "Internal playbooks for escalated and disputed cases.",
+      "document_count": 1,
+      "name": "Escalations",
+      "restricted_roles": [
+        "owner",
+        "maintainer"
+      ],
+      "revision": 2,
+      "updated_at": "2026-10-05T13:10:00Z"
+    },
+    {
+      "classification": null,
+      "collection_id": "faq",
+      "created_at": "2026-10-01T09:20:00Z",
+      "description": "Customer facing answers to common questions.",
+      "document_count": 4,
+      "name": "FAQ",
+      "restricted_roles": [],
+      "revision": 1,
+      "updated_at": "2026-10-01T09:20:00Z"
+    },
+    {
+      "classification": null,
+      "collection_id": "product_documentation",
+      "created_at": "2026-10-01T09:20:00Z",
+      "description": "Setup guides and account management procedures.",
+      "document_count": 2,
+      "name": "Product Documentation",
+      "restricted_roles": [],
+      "revision": 1,
+      "updated_at": "2026-10-01T09:20:00Z"
+    }
+  ],
+  "next_cursor": null
+}

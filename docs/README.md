@@ -32,6 +32,7 @@ condensed integration guide with import maps, recipes, and pitfalls.
 | Integrations (OpenAI, Anthropic, HF, LangGraph, LangChain, MCP) | [integrations.md](integrations.md) |
 | Managed prompts (references, bindings, bundles, imports) | [prompts.md](prompts.md) |
 | Prompt experiments (runner, snapshots, results) | [experiments.md](experiments.md) |
+| Knowledge bases and `knowledge_tool` | [knowledge.md](knowledge.md) |
 | LangGraph versions tested with managed prompts | [langgraph-matrix.md](langgraph-matrix.md) |
 | Hugging Face provider | [providers/huggingface.md](providers/huggingface.md) |
 | Cloud upload | [cloud-upload.md](cloud-upload.md) |
