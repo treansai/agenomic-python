@@ -1,0 +1,203 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D025",
+  "intent": "the plan_digest of an import plan is the digest of the plan without its plan_digest member",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.prompt_import_plan/v1",
+      "plan_id": "imp_01j9x1k3m5n7p9q1r3s5t7v9w1",
+      "workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f",
+      "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+      "source": {
+        "kind": "discovery_report",
+        "digest": "sha256:1a944179e14ce65a249415a3cecbf644e8a67b252d3990245558b552c32d4bab"
+      },
+      "created_at": "2026-10-04T21:31:00Z",
+      "items": [
+        {
+          "item_id": "cand_3f9a0c1d2e4b5a69",
+          "action": "create_version",
+          "prompt_id": "prm_support_planner",
+          "prompt_kind": "chat",
+          "base_version": 6,
+          "content": {
+            "schema": "agenomic.prompt_content/v1",
+            "template_format": "agenomic-fstring/v1",
+            "renderer_version": "1",
+            "kind": "chat",
+            "body": [
+              {
+                "role": "system",
+                "content": "You plan support work for locale {locale}.\n{>safety}"
+              },
+              {
+                "placeholder": "history",
+                "optional": true
+              },
+              {
+                "role": "user",
+                "content": "{question}"
+              }
+            ],
+            "variables": {
+              "history": {
+                "type": "messages",
+                "required": false
+              },
+              "locale": {
+                "type": "string",
+                "required": false
+              },
+              "question": {
+                "type": "string",
+                "required": true
+              }
+            },
+            "partials": {
+              "locale": "en"
+            },
+            "output_contract": null,
+            "fragments": {
+              "safety": {
+                "prompt_id": "prm_support_safety",
+                "version": 2,
+                "content_digest": "sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d"
+              }
+            }
+          },
+          "content_digest": "sha256:939bfaf5a5d795e644e9fad6a8c5c8767b620ee2ab0f9bd8dbe048613bb764ef",
+          "existing_version_with_same_digest": null,
+          "slot": {
+            "slot_path": "planner.instructions",
+            "node_path": "planner",
+            "subagent_id": null,
+            "usage": "instructions",
+            "status": "discovered"
+          },
+          "issues": [],
+          "secret_findings": [],
+          "provenance": {
+            "source_file": "app/graph.py",
+            "source_line": 42
+          }
+        }
+      ],
+      "summary": {
+        "create_prompt": 0,
+        "create_version": 1,
+        "reuse_version": 0,
+        "map_slot_only": 0,
+        "skip": 0,
+        "blocked": 0,
+        "unresolved": 0
+      }
+    },
+    "projection": {
+      "rule": "without_plan_digest",
+      "from": {
+        "schema": "agenomic.prompt_import_plan/v1",
+        "plan_id": "imp_01j9x1k3m5n7p9q1r3s5t7v9w1",
+        "workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f",
+        "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+        "source": {
+          "kind": "discovery_report",
+          "digest": "sha256:1a944179e14ce65a249415a3cecbf644e8a67b252d3990245558b552c32d4bab"
+        },
+        "created_at": "2026-10-04T21:31:00Z",
+        "items": [
+          {
+            "item_id": "cand_3f9a0c1d2e4b5a69",
+            "action": "create_version",
+            "prompt_id": "prm_support_planner",
+            "prompt_kind": "chat",
+            "base_version": 6,
+            "content": {
+              "schema": "agenomic.prompt_content/v1",
+              "template_format": "agenomic-fstring/v1",
+              "renderer_version": "1",
+              "kind": "chat",
+              "body": [
+                {
+                  "role": "system",
+                  "content": "You plan support work for locale {locale}.\n{>safety}"
+                },
+                {
+                  "placeholder": "history",
+                  "optional": true
+                },
+                {
+                  "role": "user",
+                  "content": "{question}"
+                }
+              ],
+              "variables": {
+                "history": {
+                  "type": "messages",
+                  "required": false
+                },
+                "locale": {
+                  "type": "string",
+                  "required": false
+                },
+                "question": {
+                  "type": "string",
+                  "required": true
+                }
+              },
+              "partials": {
+                "locale": "en"
+              },
+              "output_contract": null,
+              "fragments": {
+                "safety": {
+                  "prompt_id": "prm_support_safety",
+                  "version": 2,
+                  "content_digest": "sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d"
+                }
+              }
+            },
+            "content_digest": "sha256:939bfaf5a5d795e644e9fad6a8c5c8767b620ee2ab0f9bd8dbe048613bb764ef",
+            "existing_version_with_same_digest": null,
+            "slot": {
+              "slot_path": "planner.instructions",
+              "node_path": "planner",
+              "subagent_id": null,
+              "usage": "instructions",
+              "status": "discovered"
+            },
+            "issues": [],
+            "secret_findings": [],
+            "provenance": {
+              "source_file": "app/graph.py",
+              "source_line": 42
+            }
+          }
+        ],
+        "summary": {
+          "create_prompt": 0,
+          "create_version": 1,
+          "reuse_version": 0,
+          "map_slot_only": 0,
+          "skip": 0,
+          "blocked": 0,
+          "unresolved": 0
+        },
+        "plan_digest": "sha256:49a46ebec91227c8206c1104fb225945107137b11c95daeca3a74b06d351392f"
+      }
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.prompt_import_plan/v1",
+    "canonical": "{\"agent_id\":\"2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c\",\"created_at\":\"2026-10-04T21:31:00Z\",\"items\":[{\"action\":\"create_version\",\"base_version\":6,\"content\":{\"body\":[{\"content\":\"You plan support work for locale {locale}.\\n{>safety}\",\"role\":\"system\"},{\"optional\":true,\"placeholder\":\"history\"},{\"content\":\"{question}\",\"role\":\"user\"}],\"fragments\":{\"safety\":{\"content_digest\":\"sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d\",\"prompt_id\":\"prm_support_safety\",\"version\":2}},\"kind\":\"chat\",\"output_contract\":null,\"partials\":{\"locale\":\"en\"},\"renderer_version\":\"1\",\"schema\":\"agenomic.prompt_content/v1\",\"template_format\":\"agenomic-fstring/v1\",\"variables\":{\"history\":{\"required\":false,\"type\":\"messages\"},\"locale\":{\"required\":false,\"type\":\"string\"},\"question\":{\"required\":true,\"type\":\"string\"}}},\"content_digest\":\"sha256:939bfaf5a5d795e644e9fad6a8c5c8767b620ee2ab0f9bd8dbe048613bb764ef\",\"existing_version_with_same_digest\":null,\"issues\":[],\"item_id\":\"cand_3f9a0c1d2e4b5a69\",\"prompt_id\":\"prm_support_planner\",\"prompt_kind\":\"chat\",\"provenance\":{\"source_file\":\"app/graph.py\",\"source_line\":42},\"secret_findings\":[],\"slot\":{\"node_path\":\"planner\",\"slot_path\":\"planner.instructions\",\"status\":\"discovered\",\"subagent_id\":null,\"usage\":\"instructions\"}}],\"plan_id\":\"imp_01j9x1k3m5n7p9q1r3s5t7v9w1\",\"schema\":\"agenomic.prompt_import_plan/v1\",\"source\":{\"digest\":\"sha256:1a944179e14ce65a249415a3cecbf644e8a67b252d3990245558b552c32d4bab\",\"kind\":\"discovery_report\"},\"summary\":{\"blocked\":0,\"create_prompt\":0,\"create_version\":1,\"map_slot_only\":0,\"reuse_version\":0,\"skip\":0,\"unresolved\":0},\"workspace_id\":\"0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f\"}",
+    "digest": "sha256:49a46ebec91227c8206c1104fb225945107137b11c95daeca3a74b06d351392f"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "case_id": "planner.case-03",
+  "kind": "node_state",
+  "input": {
+    "context": { "locale": "fr" }
+  },
+  "expected": {
+    "output": { "next_step": "lookup_order" }
+  },
+  "initial_state": {
+    "messages": [
+      { "type": "human", "content": "Où est ma commande 1234 ?" }
+    ],
+    "plan": null,
+    "confidence": 0.75
+  },
+  "turns": [],
+  "tags": ["planner", "lang:fr"]
+}

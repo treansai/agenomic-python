@@ -1,0 +1,65 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R015",
+  "intent": "nested empty arrays are kept and -0 renders as 0",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "{j}",
+      "variables": {
+        "j": {
+          "type": "json",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "j": [
+        null,
+        [
+          []
+        ],
+        -0
+      ]
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "[null,[[]],0]",
+    "messages": null,
+    "expanded_template": "{j}",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:8abf3388791254cc36e41dd37a09fa66d0dc4fbfdf6af8cfbc0898b35596cf21",
+      "kind": "text",
+      "text": "[null,[[]],0]",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:21862b988fd0af2f56833e04b2b73ef1e3c58595ab6c18e47bb1ca74324023be",
+    "warnings": [],
+    "langchain_parity": false
+  }
+}

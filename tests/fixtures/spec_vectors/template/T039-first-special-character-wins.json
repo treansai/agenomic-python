@@ -1,0 +1,28 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T039",
+  "intent": "the first special character decides the reason",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "template": "ok {x!r:>3}"
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_template_invalid",
+      "item": {
+        "code": "syntax_error",
+        "syntax": "conversion",
+        "offset": 3,
+        "line": 1,
+        "column": 4
+      }
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T013",
+  "intent": "Python keywords are plain names",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "template": "{class}"
+  },
+  "expected": {
+    "ok": true,
+    "tokens": [
+      {
+        "t": "var",
+        "name": "class",
+        "offset": 0
+      }
+    ],
+    "source": "{class}"
+  }
+}

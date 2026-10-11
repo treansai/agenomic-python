@@ -1,0 +1,32 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D006",
+  "intent": "U+0001, TAB, LF and CR are escaped as \\u0001, \\t, \\n and \\r",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "a\u0001b\tc\nd\re",
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.prompt_content/v1",
+    "canonical": "{\"body\":\"a\\u0001b\\tc\\nd\\re\",\"fragments\":{},\"kind\":\"text\",\"output_contract\":null,\"partials\":{},\"renderer_version\":\"1\",\"schema\":\"agenomic.prompt_content/v1\",\"template_format\":\"agenomic-fstring/v1\",\"variables\":{}}",
+    "digest": "sha256:354e2181baf36264a296560bad4e1da0b1a46e84c9194183a3d948624b6610dd"
+  }
+}

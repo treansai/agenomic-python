@@ -1,0 +1,69 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T063",
+  "intent": "a fragment declares locale as string while the parent declares it as integer",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "{>locale_rule}",
+      "variables": {
+        "locale": {
+          "type": "integer",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {
+        "locale_rule": {
+          "prompt_id": "prm_locale_rule",
+          "version": 1,
+          "content_digest": "sha256:a7303511e6c2d20f6382b724cf86bbc692fa6e635021b158c94b349e23bba99d"
+        }
+      }
+    },
+    "fragments": {
+      "prm_locale_rule:1": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "Answer in {locale}.",
+          "variables": {
+            "locale": {
+              "type": "string",
+              "required": true
+            }
+          },
+          "partials": {},
+          "output_contract": null,
+          "fragments": {}
+        }
+      }
+    }
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_template_invalid",
+      "item": {
+        "code": "fragment_variable_type_mismatch",
+        "path": "/body",
+        "variable": "locale",
+        "fragment": "prm_locale_rule:1"
+      }
+    }
+  }
+}

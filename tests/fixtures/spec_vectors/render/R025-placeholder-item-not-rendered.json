@@ -1,0 +1,100 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R025",
+  "intent": "a placeholder item whose content looks like a template is passed through verbatim",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "messages",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "You track orders."
+        },
+        {
+          "placeholder": "history",
+          "optional": false
+        }
+      ],
+      "variables": {
+        "history": {
+          "type": "messages",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "history": [
+        {
+          "role": "user",
+          "content": "{x}"
+        }
+      ]
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "chat",
+    "text": null,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You track orders."
+      },
+      {
+        "role": "user",
+        "content": "{x}"
+      }
+    ],
+    "expanded_template": [
+      {
+        "role": "system",
+        "content": "You track orders."
+      },
+      {
+        "placeholder": "history",
+        "optional": false
+      }
+    ],
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:640e455765f3f4c6c58626a13ba44746472622f70752069e205cd6f000e5414c",
+      "kind": "chat",
+      "text": null,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You track orders."
+        },
+        {
+          "placeholder": "history",
+          "count": 1
+        }
+      ],
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:398600f790755df5e9875db58bad4bd5039e6863bfef6616ee08369e84b915e7",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

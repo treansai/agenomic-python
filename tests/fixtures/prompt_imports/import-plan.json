@@ -1,0 +1,294 @@
+{
+  "schema": "agenomic.prompt_import_plan/v1",
+  "plan_id": "imp_01j9x1k3m5n7p9q1r3s5t7v9w1",
+  "workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f",
+  "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+  "source": {
+    "kind": "discovery_report",
+    "digest": "sha256:fdff0b64060743822f5e609d693c1fb0f5efd4bf58f3a67372c086acca4d7f5b"
+  },
+  "created_at": "2026-10-04T21:31:00Z",
+  "items": [
+    {
+      "item_id": "cand_2a913ea2ec842236",
+      "action": "create_version",
+      "prompt_id": "prm_support_planner",
+      "prompt_kind": "chat",
+      "base_version": 6,
+      "content": {
+        "schema": "agenomic.prompt_content/v1",
+        "template_format": "agenomic-fstring/v1",
+        "renderer_version": "1",
+        "kind": "chat",
+        "body": [
+          {
+            "role": "system",
+            "content": "You plan support work for locale {locale}."
+          },
+          {
+            "placeholder": "history",
+            "optional": true
+          },
+          {
+            "role": "user",
+            "content": "{question}"
+          }
+        ],
+        "variables": {
+          "history": {
+            "type": "messages",
+            "required": false
+          },
+          "locale": {
+            "type": "string",
+            "required": false
+          },
+          "question": {
+            "type": "string",
+            "required": true
+          }
+        },
+        "partials": {
+          "locale": "en"
+        },
+        "output_contract": null,
+        "fragments": {}
+      },
+      "content_digest": "sha256:8dc4422b149417092ad97deaacd5e801bcdfceedcdec8d31ca52da36533faafc",
+      "existing_version_with_same_digest": null,
+      "slot": {
+        "slot_path": "planner.system",
+        "node_path": "planner",
+        "subagent_id": null,
+        "usage": "system",
+        "status": "discovered"
+      },
+      "issues": [
+        {
+          "code": "variable_types_defaulted",
+          "severity": "info",
+          "line": 42,
+          "column": 18,
+          "message": "variable types default to string; review them before publishing"
+        }
+      ],
+      "secret_findings": [],
+      "provenance": {
+        "source_file": "app/graph.py",
+        "source_line": 42
+      }
+    },
+    {
+      "item_id": "cand_f094f4c2e661f8ba",
+      "action": "create_prompt",
+      "prompt_id": "prm_support_writer",
+      "prompt_kind": "text",
+      "base_version": null,
+      "content": {
+        "schema": "agenomic.prompt_content/v1",
+        "template_format": "agenomic-fstring/v1",
+        "renderer_version": "1",
+        "kind": "text",
+        "body": "Write a short answer to {question}.\nKeep it under 120 words.",
+        "variables": {
+          "question": {
+            "type": "string",
+            "required": true
+          }
+        },
+        "partials": {},
+        "output_contract": null,
+        "fragments": {}
+      },
+      "content_digest": "sha256:66cbaaecfb9b9a20c4f8feb1e3a679f7f1c216995e15672b553b8aaf80f919f3",
+      "existing_version_with_same_digest": null,
+      "slot": {
+        "slot_path": "writer.instructions",
+        "node_path": "writer",
+        "subagent_id": null,
+        "usage": "instructions",
+        "status": "discovered"
+      },
+      "issues": [],
+      "secret_findings": [],
+      "provenance": {
+        "source_file": "app/prompts.py",
+        "source_line": 12
+      }
+    },
+    {
+      "item_id": "cand_31957c91ea8fa965",
+      "action": "reuse_version",
+      "prompt_id": "prm_support_router",
+      "prompt_kind": "text",
+      "base_version": null,
+      "content": {
+        "schema": "agenomic.prompt_content/v1",
+        "template_format": "agenomic-fstring/v1",
+        "renderer_version": "1",
+        "kind": "text",
+        "body": "Route the request to billing, shipping or returns.",
+        "variables": {},
+        "partials": {},
+        "output_contract": null,
+        "fragments": {}
+      },
+      "content_digest": "sha256:946b6f2955d77d75b66f6de68c63ccc23b1d6b0c86bbd1dcf3d9b8912670be98",
+      "existing_version_with_same_digest": 2,
+      "slot": {
+        "slot_path": "router.system",
+        "node_path": "router",
+        "subagent_id": null,
+        "usage": "system",
+        "status": "discovered"
+      },
+      "issues": [],
+      "secret_findings": [],
+      "provenance": {
+        "source_file": "app/prompts.py",
+        "source_line": 18
+      }
+    },
+    {
+      "item_id": "cand_d60a50bfdc32789d",
+      "action": "skip",
+      "prompt_id": null,
+      "prompt_kind": null,
+      "base_version": null,
+      "content": null,
+      "content_digest": null,
+      "existing_version_with_same_digest": null,
+      "slot": {
+        "slot_path": "researcher.system",
+        "node_path": "researcher",
+        "subagent_id": null,
+        "usage": "system",
+        "status": "unresolved"
+      },
+      "issues": [
+        {
+          "code": "python_fstring",
+          "severity": "error",
+          "line": 88,
+          "column": 31,
+          "message": "the template is an f-string, so Python substitutes it before LangChain sees a template"
+        }
+      ],
+      "secret_findings": [],
+      "provenance": {
+        "source_file": "app/graph.py",
+        "source_line": 88
+      }
+    },
+    {
+      "item_id": "cand_4276b98d9e7f1030",
+      "action": "blocked",
+      "prompt_id": "prm_support_billing",
+      "prompt_kind": "text",
+      "base_version": null,
+      "content": null,
+      "content_digest": null,
+      "existing_version_with_same_digest": null,
+      "slot": {
+        "slot_path": "billing.system",
+        "node_path": null,
+        "subagent_id": null,
+        "usage": "system",
+        "status": "discovered"
+      },
+      "issues": [
+        {
+          "code": "secret_detected",
+          "severity": "error",
+          "line": 7,
+          "column": 15,
+          "message": "the template contains a credential; the content is withheld"
+        }
+      ],
+      "secret_findings": [
+        {
+          "pattern": "openai_key",
+          "line": 7,
+          "column": 39,
+          "length": 51
+        }
+      ],
+      "provenance": {
+        "source_file": "app/tools.py",
+        "source_line": 7
+      }
+    },
+    {
+      "item_id": "cand_5a213d4edf172d81",
+      "action": "skip",
+      "prompt_id": null,
+      "prompt_kind": null,
+      "base_version": null,
+      "content": null,
+      "content_digest": null,
+      "existing_version_with_same_digest": null,
+      "slot": {
+        "slot_path": null,
+        "node_path": "research",
+        "subagent_id": null,
+        "usage": null,
+        "status": "unresolved"
+      },
+      "issues": [
+        {
+          "code": "subagent_unmapped",
+          "severity": "warning",
+          "line": 120,
+          "column": 1,
+          "message": "the node runs a compiled subgraph; map it to a child agent"
+        }
+      ],
+      "secret_findings": [],
+      "provenance": {
+        "source_file": "app/graph.py",
+        "source_line": 120
+      }
+    },
+    {
+      "item_id": "cand_2484d98e334066bd",
+      "action": "blocked",
+      "prompt_id": "prm_support_triage",
+      "prompt_kind": "text",
+      "base_version": null,
+      "content": null,
+      "content_digest": null,
+      "existing_version_with_same_digest": null,
+      "slot": {
+        "slot_path": "triage.system",
+        "node_path": "triage",
+        "subagent_id": null,
+        "usage": "system",
+        "status": "discovered"
+      },
+      "issues": [
+        {
+          "code": "unsupported_template_format",
+          "severity": "error",
+          "line": 31,
+          "column": 21,
+          "message": "mustache templates are not supported; rewrite it with the agenomic-fstring/v1 grammar"
+        }
+      ],
+      "secret_findings": [],
+      "provenance": {
+        "source_file": "app/tools.py",
+        "source_line": 30
+      }
+    }
+  ],
+  "summary": {
+    "create_prompt": 1,
+    "create_version": 1,
+    "reuse_version": 1,
+    "map_slot_only": 0,
+    "skip": 2,
+    "blocked": 2,
+    "unresolved": 2
+  },
+  "plan_digest": "sha256:13d9302f58ce3b2aaf9b6cd13e6f5c2c33f39bcf544232b99633f13ff0672ada"
+}

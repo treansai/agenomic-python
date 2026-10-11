@@ -1,0 +1,36 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T058",
+  "intent": "a chat body without entries",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [],
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {}
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_template_invalid",
+      "item": {
+        "code": "empty_chat",
+        "path": "/body"
+      }
+    }
+  }
+}

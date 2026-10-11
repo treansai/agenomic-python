@@ -1,0 +1,41 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T067",
+  "intent": "an output contract of an unsupported type",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Answer.",
+      "variables": {},
+      "partials": {},
+      "output_contract": {
+        "type": "regex",
+        "json_schema": {
+          "pattern": "^[a-z]+$"
+        }
+      },
+      "fragments": {}
+    },
+    "fragments": {}
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_template_invalid",
+      "item": {
+        "code": "output_contract_invalid",
+        "path": "/output_contract"
+      }
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D009",
+  "intent": "the JSON lexeme 100.0 in the output contract is canonicalized as 100",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Summarize.",
+      "variables": {},
+      "partials": {},
+      "output_contract": {
+        "type": "json_schema",
+        "json_schema": {
+          "type": "string",
+          "maxLength": 100.0
+        }
+      },
+      "fragments": {}
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.prompt_content/v1",
+    "canonical": "{\"body\":\"Summarize.\",\"fragments\":{},\"kind\":\"text\",\"output_contract\":{\"json_schema\":{\"maxLength\":100,\"type\":\"string\"},\"type\":\"json_schema\"},\"partials\":{},\"renderer_version\":\"1\",\"schema\":\"agenomic.prompt_content/v1\",\"template_format\":\"agenomic-fstring/v1\",\"variables\":{}}",
+    "digest": "sha256:298a212f5f731a1d03aa02c75f9044ff4aeac6b86b9dab0c5586fe46f474a235"
+  }
+}

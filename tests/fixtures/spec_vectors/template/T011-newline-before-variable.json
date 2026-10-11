@@ -1,0 +1,30 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T011",
+  "intent": "a LF before the variable: offset 6, which is line 2, column 1",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "template": "line1\n{x}"
+  },
+  "expected": {
+    "ok": true,
+    "tokens": [
+      {
+        "t": "literal",
+        "text": "line1\n"
+      },
+      {
+        "t": "var",
+        "name": "x",
+        "offset": 6
+      }
+    ],
+    "source": "line1\n{x}"
+  }
+}

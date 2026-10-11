@@ -1,0 +1,61 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R065",
+  "intent": "R063 with the caller supplying __proto__ keeps the value instead of losing it to a prototype setter",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Value: {__proto__}",
+      "variables": {
+        "__proto__": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "partials": {
+        "__proto__": "p"
+      },
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "__proto__": "v"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "Value: v",
+    "messages": null,
+    "expanded_template": "Value: {__proto__}",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:f018f51c0dd4c176333b1c5888aa482e71a5b846fa42ec10c6fbaabf85fa7025",
+      "kind": "text",
+      "text": "Value: v",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:a616ac5730c8ab8874c084eeb423503677f15bc35c78930fb230a1bb65437248",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T033",
+  "intent": "an include without a name",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "template": "{>}"
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_template_invalid",
+      "item": {
+        "code": "syntax_error",
+        "syntax": "invalid_fragment_name",
+        "offset": 0,
+        "line": 1,
+        "column": 1
+      }
+    }
+  }
+}

@@ -1,0 +1,42 @@
+schema: agenomic.prompts_file/v1
+agent_id: 2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c
+prompts:
+  - prompt_id: prm_support_safety
+    kind: fragment
+    name: Support safety rules
+    description: Shared safety paragraph
+    tags: [support]
+    content:
+      kind: text
+      body: |-
+        Never share internal notes.
+      variables: {}
+  - prompt_id: prm_support_planner
+    kind: chat
+    name: Support planner
+    expected_latest_version: 6
+    change_message: Ask for the order id first
+    content:
+      kind: chat
+      body:
+        - role: system
+          content: |-
+            You plan support work for locale {locale}.
+            {>safety}
+        - placeholder: history
+          optional: true
+        - role: user
+          content: "{question}"
+      variables:
+        history: { type: messages, required: false }
+        locale: { type: string, required: false }
+        question: { type: string, required: true }
+      partials: { locale: en }
+      fragments:
+        safety: { prompt_id: prm_support_safety }
+slots:
+  - slot_path: planner.instructions
+    node_path: planner
+    subagent_id: null
+    usage: instructions
+    prompt_id: prm_support_planner

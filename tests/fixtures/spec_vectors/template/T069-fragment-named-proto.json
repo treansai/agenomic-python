@@ -1,0 +1,59 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T069",
+  "intent": "a fragment declared as __proto__ and included with {>__proto__} is expanded like any other name",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Rules: {>__proto__}",
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {
+        "__proto__": {
+          "prompt_id": "prm_support_safety",
+          "version": 2,
+          "content_digest": "sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d"
+        }
+      }
+    },
+    "fragments": {
+      "prm_support_safety:2": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "Never share internal notes.",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {}
+        }
+      }
+    }
+  },
+  "expected": {
+    "ok": true,
+    "validation": {
+      "variables": {
+        "declared": [],
+        "referenced": [],
+        "placeholders": []
+      },
+      "warnings": [],
+      "content_digest": "sha256:3d7838b06bb93eee4b23a4668d7a880dcf98801d8676a529f8c4f831e722c072"
+    }
+  }
+}

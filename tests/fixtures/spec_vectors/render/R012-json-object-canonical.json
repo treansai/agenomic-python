@@ -1,0 +1,68 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R012",
+  "intent": "a json value renders as its canonical JSON with keys sorted and no whitespace",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "{payload}",
+      "variables": {
+        "payload": {
+          "type": "json",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "payload": {
+        "b": 1,
+        "a": {
+          "d": [
+            2,
+            1
+          ],
+          "c": null
+        }
+      }
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "{\"a\":{\"c\":null,\"d\":[2,1]},\"b\":1}",
+    "messages": null,
+    "expanded_template": "{payload}",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:6840b9005fb69b012265e9662a3c5324b4778e3d28e626d018e48b99501c391b",
+      "kind": "text",
+      "text": "{\"a\":{\"c\":null,\"d\":[2,1]},\"b\":1}",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:a0469ecb31b19cef049d076db8e6ddf2b14f7f9ff8160d60a0baf2c5a88581db",
+    "warnings": [],
+    "langchain_parity": false
+  }
+}

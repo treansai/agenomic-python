@@ -1,0 +1,59 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R014",
+  "intent": "a json string uses the canonical escape table: LF and U+001F escaped, quote and backslash escaped, accented letters and U+2028 written raw",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "{j}",
+      "variables": {
+        "j": {
+          "type": "json",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "j": "a\nb\u001fc\"d\\eé "
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "\"a\\nb\\u001fc\\\"d\\\\eé \"",
+    "messages": null,
+    "expanded_template": "{j}",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:8abf3388791254cc36e41dd37a09fa66d0dc4fbfdf6af8cfbc0898b35596cf21",
+      "kind": "text",
+      "text": "\"a\\nb\\u001fc\\\"d\\\\eé \"",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:4c82bc2156398ccc66c2dd4316b7cc0dc069b6aea55d15dade4266a48bb13710",
+    "warnings": [],
+    "langchain_parity": false
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R050",
+  "intent": "R049 with allow_duplicate_system renders and appends the history",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "messages",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "You are a planner."
+        },
+        {
+          "role": "user",
+          "content": "{question}"
+        }
+      ],
+      "variables": {
+        "question": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "question": "Hi"
+    },
+    "options": {
+      "strict": true,
+      "history": [
+        {
+          "role": "system",
+          "content": "You are a planner."
+        },
+        {
+          "role": "user",
+          "content": "Earlier"
+        }
+      ],
+      "allow_duplicate_system": true,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "chat",
+    "text": null,
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a planner."
+      },
+      {
+        "role": "user",
+        "content": "Hi"
+      },
+      {
+        "role": "system",
+        "content": "You are a planner."
+      },
+      {
+        "role": "user",
+        "content": "Earlier"
+      }
+    ],
+    "expanded_template": [
+      {
+        "role": "system",
+        "content": "You are a planner."
+      },
+      {
+        "role": "user",
+        "content": "{question}"
+      }
+    ],
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:9e58f2e4ac4c15f588f23612c6c0e3e5c812bc61f88b4f52c3e12776632e58e3",
+      "kind": "chat",
+      "text": null,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a planner."
+        },
+        {
+          "role": "user",
+          "content": "Hi"
+        }
+      ],
+      "history_count": 2
+    },
+    "rendered_hash": "sha256:3ccf72d2b26aabfe77f2d31357c695d8a27ab2c041443f3d278eeadeee532e0c",
+    "warnings": [],
+    "langchain_parity": false
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D007",
+  "intent": "a double quote and a backslash are escaped",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Say \"hi\" to C:\\temp",
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.prompt_content/v1",
+    "canonical": "{\"body\":\"Say \\\"hi\\\" to C:\\\\temp\",\"fragments\":{},\"kind\":\"text\",\"output_contract\":null,\"partials\":{},\"renderer_version\":\"1\",\"schema\":\"agenomic.prompt_content/v1\",\"template_format\":\"agenomic-fstring/v1\",\"variables\":{}}",
+    "digest": "sha256:679261b35d73d2231587bc02f9fc2a2fd88faf339d86670f37e8b9c7346c65ce"
+  }
+}

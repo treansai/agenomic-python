@@ -1,0 +1,54 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D003",
+  "intent": "chat content with an optional placeholder",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "You are a support planner."
+        },
+        {
+          "placeholder": "history",
+          "optional": true
+        },
+        {
+          "role": "user",
+          "content": "{question}"
+        }
+      ],
+      "variables": {
+        "history": {
+          "type": "messages",
+          "required": false
+        },
+        "question": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.prompt_content/v1",
+    "canonical": "{\"body\":[{\"content\":\"You are a support planner.\",\"role\":\"system\"},{\"optional\":true,\"placeholder\":\"history\"},{\"content\":\"{question}\",\"role\":\"user\"}],\"fragments\":{},\"kind\":\"chat\",\"output_contract\":null,\"partials\":{},\"renderer_version\":\"1\",\"schema\":\"agenomic.prompt_content/v1\",\"template_format\":\"agenomic-fstring/v1\",\"variables\":{\"history\":{\"required\":false,\"type\":\"messages\"},\"question\":{\"required\":true,\"type\":\"string\"}}}",
+    "digest": "sha256:280b5fd21416acbe44d32d0239ff8ba8f464570264b08666ec135fb0f436ca61"
+  }
+}

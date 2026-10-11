@@ -1,16 +1,16 @@
 # Agenomic Python SDK documentation
 
-Python SDK for [Agenomic](https://agenomic.dev) — agent-native
+Python SDK for [Agenomic](https://agenomic.dev): agent-native
 versioning, tracing, and ATEP signed event logs. Fully offline; cloud
 upload is optional.
 
-Using an AI coding agent? Point it at [`AGENT.md`](../AGENT.md) — the
+Using an AI coding agent? Point it at [`AGENT.md`](../AGENT.md), the
 condensed integration guide with import maps, recipes, and pitfalls.
 
 ## Start here
 
-- [Quickstart](quickstart.md) — install, first trace, five minutes
-- [Non-determinism disclaimer](non-determinism.md) — what traces do and
+- [Quickstart](quickstart.md): install, first trace, five minutes
+- [Non-determinism disclaimer](non-determinism.md): what traces do and
   don't prove
 
 ## Guides
@@ -31,6 +31,9 @@ condensed integration guide with import maps, recipes, and pitfalls.
 | Agents Vault: use credentials without receiving them (optional commercial module) | [vault.md](vault.md) |
 | Workflow & system manifests (RFC 0009) | [orchestration.md](orchestration.md) |
 | Integrations (OpenAI, Anthropic, HF, LangGraph, LangChain, MCP) | [integrations.md](integrations.md) |
+| Managed prompts (references, bindings, bundles, imports) | [prompts.md](prompts.md) |
+| Prompt experiments (runner, snapshots, results) | [experiments.md](experiments.md) |
+| LangGraph versions tested with managed prompts | [langgraph-matrix.md](langgraph-matrix.md) |
 | Hugging Face provider | [providers/huggingface.md](providers/huggingface.md) |
 | Cloud upload | [cloud-upload.md](cloud-upload.md) |
 | `agenomic-py` CLI | [cli.md](cli.md) |
@@ -38,7 +41,8 @@ condensed integration guide with import maps, recipes, and pitfalls.
 
 ## Reference
 
-- [API reference](api-reference.md) — the complete public surface
-- [`examples/`](../examples/) — twelve runnable examples, offline ones run
-  with zero setup
+- [API reference](api-reference.md): the complete public surface
+- [`examples/`](../examples/): 18 runnable examples; the offline ones run
+  with zero setup, except that examples 12 to 17 (managed prompts and
+  experiments; the vault one too) need the `langgraph` extra
 - [`CHANGELOG.md`](../CHANGELOG.md)

@@ -1,0 +1,64 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T054",
+  "intent": "a declared fragment that is never included is a warning",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Hello",
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {
+        "footer": {
+          "prompt_id": "prm_footer",
+          "version": 1,
+          "content_digest": "sha256:93bd17e7b1e47cae8c2c38f3f8a59a3bf095517729bf7d6000c43a4813f47d60"
+        }
+      }
+    },
+    "fragments": {
+      "prm_footer:1": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "Thanks for reading.",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {}
+        }
+      }
+    }
+  },
+  "expected": {
+    "ok": true,
+    "validation": {
+      "variables": {
+        "declared": [],
+        "referenced": [],
+        "placeholders": []
+      },
+      "warnings": [
+        {
+          "code": "fragment_unused",
+          "path": "/fragments/footer"
+        }
+      ],
+      "content_digest": "sha256:12990339586bf477e4c1a78cb93b26d31fcaacd56a825e5b3b082657c978d932"
+    }
+  }
+}

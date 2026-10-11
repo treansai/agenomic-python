@@ -1,0 +1,127 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R020",
+  "intent": "system, user, assistant and user messages keep their order and their surrounding whitespace exactly",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "messages",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "chat",
+      "body": [
+        {
+          "role": "system",
+          "content": "  System rules  \n"
+        },
+        {
+          "role": "user",
+          "content": "\tFirst question "
+        },
+        {
+          "role": "assistant",
+          "content": " First answer "
+        },
+        {
+          "role": "user",
+          "content": "\n{q}\n"
+        }
+      ],
+      "variables": {
+        "q": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "q": "Second question"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "chat",
+    "text": null,
+    "messages": [
+      {
+        "role": "system",
+        "content": "  System rules  \n"
+      },
+      {
+        "role": "user",
+        "content": "\tFirst question "
+      },
+      {
+        "role": "assistant",
+        "content": " First answer "
+      },
+      {
+        "role": "user",
+        "content": "\nSecond question\n"
+      }
+    ],
+    "expanded_template": [
+      {
+        "role": "system",
+        "content": "  System rules  \n"
+      },
+      {
+        "role": "user",
+        "content": "\tFirst question "
+      },
+      {
+        "role": "assistant",
+        "content": " First answer "
+      },
+      {
+        "role": "user",
+        "content": "\n{q}\n"
+      }
+    ],
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:816b61e37f4ad4f177d79ae1c3d3fd5ae88d0c52422a6e92377f37263b80bf41",
+      "kind": "chat",
+      "text": null,
+      "messages": [
+        {
+          "role": "system",
+          "content": "  System rules  \n"
+        },
+        {
+          "role": "user",
+          "content": "\tFirst question "
+        },
+        {
+          "role": "assistant",
+          "content": " First answer "
+        },
+        {
+          "role": "user",
+          "content": "\nSecond question\n"
+        }
+      ],
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:e42c06f936483ef141e3a7e52bb1dc5446f128d867f636c3ea6c57b79eddd127",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

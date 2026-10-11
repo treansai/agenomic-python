@@ -1,0 +1,15 @@
+# Optional adapter config file, named by AGENOMIC_HERMES_CONFIG. Its keys win over
+# plugins.entries.agenomic.settings. The runtime token is only ever a reference.
+schema_version: agenomic.hermes.adapter_config/v1
+endpoint: https://agenomic.example
+runtime_token: ${env:AGENOMIC_HERMES_RUNTIME_TOKEN}
+timeouts:
+  decision_s: 5
+buffer:
+  max_events: 10000
+  batch_size: 500
+  spool_path: /var/lib/agenomic-hermes/spool.jsonl
+  spool_max_bytes: 67108864
+capture:
+  content: metadata
+fail_mode: closed

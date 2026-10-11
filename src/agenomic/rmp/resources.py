@@ -102,6 +102,7 @@ class RmpResource:
         environment: str = "production",
         ledger: bool = False,
         genome_hash: Optional[str] = None,
+        candidate_release_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """Open a new RMP session (snake_case ``rmp-session`` wire shape)."""
         if getattr(self._client, "is_cloud", False):
@@ -115,6 +116,8 @@ class RmpResource:
                 body["release_id"] = release_id
             if genome_hash:
                 body["genome_hash"] = genome_hash
+            if candidate_release_id:
+                body["candidate_release_id"] = candidate_release_id
             response = self._client._post("/v1/rmp/sessions", body)
             return _session_from(response, "rmp")
         # At most one active session per (agent, environment): reuse it
@@ -143,6 +146,8 @@ class RmpResource:
                 session["release_id"] = release_id
             if genome_hash:
                 session["genome_hash"] = genome_hash
+            if candidate_release_id:
+                session["candidate_release_id"] = candidate_release_id
             self._sessions[session["session_id"]] = session
             return session
 

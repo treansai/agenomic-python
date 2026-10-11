@@ -1,0 +1,37 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D002",
+  "intent": "D001 with every member written in another order has the same digest as D001",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "fragments": {},
+      "output_contract": null,
+      "partials": {},
+      "variables": {
+        "name": {
+          "required": true,
+          "type": "string"
+        }
+      },
+      "body": "Hello {name}",
+      "kind": "text",
+      "renderer_version": "1",
+      "template_format": "agenomic-fstring/v1",
+      "schema": "agenomic.prompt_content/v1"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.prompt_content/v1",
+    "canonical": "{\"body\":\"Hello {name}\",\"fragments\":{},\"kind\":\"text\",\"output_contract\":null,\"partials\":{},\"renderer_version\":\"1\",\"schema\":\"agenomic.prompt_content/v1\",\"template_format\":\"agenomic-fstring/v1\",\"variables\":{\"name\":{\"required\":true,\"type\":\"string\"}}}",
+    "digest": "sha256:bcd8fd23d76935d3eb9d1afb1e821ecebbf0ccb0f3655b5776ec8eacbe6a5ff1"
+  }
+}

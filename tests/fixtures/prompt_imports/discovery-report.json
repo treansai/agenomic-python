@@ -1,0 +1,340 @@
+{
+  "schema": "agenomic.prompt_discovery_report/v1",
+  "scanner": {
+    "name": "agenomic-python",
+    "version": "0.4.0",
+    "python_grammar": "3.10",
+    "secret_patterns": "agenomic-secrets/1"
+  },
+  "root": {
+    "label": "support-agent",
+    "vcs": {
+      "kind": "git",
+      "commit": "fda6e0b1853563d3aa6593712c0d4a1ae85cb069"
+    }
+  },
+  "generated_at": "2026-10-04T21:30:00Z",
+  "limits": {
+    "max_files": 4000,
+    "max_file_bytes": 524288
+  },
+  "files": [
+    {
+      "path": "app/graph.py",
+      "sha256": "sha256:4adf74f162e803beffbaf1680221b1cf09f5e92bda758cbb767bb5565ffa3b09",
+      "status": "scanned",
+      "skip_reason": null
+    },
+    {
+      "path": "app/legacy.py",
+      "sha256": "sha256:9a58efcd6646065536e063e28b625d8d3926cea3e9d109f907fc985c691272c2",
+      "status": "skipped",
+      "skip_reason": "syntax_error"
+    },
+    {
+      "path": "app/prompts.py",
+      "sha256": "sha256:82daeaa56356c06c8c08180a907acca0f2212cc5197f50b2512a8efd6ee86279",
+      "status": "scanned",
+      "skip_reason": null
+    },
+    {
+      "path": "app/tools.py",
+      "sha256": "sha256:ae0a022c97acd2498a8179b51378b6a5fae56831f97412bda4e5c8c2d2107393",
+      "status": "scanned",
+      "skip_reason": null
+    },
+    {
+      "path": "app/vendored/big_table.py",
+      "sha256": "sha256:f11d0c06453f1ba3347f33b90aab06739d16d8c36a0aaccb5971df964e7b5e78",
+      "status": "skipped",
+      "skip_reason": "too_large"
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "cand_2a913ea2ec842236",
+      "status": "supported",
+      "construct": "langchain.chat_prompt_template",
+      "source": {
+        "path": "app/graph.py",
+        "line": 42,
+        "column": 18,
+        "end_line": 51,
+        "end_column": 2,
+        "symbol": "PLANNER_PROMPT",
+        "enclosing_function": null
+      },
+      "proposal": {
+        "prompt_id": "prm_support_planner",
+        "prompt_kind": "chat",
+        "slot_path": "planner.system",
+        "node_path": "planner",
+        "usage": "system"
+      },
+      "content": {
+        "schema": "agenomic.prompt_content/v1",
+        "template_format": "agenomic-fstring/v1",
+        "renderer_version": "1",
+        "kind": "chat",
+        "body": [
+          {
+            "role": "system",
+            "content": "You plan support work for locale {locale}."
+          },
+          {
+            "placeholder": "history",
+            "optional": true
+          },
+          {
+            "role": "user",
+            "content": "{question}"
+          }
+        ],
+        "variables": {
+          "history": {
+            "type": "messages",
+            "required": false
+          },
+          "locale": {
+            "type": "string",
+            "required": false
+          },
+          "question": {
+            "type": "string",
+            "required": true
+          }
+        },
+        "partials": {
+          "locale": "en"
+        },
+        "output_contract": null,
+        "fragments": {}
+      },
+      "content_digest": "sha256:8dc4422b149417092ad97deaacd5e801bcdfceedcdec8d31ca52da36533faafc",
+      "issues": [
+        {
+          "code": "variable_types_defaulted",
+          "severity": "info",
+          "line": 42,
+          "column": 18,
+          "message": "variable types default to string; review them before publishing"
+        }
+      ],
+      "secret_findings": []
+    },
+    {
+      "candidate_id": "cand_f094f4c2e661f8ba",
+      "status": "supported",
+      "construct": "python.string_constant",
+      "source": {
+        "path": "app/prompts.py",
+        "line": 12,
+        "column": 17,
+        "end_line": 15,
+        "end_column": 4,
+        "symbol": "WRITER_PROMPT",
+        "enclosing_function": null
+      },
+      "proposal": {
+        "prompt_id": "prm_support_writer",
+        "prompt_kind": "text",
+        "slot_path": "writer.instructions",
+        "node_path": "writer",
+        "usage": "instructions"
+      },
+      "content": {
+        "schema": "agenomic.prompt_content/v1",
+        "template_format": "agenomic-fstring/v1",
+        "renderer_version": "1",
+        "kind": "text",
+        "body": "Write a short answer to {question}.\nKeep it under 120 words.",
+        "variables": {
+          "question": {
+            "type": "string",
+            "required": true
+          }
+        },
+        "partials": {},
+        "output_contract": null,
+        "fragments": {}
+      },
+      "content_digest": "sha256:66cbaaecfb9b9a20c4f8feb1e3a679f7f1c216995e15672b553b8aaf80f919f3",
+      "issues": [],
+      "secret_findings": []
+    },
+    {
+      "candidate_id": "cand_31957c91ea8fa965",
+      "status": "supported",
+      "construct": "python.string_constant",
+      "source": {
+        "path": "app/prompts.py",
+        "line": 18,
+        "column": 17,
+        "end_line": 18,
+        "end_column": 69,
+        "symbol": "ROUTER_PROMPT",
+        "enclosing_function": null
+      },
+      "proposal": {
+        "prompt_id": "prm_support_router",
+        "prompt_kind": "text",
+        "slot_path": "router.system",
+        "node_path": "router",
+        "usage": "system"
+      },
+      "content": {
+        "schema": "agenomic.prompt_content/v1",
+        "template_format": "agenomic-fstring/v1",
+        "renderer_version": "1",
+        "kind": "text",
+        "body": "Route the request to billing, shipping or returns.",
+        "variables": {},
+        "partials": {},
+        "output_contract": null,
+        "fragments": {}
+      },
+      "content_digest": "sha256:946b6f2955d77d75b66f6de68c63ccc23b1d6b0c86bbd1dcf3d9b8912670be98",
+      "issues": [],
+      "secret_findings": []
+    },
+    {
+      "candidate_id": "cand_d60a50bfdc32789d",
+      "status": "unresolved",
+      "construct": "langchain.prompt_template",
+      "source": {
+        "path": "app/graph.py",
+        "line": 88,
+        "column": 12,
+        "end_line": 88,
+        "end_column": 61,
+        "symbol": null,
+        "enclosing_function": "research"
+      },
+      "proposal": {
+        "prompt_id": null,
+        "prompt_kind": null,
+        "slot_path": "researcher.system",
+        "node_path": "researcher",
+        "usage": "system"
+      },
+      "content": null,
+      "content_digest": null,
+      "issues": [
+        {
+          "code": "python_fstring",
+          "severity": "error",
+          "line": 88,
+          "column": 31,
+          "message": "the template is an f-string, so Python substitutes it before LangChain sees a template"
+        }
+      ],
+      "secret_findings": []
+    },
+    {
+      "candidate_id": "cand_4276b98d9e7f1030",
+      "status": "blocked_secret",
+      "construct": "python.string_constant",
+      "source": {
+        "path": "app/tools.py",
+        "line": 7,
+        "column": 15,
+        "end_line": 7,
+        "end_column": 92,
+        "symbol": "BILLING_PROMPT",
+        "enclosing_function": null
+      },
+      "proposal": {
+        "prompt_id": "prm_support_billing",
+        "prompt_kind": "text",
+        "slot_path": "billing.system",
+        "node_path": null,
+        "usage": "system"
+      },
+      "content": null,
+      "content_digest": null,
+      "issues": [
+        {
+          "code": "secret_detected",
+          "severity": "error",
+          "line": 7,
+          "column": 15,
+          "message": "the template contains a credential; the content is withheld"
+        }
+      ],
+      "secret_findings": [
+        {
+          "pattern": "openai_key",
+          "line": 7,
+          "column": 39,
+          "length": 51
+        }
+      ]
+    },
+    {
+      "candidate_id": "cand_5a213d4edf172d81",
+      "status": "unresolved",
+      "construct": "langgraph.subagent_node",
+      "source": {
+        "path": "app/graph.py",
+        "line": 120,
+        "column": 1,
+        "end_line": 120,
+        "end_column": 44,
+        "symbol": null,
+        "enclosing_function": null
+      },
+      "proposal": {
+        "prompt_id": null,
+        "prompt_kind": null,
+        "slot_path": null,
+        "node_path": "research",
+        "usage": null
+      },
+      "content": null,
+      "content_digest": null,
+      "issues": [
+        {
+          "code": "subagent_unmapped",
+          "severity": "warning",
+          "line": 120,
+          "column": 1,
+          "message": "the node runs a compiled subgraph; map it to a child agent"
+        }
+      ],
+      "secret_findings": []
+    },
+    {
+      "candidate_id": "cand_2484d98e334066bd",
+      "status": "unsupported",
+      "construct": "langchain.prompt_template",
+      "source": {
+        "path": "app/tools.py",
+        "line": 30,
+        "column": 18,
+        "end_line": 33,
+        "end_column": 2,
+        "symbol": "TRIAGE_PROMPT",
+        "enclosing_function": null
+      },
+      "proposal": {
+        "prompt_id": "prm_support_triage",
+        "prompt_kind": "text",
+        "slot_path": "triage.system",
+        "node_path": "triage",
+        "usage": "system"
+      },
+      "content": null,
+      "content_digest": null,
+      "issues": [
+        {
+          "code": "unsupported_template_format",
+          "severity": "error",
+          "line": 31,
+          "column": 21,
+          "message": "mustache templates are not supported; rewrite it with the agenomic-fstring/v1 grammar"
+        }
+      ],
+      "secret_findings": []
+    }
+  ]
+}

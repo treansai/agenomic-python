@@ -1,0 +1,21 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "prompts-file-yaml",
+  "id": "Y010",
+  "intent": "file-local fragment references a to b to a form a cycle, refused before anything is planned",
+  "consumers": [
+    "python"
+  ],
+  "input": {
+    "yaml": "schema: agenomic.prompts_file/v1\nprompts:\n  - prompt_id: prm_rules_a\n    kind: fragment\n    name: Rules A\n    content:\n      kind: text\n      body: \"Rule A, then {>b}\"\n      variables: {}\n      fragments:\n        b: { prompt_id: prm_rules_b }\n  - prompt_id: prm_rules_b\n    kind: fragment\n    name: Rules B\n    content:\n      kind: text\n      body: \"Rule B, then {>a}\"\n      variables: {}\n      fragments:\n        a: { prompt_id: prm_rules_a }\n"
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_import_invalid",
+      "item": {
+        "code": "fragment_cycle"
+      }
+    }
+  }
+}

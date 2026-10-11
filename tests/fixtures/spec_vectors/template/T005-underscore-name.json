@@ -1,0 +1,26 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T005",
+  "intent": "a name starting with an underscore",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "template": "{_x1}"
+  },
+  "expected": {
+    "ok": true,
+    "tokens": [
+      {
+        "t": "var",
+        "name": "_x1",
+        "offset": 0
+      }
+    ],
+    "source": "{_x1}"
+  }
+}

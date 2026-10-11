@@ -1,0 +1,63 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T062",
+  "intent": "a pinned fragment whose content kind is chat",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Rules: {>safety}",
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {
+        "safety": {
+          "prompt_id": "prm_support_safety",
+          "version": 3,
+          "content_digest": "sha256:65eb766f9eb034f4f316081f996baa8d8ae36c95ab7c7f1adbafd5a18becf50a"
+        }
+      }
+    },
+    "fragments": {
+      "prm_support_safety:3": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "chat",
+          "body": [
+            {
+              "role": "system",
+              "content": "Never share internal notes."
+            }
+          ],
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {}
+        }
+      }
+    }
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_template_invalid",
+      "item": {
+        "code": "fragment_not_text",
+        "path": "/fragments/safety",
+        "fragment": "prm_support_safety:3"
+      }
+    }
+  }
+}

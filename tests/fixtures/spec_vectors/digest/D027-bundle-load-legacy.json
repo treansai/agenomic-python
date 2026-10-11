@@ -1,0 +1,53 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D027",
+  "intent": "an unsigned legacy bundle pinned by the D026 digest loads with zero prompts; every slot is unmanaged",
+  "consumers": [
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "bundle_load",
+    "bundle": {
+      "schema": "agenomic.prompt_bundle/v1",
+      "workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f",
+      "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+      "source": {
+        "channel": "production",
+        "channel_generation": 3
+      },
+      "release": {
+        "release_id": "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f",
+        "release_name": "support-agent 2026-09-12",
+        "genome_version": null,
+        "bundle_id": "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b",
+        "bundle_hash": "blake3:338c00b56a0fda6dc3be33f84c0531fc5724a9c10f689160262e35081ce03b88",
+        "legacy": true
+      },
+      "prompt_manifest_digest": "sha256:f5558f9a42e31aadc424f3dd54ead2176857f848c6b7f7552c0b1489c3e7a1b0",
+      "manifest": {
+        "schema": "agenomic.prompt_manifest/v1",
+        "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+        "slots": {},
+        "children": {}
+      },
+      "children": {},
+      "prompts": {},
+      "prompt_bundle_digest": "sha256:fa830cc7fe775ecdd7ae8667c8032f1e0937060cf23f68729848b120b1767990",
+      "exported_at": "2026-10-04T21:10:00Z",
+      "expires_at": null
+    },
+    "expected_bundle_digest": "sha256:fa830cc7fe775ecdd7ae8667c8032f1e0937060cf23f68729848b120b1767990",
+    "expected_workspace_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f",
+    "expected_agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c"
+  },
+  "expected": {
+    "ok": true,
+    "prompt_bundle_digest": "sha256:fa830cc7fe775ecdd7ae8667c8032f1e0937060cf23f68729848b120b1767990",
+    "prompt_manifest_digest": "sha256:f5558f9a42e31aadc424f3dd54ead2176857f848c6b7f7552c0b1489c3e7a1b0",
+    "prompt_refs": [],
+    "managed_slots": []
+  }
+}

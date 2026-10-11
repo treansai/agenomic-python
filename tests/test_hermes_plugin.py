@@ -1,0 +1,4199 @@
+"""Adapter behaviour against a fake Agenomic runtime API (no Hermes needed).
+
+The two Hermes call orders are simulated faithfully:
+
+* agent loop (``agent/tool_executor.py``): ``tool_execution`` middleware wraps
+  a terminal that runs ``pre_tool_call`` then the tool;
+* direct dispatch (``model_tools.handle_function_call``): ``pre_tool_call``
+  first, then the middleware around the tool.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import threading
+import time
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+import pytest
+from hermes_fakes import FakeAgenomic, FakeCtx
+from pydantic import SecretStr
+
+from agenomic.integrations.hermes import guard as guard_mod
+from agenomic.integrations.hermes import plugin as plugin_mod
+from agenomic.integrations.hermes.canonical import arguments_hash
+from agenomic.integrations.hermes.client import HermesApiError
+from agenomic.integrations.hermes.config import AdapterConfig, ConfigError
+from agenomic.integrations.hermes.plugin import APPROVAL_MESSAGE, HermesAdapter
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_adapters(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Stop every adapter a test creates, so no exporter thread outlives its test and
+    posts into another test's HTTP mock."""
+    created: list[HermesAdapter] = []
+    original = HermesAdapter.__init__
+
+    def tracking_init(self: HermesAdapter, *args: Any, **kwargs: Any) -> None:
+        created.append(self)
+        original(self, *args, **kwargs)
+
+    monkeypatch.setattr(HermesAdapter, "__init__", tracking_init)
+    yield
+    for adapter in created:
+        if hasattr(adapter, "exporter"):
+            adapter.shutdown()
+
+
+@pytest.fixture
+def server() -> Iterator[FakeAgenomic]:
+    s = FakeAgenomic()
+    yield s
+    s.close()
+
+
+PINNED = {
+    "version": "0.21.5",
+    "release_date": "2026.9.24",
+    "commit": "f97608f178d1ffeca59860195ab7da295f7c8e5f",
+}
+
+
+def make_adapter(
+    server_url: str, tmp_path: Path, identity: Optional[dict[str, Any]] = None, **overrides: Any
+) -> HermesAdapter:
+    doc: dict[str, Any] = {
+        "endpoint": server_url,
+        "timeouts": {"connect_s": 1.0, "decision_s": 1.0, "report_s": 1.0},
+        "buffer": {"flush_interval_s": 0.05},
+    }
+    doc.update(overrides)
+    config = AdapterConfig.model_validate(doc)
+    ctx = FakeCtx()
+    adapter = HermesAdapter(
+        config,
+        SecretStr("agmhr_test"),
+        ctx=ctx,
+        hermes_home=tmp_path / "home",
+        start_threads=False,
+        identity=identity or dict(PINNED),
+    )
+    adapter.install(ctx)
+    return adapter
+
+
+class Runner:
+    """Drives the adapter callbacks in Hermes' orders and counts real executions."""
+
+    def __init__(self, adapter: HermesAdapter) -> None:
+        self.adapter = adapter
+        self.executions = 0
+
+    def _kw(self, tool: str, sid: str, tcid: str) -> dict[str, Any]:
+        return {
+            "tool_name": tool,
+            "session_id": sid,
+            "tool_call_id": tcid,
+            "task_id": "task",
+            "turn_id": f"{sid}:task:turn",
+            "api_request_id": f"{sid}:task:turn:api:1",
+            "telemetry_schema_version": "hermes.observer.v1",
+        }
+
+    def _execute(
+        self, args: dict[str, Any], effect: Optional[Callable[[dict[str, Any]], None]]
+    ) -> str:
+        self.executions += 1
+        if effect is not None:
+            effect(args)
+        return json.dumps({"success": True})
+
+    def agent_loop(
+        self,
+        tool: str,
+        args: dict[str, Any],
+        *,
+        sid: str = "s1",
+        tcid: str = "call_1",
+        effect: Optional[Callable[[dict[str, Any]], None]] = None,
+        modify: Optional[dict[str, Any]] = None,
+    ) -> str:
+        a = self.adapter
+        kw = self._kw(tool, sid, tcid)
+        blocked: dict[str, bool] = {}
+
+        def terminal(next_args: Optional[dict[str, Any]] = None) -> str:
+            final = dict(args if next_args is None else next_args)
+            directive = a.pre_tool_call(args=final, **kw)
+            if directive:
+                result = json.dumps({"error": directive["message"]})
+                blocked["b"] = True
+                a.post_tool_call(args=final, result=result, status="blocked", **kw)
+                return result
+            if modify:
+                final.update(modify)
+            blocked["final"] = final  # type: ignore[assignment]
+            return self._execute(final, effect)
+
+        result = a.tool_execution(args=args, next_call=terminal, **kw)
+        if not blocked.get("b"):
+            executed = blocked.get("final", args)
+            a.post_tool_call(args=executed, result=result, status="ok", duration_ms=1, **kw)
+        return str(result)
+
+    def direct(
+        self,
+        tool: str,
+        args: dict[str, Any],
+        *,
+        sid: str = "s1",
+        tcid: str = "call_1",
+        exec_args: Optional[dict[str, Any]] = None,
+        effect: Optional[Callable[[dict[str, Any]], None]] = None,
+    ) -> str:
+        a = self.adapter
+        kw = self._kw(tool, sid, tcid)
+        directive = a.pre_tool_call(args=args, **kw)
+        if directive:
+            return json.dumps({"error": directive["message"]})
+        mw_args = args if exec_args is None else exec_args
+        return str(
+            a.tool_execution(
+                args=mw_args, next_call=lambda p=None: self._execute(mw_args, effect), **kw
+            )
+        )
+
+
+def write_effect(path: Path) -> Callable[[dict[str, Any]], None]:
+    def _effect(args: dict[str, Any]) -> None:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(str(args.get("content", "")))
+
+    return _effect
+
+
+def wait_for(cond: Callable[[], bool], timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cond():
+            return True
+        time.sleep(0.02)
+    return cond()
+
+
+# ---------------------------------------------------------------- allow
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_allow_executes_once_and_reports_with_permit(
+    server: FakeAgenomic, tmp_path: Path, order: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    target = tmp_path / "out.txt"
+    args = {"path": str(target), "content": "hello"}
+    result = getattr(runner, order)("write_file", args, effect=write_effect(target))
+
+    assert json.loads(result) == {"success": True}
+    assert runner.executions == 1
+    assert target.read_text() == "hello"
+    assert len(server.authorize_calls()) == 1
+    reports = server.reports()
+    assert len(reports) == 1
+    body = reports[0].body
+    assert body["logical_call_id"] == "call_1"
+    assert body["permit"]["document"]["arguments_hash"] == arguments_hash(args)
+    assert body["arguments"] == args
+    assert body["is_error"] is False
+    assert body["result_hash"].startswith("blake3:")
+    assert body["result_preview"] is None
+    adapter.exporter.flush(3.0)
+    types = server.event_types()
+    assert "tool.call.decision" in types
+    assert "tool.call.executed" in types
+    serialized = json.dumps(server.events)
+    assert "hello" not in serialized  # content never leaves without redacted_preview
+
+
+def test_session_admitted_before_authorize(server: FakeAgenomic, tmp_path: Path) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="s1", model="demo-model", platform="cli")
+    Runner(adapter).agent_loop("read_file", {"path": "/tmp/x"})
+    paths = [r.path for r in server.requests if r.method == "POST"]
+    assert paths.index("/v1/hermes/runtime/hello") < paths.index("/v1/hermes/runtime/sessions")
+    assert paths.index("/v1/hermes/runtime/sessions") < paths.index(
+        "/v1/hermes/runtime/sessions/s1/actions/authorize"
+    )
+    assert len(server.calls("/v1/hermes/runtime/sessions")) == 1
+
+
+# ---------------------------------------------------------------- deny
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_deny_never_calls_next_call(server: FakeAgenomic, tmp_path: Path, order: str) -> None:
+    server.decide = lambda body: "deny"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    target = tmp_path / "denied.txt"
+    result = getattr(runner, order)(
+        "write_file", {"path": str(target), "content": "x"}, effect=write_effect(target)
+    )
+    assert runner.executions == 0
+    assert not target.exists()
+    message = json.loads(result)["error"]
+    assert message.startswith("Agenomic denied write_file: writes are not allowed (decision dec-")
+    assert server.reports() == []
+
+
+# ---------------------------------------------------------------- approval
+
+
+def test_require_approval_blocks_then_retry_reuses_identity(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    target = tmp_path / "approved.txt"
+    args = {"path": str(target), "content": "x"}
+
+    first = json.loads(
+        runner.agent_loop("write_file", args, tcid="call_1", effect=write_effect(target))
+    )
+    approval_id = next(iter(server.approvals))
+    assert first["error"] == APPROVAL_MESSAGE.format(approval_id=approval_id)
+    assert runner.executions == 0
+    assert not target.exists()
+
+    # Still pending: blocked again, the gateway is not asked to authorize.
+    second = json.loads(runner.agent_loop("write_file", args, tcid="call_2"))
+    assert "still pending" in second["error"]
+    assert len(server.authorize_calls()) == 1
+
+    server.approve(approval_id)
+    runner.agent_loop("write_file", args, tcid="call_3", effect=write_effect(target))
+    assert runner.executions == 1
+    assert target.read_text() == "x"
+    retry = server.authorize_calls()[-1].body
+    assert retry["tool_call_id"] == "call_1"  # identity of the pending action, not call_3
+    assert retry["attempt"] == 1
+    assert server.approvals[approval_id]["status"] == "consumed"
+    assert server.reports()[0].body["logical_call_id"] == "call_1"
+
+
+def _approved_write(
+    server: FakeAgenomic, tmp_path: Path
+) -> tuple[HermesAdapter, Runner, dict[str, Any], Path, str]:
+    """A write that required an approval which a human then granted."""
+    server.decide = lambda body: "require_approval"
+    server.replay_consumed = True
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    target = tmp_path / "approved.txt"
+    args = {"path": str(target), "content": "x"}
+    runner.agent_loop("write_file", args, tcid="call_1")
+    approval_id = next(iter(server.approvals))
+    server.approve(approval_id)
+    return adapter, runner, args, target, approval_id
+
+
+def test_one_approval_authorizes_one_concurrent_invocation(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter, runner, args, target, approval_id = _approved_write(server, tmp_path)
+    original = adapter.client.authorize
+    concurrent: list[str] = []
+    interleaved: list[bool] = []
+
+    def authorize_then_interleave(sid: str, body: Any) -> Any:
+        answer = original(sid, body)
+        if not interleaved:
+            interleaved.append(True)
+            # A second identical invocation (another tool_call_id) arrives while the
+            # first retry holds the granted approval and has not executed yet.
+            concurrent.append(
+                runner.agent_loop("write_file", args, tcid="call_3", effect=write_effect(target))
+            )
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", authorize_then_interleave)
+    runner.agent_loop("write_file", args, tcid="call_2", effect=write_effect(target))
+
+    assert runner.executions == 1
+    assert target.read_text() == "x"
+    message = json.loads(concurrent[0])["error"]
+    assert message == plugin_mod.APPROVAL_IN_USE_MESSAGE.format(approval_id=approval_id)
+    assert [c.body["tool_call_id"] for c in server.authorize_calls()] == ["call_1", "call_1"]
+    assert len(server.reports()) == 1
+
+
+def test_consumed_approval_is_not_reused_by_a_later_identical_invocation(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter, runner, args, target, approval_id = _approved_write(server, tmp_path)
+    runner.agent_loop("write_file", args, tcid="call_2", effect=write_effect(target))
+    assert runner.executions == 1
+    later = json.loads(
+        runner.agent_loop("write_file", args, tcid="call_3", effect=write_effect(target))
+    )
+    assert runner.executions == 1
+    assert target.read_text() == "x"
+    retry = server.authorize_calls()[-1].body
+    assert retry["tool_call_id"] == "call_3", "a new logical action, not the approved one"
+    fresh = server.pending_by_call["call_3"]
+    assert fresh != approval_id
+    assert later["error"] == APPROVAL_MESSAGE.format(approval_id=fresh)
+
+
+def test_lost_answer_releases_the_approval_for_the_next_retry(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter, runner, args, target, approval_id = _approved_write(server, tmp_path)
+    original = adapter.client.authorize
+    lost: list[bool] = []
+
+    def lose_first_answer(sid: str, body: Any) -> Any:
+        answer = original(sid, body)
+        if not lost:
+            lost.append(True)
+            raise HermesApiError("timeout", "authorize timed out", 0)
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", lose_first_answer)
+    first = json.loads(runner.agent_loop("write_file", args, tcid="call_2"))
+    assert "error" in first
+    assert server.approvals[approval_id]["status"] == "consumed"
+    runner.agent_loop("write_file", args, tcid="call_3", effect=write_effect(target))
+    assert runner.executions == 1
+    assert server.authorize_calls()[-1].body["tool_call_id"] == "call_1"
+
+
+def test_rejected_approval_blocks_and_forgets_identity(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    args = {"path": "/tmp/r", "content": "x"}
+    runner.agent_loop("write_file", args, tcid="call_1")
+    approval_id = next(iter(server.approvals))
+    server.approve(approval_id, "rejected")
+    out = json.loads(runner.agent_loop("write_file", args, tcid="call_2"))
+    assert out["error"].startswith(f"Agenomic approval {approval_id} was rejected")
+    assert runner.executions == 0
+
+
+# ---------------------------------------------------------------- failure safety
+
+
+def test_middleware_gate_exception_blocks_without_next_call(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(adapter, "_execution_gate", boom)
+    calls: list[int] = []
+    out = adapter.tool_execution(
+        tool_name="write_file",
+        args={"path": "/tmp/a"},
+        tool_call_id="c",
+        session_id="s",
+        next_call=lambda p=None: calls.append(1),
+    )
+    assert calls == []
+    assert json.loads(out) == {"error": "Agenomic: no valid authorization for this action"}
+
+
+def test_authorize_exception_blocks_in_both_paths(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+
+    def boom(**kwargs: Any) -> Any:
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(adapter, "authorize", boom)
+    runner = Runner(adapter)
+    assert "error" in json.loads(runner.agent_loop("write_file", {"path": "/tmp/a"}))
+    assert "error" in json.loads(runner.direct("write_file", {"path": "/tmp/a"}, tcid="c2"))
+    assert runner.executions == 0
+    directive = adapter.pre_tool_call(
+        tool_name="terminal", args={"command": "ls"}, session_id="s", tool_call_id="c3"
+    )
+    assert directive is not None
+    assert directive["action"] == "block"
+
+
+def test_argument_change_after_authorization_is_blocked(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    target = tmp_path / "changed.txt"
+    out = runner.direct(
+        "write_file",
+        {"path": str(target), "content": "safe"},
+        exec_args={"path": str(target), "content": "evil"},
+        effect=write_effect(target),
+    )
+    assert runner.executions == 0
+    assert not target.exists()
+    assert "changed after authorization" in json.loads(out)["error"]
+    adapter.exporter.flush(3.0)
+    assert "authorization.argument_mismatch" in server.event_types()
+
+
+def test_post_tool_call_mismatch_emits_incident(server: FakeAgenomic, tmp_path: Path) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    # A foreign pre_tool_call "modify" applied after our authorization (agent loop order).
+    runner.agent_loop("read_file", {"path": "/tmp/a"}, modify={"path": "/etc/passwd"})
+    adapter.exporter.flush(3.0)
+    incidents = [e for e in server.events if e["type"] == "authorization.argument_mismatch"]
+    assert len(incidents) == 1
+    assert incidents[0]["reason"] == "arguments changed after authorization (post_tool_call)"
+
+
+def test_server_timeout_in_enforce_blocks(server: FakeAgenomic, tmp_path: Path) -> None:
+    server.authorize_delay_s = 0.6
+    adapter = make_adapter(server.url, tmp_path, timeouts={"decision_s": 0.2, "connect_s": 0.2})
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("write_file", {"path": "/tmp/t"}))
+    assert (
+        out["error"] == "Agenomic authorization unavailable (timeout); the action was not executed."
+    )
+    assert runner.executions == 0
+
+
+def test_server_error_and_invalid_decision_block(server: FakeAgenomic, tmp_path: Path) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    server.authorize_status = 500
+    assert (
+        "unavailable (boom)"
+        in json.loads(runner.agent_loop("write_file", {"path": "/tmp/a"}))["error"]
+    )
+    server.authorize_status = None
+    server.decide = lambda body: "invalid"
+    out = json.loads(runner.agent_loop("write_file", {"path": "/tmp/b"}, tcid="call_2"))
+    assert "invalid_response" in out["error"]
+    assert runner.executions == 0
+
+
+def test_unreachable_server_with_unknown_mode_blocks(tmp_path: Path) -> None:
+    adapter = make_adapter(
+        "http://127.0.0.1:9", tmp_path, timeouts={"decision_s": 0.3, "connect_s": 0.3}
+    )
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("write_file", {"path": "/tmp/a"}))
+    assert "Agenomic authorization unavailable" in out["error"]
+    assert runner.executions == 0
+    adapter.shutdown()
+
+
+def test_incompatible_hermes_blocks_in_enforce_only(server: FakeAgenomic, tmp_path: Path) -> None:
+    adapter = make_adapter(
+        server.url, tmp_path, identity={"version": "0.22.0", "release_date": None, "commit": None}
+    )
+    assert not adapter.hermes_compatible
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("read_file", {"path": "/tmp/a"}))
+    assert "0.22.0 is not in the adapter compatibility table" in out["error"]
+    server.effective_state = "shadow"
+    adapter._effective_state = None
+    runner.agent_loop("read_file", {"path": "/tmp/a"}, tcid="call_2")
+    assert runner.executions == 1
+
+
+# ---------------------------------------------------------------- modes
+
+
+def test_shadow_never_blocks(server: FakeAgenomic, tmp_path: Path) -> None:
+    server.effective_state = "shadow"
+    server.decide = lambda body: "deny"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    target = tmp_path / "shadow.txt"
+    runner.agent_loop(
+        "write_file", {"path": str(target), "content": "s"}, effect=write_effect(target)
+    )
+    assert runner.executions == 1
+    assert target.exists()
+    server.authorize_status = 503
+    runner.agent_loop(
+        "write_file",
+        {"path": str(target), "content": "t"},
+        tcid="call_2",
+        effect=write_effect(target),
+    )
+    assert runner.executions == 2
+    adapter.exporter.flush(3.0)
+    decisions = [e for e in server.events if e["type"] == "tool.call.decision"]
+    assert decisions[0]["extra"]["counterfactual"] == {"outcome": "deny", "reason_codes": []}
+    assert "authorization.unavailable" in server.event_types()
+
+
+def test_observe_never_calls_authorize(server: FakeAgenomic, tmp_path: Path) -> None:
+    server.effective_state = "observe"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    runner.agent_loop("write_file", {"path": "/tmp/o", "content": "o"})
+    runner.direct("terminal", {"command": "ls"}, tcid="call_2")
+    assert runner.executions == 2
+    assert server.authorize_calls() == []
+    assert server.reports() == []
+    adapter.exporter.flush(3.0)
+    assert "tool.call.requested" in server.event_types()
+
+
+# ---------------------------------------------------------------- local defence and delegation
+
+
+def test_protected_path_denied_locally_even_if_server_allows(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    skill = tmp_path / "home" / "skills" / "evil" / "SKILL.md"
+    out = json.loads(
+        runner.agent_loop(
+            "write_file", {"path": str(skill), "content": "x"}, effect=write_effect(skill)
+        )
+    )
+    assert "protected Hermes paths" in out["error"]
+    assert runner.executions == 0
+    assert len(server.authorize_calls()) == 1  # the server still saw and recorded the request
+    patch = "*** Begin Patch\n*** Update File: " + str(tmp_path / "home" / "config.yaml") + "\n"
+    assert adapter.protected_targets("patch", {"patch": patch})
+    assert adapter.protected_targets("read_file", {"path": str(skill)}) == []
+
+
+def test_delegate_task_reserves_then_links_child_session(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="parent", platform="cli", model="m")
+    Runner(adapter).agent_loop(
+        "delegate_task", {"tasks": [{"goal": "a"}, {"goal": "b"}]}, sid="parent"
+    )
+    paths = [r.path for r in server.requests if r.method == "POST"]
+    deleg = paths.index("/v1/hermes/runtime/sessions/parent/delegations")
+    assert deleg < paths.index("/v1/hermes/runtime/sessions/parent/actions/authorize")
+    assert server.calls("/delegations")[0].body == {"count": 2, "tool_call_id": "call_1"}
+    adapter.subagent_start(
+        parent_session_id="parent",
+        child_session_id="child",
+        child_subagent_id="sa-0-x",
+        child_goal="a",
+    )
+    adapter.on_session_start(session_id="child", platform="subagent", model="m")
+    child = [
+        r.body
+        for r in server.calls("/v1/hermes/runtime/sessions")
+        if r.body["hermes_session_id"] == "child"
+    ]
+    assert child[0]["parent_hermes_session_id"] == "parent"
+    assert child[0]["subagent_id"] == "sa-0-x"
+    assert child[0]["delegation_id"]
+    adapter.exporter.flush(3.0)
+    started = [
+        e
+        for e in server.events
+        if e["type"] == "session.started" and e["hermes_session_id"] == "child"
+    ]
+    assert started[0]["trace_id"] == "parent"
+
+
+def test_delegate_control_actions_do_not_reserve(server: FakeAgenomic, tmp_path: Path) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    Runner(adapter).agent_loop("delegate_task", {"action": "list"})
+    assert server.calls("/delegations") == []
+
+
+def test_chain_run_twice_gets_new_attempt(server: FakeAgenomic, tmp_path: Path) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    runner.agent_loop("read_file", {"path": "/tmp/a"}, tcid="dup")
+    runner.agent_loop("read_file", {"path": "/tmp/a"}, tcid="dup")
+    attempts = [r.body["attempt"] for r in server.authorize_calls()]
+    assert attempts == [1, 2]
+    assert len(server.reports()) == 2
+
+
+def test_report_failure_is_retried_not_reexecuted(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    original = adapter.client.report
+    failures = {"n": 1}
+
+    def flaky(sid: str, body: dict[str, Any]) -> dict[str, Any]:
+        if failures["n"]:
+            failures["n"] -= 1
+            from agenomic.integrations.hermes.client import HermesApiError
+
+            raise HermesApiError("unavailable", "down", 503)
+        return original(sid, body)
+
+    monkeypatch.setattr(adapter.client, "report", flaky)
+    runner.agent_loop("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 1
+    assert server.reports() == []
+    adapter.tick()
+    assert len(server.reports()) == 1
+    assert runner.executions == 1
+    adapter.exporter.flush(3.0)
+    failed = [e for e in server.events if e["type"] == "action.report_failed"]
+    assert failed[0]["extra"]["external_state"] == "unknown"
+
+
+def test_redacted_preview_capture(server: FakeAgenomic, tmp_path: Path) -> None:
+    adapter = make_adapter(
+        server.url, tmp_path, capture={"content": "redacted_preview", "preview_chars": 60}
+    )
+    runner = Runner(adapter)
+    runner.agent_loop(
+        "terminal",
+        {"command": "curl -H 'Authorization: Bearer abc.def' x", "api_key": "sk-supersecret123"},
+    )
+    adapter.exporter.flush(3.0)
+    blob = json.dumps(server.events)
+    assert "sk-supersecret123" not in blob
+    assert "abc.def" not in blob
+    requested = [e for e in server.events if e["type"] == "tool.call.requested"][0]
+    assert "***" in requested["extra"]["previews"]["input"]
+    assert len(requested["extra"]["previews"]["input"]) <= 60
+
+
+# ---------------------------------------------------------------- llm_request, probes, commands
+
+
+def test_llm_request_adds_header_only_for_gateway(server: FakeAgenomic, tmp_path: Path) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    request = {"model": "m", "messages": [], "extra_headers": {"X-Other": "1"}}
+    out = adapter.llm_request(request=request, session_id="s1", base_url=server.model_base_url)
+    assert out is not None
+    assert out["request"]["extra_headers"] == {"X-Other": "1", "X-Agenomic-Hermes-Session": "s1"}
+    assert {k: v for k, v in out["request"].items() if k != "extra_headers"} == {
+        "model": "m",
+        "messages": [],
+    }
+    assert request["extra_headers"] == {"X-Other": "1"}  # input untouched
+    assert (
+        adapter.llm_request(request=request, session_id="s1", base_url="https://api.openai.com/v1")
+        is None
+    )
+    assert adapter.llm_request(request="x", session_id="s1", base_url=server.model_base_url) is None
+
+
+def test_contract_probe_and_foreign_mutators(server: FakeAgenomic, tmp_path: Path) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    assert adapter._contracts["pre_tool_call"]
+    assert adapter._contracts["tool_execution"]
+    assert adapter.foreign_mutators() == []
+
+    def shell(**kwargs: Any) -> None:
+        return None
+
+    shell.__qualname__ = "shell_hook[pre_tool_call:agenomic-hermes-guard]"
+
+    def other_plugin(**kwargs: Any) -> dict[str, Any]:
+        return {"action": "modify", "args": {}}
+
+    manager = adapter.ctx._manager
+    manager._hooks["pre_tool_call"] += [shell, other_plugin]
+    manager._middleware.setdefault("tool_request", []).append(other_plugin)
+    found = adapter.foreign_mutators()
+    assert [(f["kind"], f["name"]) for f in found] == [
+        ("hook", "pre_tool_call"),
+        ("middleware", "tool_request"),
+    ]
+    adapter._ensure_started("cli")
+    hello = server.calls("/hello")[0].body
+    assert hello["adapter"] == {
+        "version": "1.0.0",
+        "config_schema": "agenomic.hermes.adapter_config/v1",
+    }
+    assert len(hello["foreign_mutators"]) == 2
+    assert hello["contracts"]["observer_hooks"] == list(plugin_mod.OBSERVER_HOOKS)
+    checks = {c["check"]: c["status"] for c in hello["compat_results"]}
+    assert "hermes_version_compatible" in checks
+
+
+def test_commands_pause_resume_unknown(server: FakeAgenomic, tmp_path: Path) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    server.commands = [
+        {
+            "id": "c1",
+            "kind": "pause",
+            "target_kind": "instance",
+            "target_ref": "",
+            "status": "requested",
+        },
+        {
+            "id": "c2",
+            "kind": "frobnicate",
+            "target_kind": "instance",
+            "target_ref": "",
+            "status": "requested",
+        },
+    ]
+    adapter.tick()
+    acks = [(cid, b["status"]) for cid, b in server.acks]
+    assert acks == [("c1", "received"), ("c1", "applied"), ("c2", "received"), ("c2", "refused")]
+    status = json.loads(adapter.status_file.read_text())
+    assert status["instance_status"] == "paused"
+    assert status["loaded"] is True
+    assert adapter.local_mode() == "enforce"
+    server.commands = [
+        {
+            "id": "c3",
+            "kind": "resume",
+            "target_kind": "instance",
+            "target_ref": "",
+            "status": "requested",
+        }
+    ]
+    adapter.tick()
+    assert ("c3", "applied") in [(cid, b["status"]) for cid, b in server.acks]
+    assert json.loads(adapter.status_file.read_text())["instance_status"] == "active"
+    heartbeat = server.calls("/heartbeat")[-1].body
+    assert set(heartbeat["exporter"]) == {"buffered", "dropped", "buffer_full", "last_flush_error"}
+
+
+def test_cancel_subagent_applied_only_after_stop(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    interrupted: list[str] = []
+    monkeypatch.setattr(adapter, "_interrupt_subagent", lambda sid: interrupted.append(sid) or True)
+    adapter.handle_command(
+        {
+            "id": "k1",
+            "kind": "cancel",
+            "target_kind": "subagent",
+            "target_ref": "sa-1",
+            "status": "requested",
+        }
+    )
+    assert interrupted == ["sa-1"]
+    assert [b["status"] for _, b in server.acks] == ["received"]
+    adapter.subagent_start(parent_session_id="p", child_session_id="c", child_subagent_id="sa-1")
+    adapter.subagent_stop(parent_session_id="p", child_session_id="c", child_status="interrupted")
+    assert [b["status"] for _, b in server.acks] == ["received", "applied"]
+    assert server.acks[-1][1]["detail"]["observed"] == "subagent_stop"
+
+
+def test_cancel_subagent_applied_when_only_finalize_reports_the_end(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    monkeypatch.setattr(adapter, "_interrupt_subagent", lambda sid: True)
+    adapter.subagent_start(parent_session_id="p", child_session_id="c", child_subagent_id="sa-2")
+    adapter.on_session_start(session_id="c", platform="subagent")
+    adapter.handle_command(
+        {
+            "id": "k4",
+            "kind": "cancel",
+            "target_kind": "subagent",
+            "target_ref": "sa-2",
+            "status": "requested",
+        }
+    )
+    assert [b["status"] for _, b in server.acks] == ["received"]
+    # No subagent_stop and no interrupted turn end: only the final end reaches the plugin.
+    adapter.on_session_finalize(session_id="c", reason="exit")
+    assert [b["status"] for _, b in server.acks] == ["received", "applied"]
+    assert server.acks[-1][1]["detail"]["observed"] == "on_session_finalize"
+    ends = [(c.body["final"], c.body["status"]) for c in server.calls("/end")]
+    assert ends == [(True, "cancelled")], "the gateway sees a terminal cancelled session"
+    assert not adapter._cancel_subagents
+
+
+def test_finalize_without_a_pending_cancel_is_completed(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="s", platform="cli")
+    adapter.on_session_finalize(session_id="s", reason="exit")
+    assert [c.body["status"] for c in server.calls("/end")] == ["completed"]
+    assert server.acks == []
+
+
+def test_cancel_subagent_not_running_is_refused(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    monkeypatch.setattr(adapter, "_interrupt_subagent", lambda sid: False)
+    adapter.handle_command(
+        {"id": "k2", "kind": "cancel", "target_kind": "subagent", "target_ref": "sa-9"}
+    )
+    assert server.acks[-1][1]["status"] == "refused"
+
+
+def test_cancel_root_session_blocks_tools_until_terminal(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="root", platform="cli")
+    agenomic_id = adapter._sessions["root"].agenomic_id
+    adapter.handle_command(
+        {
+            "id": "k3",
+            "kind": "cancel",
+            "target_kind": "session",
+            "target_ref": agenomic_id,
+            "status": "requested",
+        }
+    )
+    assert [b["status"] for _, b in server.acks] == ["received"]
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("read_file", {"path": "/tmp/a"}, sid="root"))
+    assert "cancelled this session" in out["error"]
+    adapter.on_session_end(session_id="root", completed=True, interrupted=False)
+    assert [b["status"] for _, b in server.acks] == ["received"]
+    adapter.on_session_end(session_id="root", completed=False, interrupted=True)
+    assert [b["status"] for _, b in server.acks] == ["received", "applied"]
+    # The cancel-driven interrupt is reported as "cancelled", a terminal state for the
+    # gateway, before the ack: the gateway only applies a cancel whose session ended.
+    ends = [c.body["status"] for c in server.calls("/end")]
+    assert ends == ["completed", "cancelled"]
+
+
+def test_interrupt_without_a_pending_cancel_stays_interrupted(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="s", platform="cli")
+    adapter.on_session_end(session_id="s", completed=False, interrupted=True)
+    ends = [c.body["status"] for c in server.calls("/end")]
+    assert ends == ["interrupted"]
+
+
+def test_observer_hooks_emit_events_and_never_raise(server: FakeAgenomic, tmp_path: Path) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.pre_api_request(
+        session_id="s",
+        api_request_id="a1",
+        turn_id="t",
+        model="m",
+        provider="custom",
+        request_messages=[{"role": "user", "content": "secret prompt"}],
+    )
+    adapter.post_api_request(
+        session_id="s",
+        api_request_id="a1",
+        api_duration=0.5,
+        usage={"prompt_tokens": 3, "completion_tokens": 2},
+    )
+    adapter.api_request_error(
+        session_id="s", api_request_id="a2", error="not a dict", status_code=500
+    )
+    adapter.pre_auxiliary_call(session_id="s", aux_task="title")
+    adapter.post_auxiliary_call(session_id="s", aux_task="title", usage=None)
+    adapter.pre_approval_request(session_id="s", command="rm -rf /", surface="cli")
+    adapter.post_approval_response(session_id="s", choice="deny", surface="cli")
+    adapter.agent_loop_stopped(platform="telegram", reason="stop")
+    adapter.on_session_reset(session_id="s2", old_session_id="s")
+    adapter.on_session_finalize(session_id="s", reason="shutdown")
+    adapter.on_session_finalize(platform="gateway", reason="shutdown")
+    adapter.exporter.flush(3.0)
+    types = server.event_types()
+    for expected in (
+        "model.call.started",
+        "model.call.completed",
+        "model.call.failed",
+        "model.aux.started",
+        "approval.requested",
+        "approval.responded",
+        "agent.loop_stopped",
+        "session.reset",
+        "session.finalized",
+    ):
+        assert expected in types
+    completed = [e for e in server.events if e["type"] == "model.call.completed"][0]
+    assert completed["usage"] == {"input_tokens": 3, "output_tokens": 2, "known": True}
+    assert completed["latency_ms"] == 500
+    assert "secret prompt" not in json.dumps(server.events)
+    assert "rm -rf" not in json.dumps(server.events)
+    ends = server.calls("/sessions/s/end")
+    assert ends[-1].body == {"final": True, "status": "completed", "reason": "shutdown"}
+
+
+def test_register_entry_point_function(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hh"))
+    monkeypatch.delenv("AGENOMIC_HERMES_CONFIG", raising=False)
+    monkeypatch.setenv("AGENOMIC_HERMES_RUNTIME_TOKEN", "agmhr_entry")
+    ctx = FakeCtx({"endpoint": server.url})
+    plugin_mod.register(ctx)
+    adapter = plugin_mod.current_adapter()
+    assert adapter is not None
+    assert adapter.ctx is ctx
+    assert len(ctx._manager._hooks["pre_tool_call"]) == 1
+    assert ctx.unload
+    assert json.loads((tmp_path / "hh" / "agenomic" / "status.json").read_text())["loaded"]
+    adapter.shutdown()
+
+    monkeypatch.delenv("AGENOMIC_HERMES_RUNTIME_TOKEN")
+    with pytest.raises(ConfigError, match="AGENOMIC_HERMES_RUNTIME_TOKEN"):
+        plugin_mod.register(FakeCtx({"endpoint": server.url}))
+    assert json.loads((tmp_path / "hh" / "agenomic" / "status.json").read_text())["loaded"] is False
+
+
+def test_plugin_source_has_no_kind_markers() -> None:
+    # Hermes classifies entry point plugins by scanning their first 8 KiB of source.
+    source = Path(plugin_mod.__file__).read_text(encoding="utf-8")[:8192]
+    for marker in (
+        "register_memory_provider",
+        "MemoryProvider",
+        "register_cron_scheduler",
+        "CronScheduler",
+    ):
+        assert marker not in source
+    assert not ("register_provider" in source and "ProviderProfile" in source)
+
+
+def test_heartbeat_thread_starts_and_writes_status(server: FakeAgenomic, tmp_path: Path) -> None:
+    config = AdapterConfig.model_validate(
+        {"endpoint": server.url, "buffer": {"flush_interval_s": 0.05}}
+    )
+    ctx = FakeCtx()
+    adapter = HermesAdapter(
+        config, SecretStr("agmhr_t"), ctx=ctx, hermes_home=tmp_path / "h", identity=dict(PINNED)
+    )
+    adapter.install(ctx)
+    server.heartbeat_interval_secs = 1
+    server_state = adapter.status_file
+    adapter.on_session_start(session_id="s", platform="cli")
+    assert adapter._thread is not None
+    assert adapter._thread.is_alive()
+    assert wait_for(lambda: len(server.calls("/heartbeat")) >= 1)
+    # Read like the guard does: the heartbeat thread may be replacing the file right now.
+    status = guard_mod._read_status(server_state)
+    assert status is not None
+    assert status["effective_state"] == "enforce"
+    adapter.shutdown()
+
+
+def test_status_write_retries_a_transient_sharing_violation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_replace = plugin_mod.os.replace
+    calls: list[int] = []
+
+    def flaky_replace(src: Any, dst: Any) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError(13, "sharing violation")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(plugin_mod.os, "replace", flaky_replace)
+    path = tmp_path / "agenomic" / "status.json"
+    plugin_mod.write_status(path, loaded=True, instance_status="active", effective_state="observe")
+    assert len(calls) == 2
+    assert json.loads(path.read_text())["effective_state"] == "observe"
+    assert [p.name for p in path.parent.iterdir()] == ["status.json"]
+
+
+def test_staged_skill_write_becomes_a_proposal_never_an_approval(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    record = {
+        "id": "ab12cd34",
+        "summary": "new skill",
+        "payload": {
+            "action": "create",
+            "name": "summarize",
+            "content": "---\nname: summarize\n---\nbody",
+        },
+    }
+    fake = types.ModuleType("tools.write_approval")
+    fake.list_pending = lambda subsystem: [record] if subsystem == "skills" else []  # type: ignore[attr-defined]
+    fake.skill_pending_diff = lambda r: r["payload"]["content"]  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools.write_approval", fake)
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.post_tool_call(
+        tool_name="skill_manage",
+        args={"action": "create", "name": "summarize"},
+        result=json.dumps({"success": True, "staged": True, "pending_id": "ab12cd34"}),
+        session_id="s1",
+        tool_call_id="call_s",
+        status="ok",
+    )
+    sent = server.calls("/proposals")
+    assert len(sent) == 1
+    assert sent[0].body["kind"] == "skill"
+    assert sent[0].body["target"] == "skills/summarize/SKILL.md"
+    assert sent[0].body["content"].startswith("---")
+    adapter.post_tool_call(
+        tool_name="skill_manage",
+        args={},
+        result=json.dumps({"success": True}),
+        session_id="s1",
+        tool_call_id="call_t",
+        status="ok",
+    )
+    assert len(server.calls("/proposals")) == 1, "an unstaged write is not proposed"
+    assert not [r for r in server.requests if "decide" in r.path or "publish" in r.path]
+
+
+class _GatelessCtx(FakeCtx):
+    def register_hook(self, name: str, cb: Any) -> None:
+        if name == "pre_tool_call":
+            raise RuntimeError("no gate")
+        super().register_hook(name, cb)
+
+    def register_middleware(self, kind: str, cb: Any) -> None:
+        raise RuntimeError("no middleware")
+
+
+def test_guard_keeps_blocking_when_no_gate_registers(server: FakeAgenomic, tmp_path: Path) -> None:
+    config = AdapterConfig.model_validate({"endpoint": server.url})
+    ctx = _GatelessCtx()
+    adapter = HermesAdapter(
+        config,
+        SecretStr("agmhr_t"),
+        ctx=ctx,
+        hermes_home=tmp_path / "h",
+        start_threads=False,
+        identity=dict(PINNED),
+    )
+    adapter.install(ctx)
+    status = json.loads(adapter.status_file.read_text())
+    assert status["loaded"] is False
+
+
+@pytest.mark.parametrize("missing", ["pre_tool_call", "tool_execution"])
+def test_guard_keeps_blocking_when_one_gate_is_missing(
+    server: FakeAgenomic, tmp_path: Path, missing: str
+) -> None:
+    class _OneGateCtx(FakeCtx):
+        def register_hook(self, name: str, cb: Any) -> None:
+            if name == missing:
+                raise RuntimeError("no gate")
+            super().register_hook(name, cb)
+
+        def register_middleware(self, kind: str, cb: Any) -> None:
+            if kind == missing:
+                raise RuntimeError("no middleware")
+            super().register_middleware(kind, cb)
+
+    config = AdapterConfig.model_validate({"endpoint": server.url})
+    ctx = _OneGateCtx()
+    adapter = HermesAdapter(
+        config,
+        SecretStr("agmhr_t"),
+        ctx=ctx,
+        hermes_home=tmp_path / "h",
+        start_threads=False,
+        identity=dict(PINNED),
+    )
+    adapter.install(ctx)
+    assert not adapter._contracts[missing]
+    status = json.loads(adapter.status_file.read_text())
+    assert status["loaded"] is False, f"without {missing} the guard stays closed"
+
+
+def test_delegation_reservation_is_queued_only_after_the_action_is_allowed(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.decide = lambda body: "deny"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    runner.agent_loop("delegate_task", {"tasks": [{"goal": "a"}]}, sid="p", tcid="d1")
+    assert len(server.calls("/delegations")) == 1
+    assert not adapter._delegations.get("p"), "a denied action leaves no reservation for a child"
+    assert not adapter._provisional_delegations
+
+    server.decide = lambda body: "require_approval"
+    runner.agent_loop("delegate_task", {"tasks": [{"goal": "b"}]}, sid="p", tcid="d2")
+    runner.agent_loop("delegate_task", {"tasks": [{"goal": "b"}]}, sid="p", tcid="d2")
+    assert len(server.calls("/delegations")) == 2, "a retry after approval reuses its reservation"
+    assert not adapter._delegations.get("p")
+
+    server.decide = lambda body: "allow"
+    for approval in server.approvals.values():
+        approval["status"] = "approved"
+    runner.agent_loop("delegate_task", {"tasks": [{"goal": "b"}]}, sid="p", tcid="d2")
+    assert len(server.calls("/delegations")) == 2
+    assert len(adapter._delegations["p"]) == 1, "the allowed action queues its reservation"
+
+
+def test_concurrent_identical_delegations_each_reserve_for_their_own_children(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="p", platform="cli", model="m")
+    runner = Runner(adapter)
+    args: dict[str, Any] = {"tasks": [{"goal": "same"}]}
+    original = adapter.client.authorize
+    interleaved: list[str] = []
+
+    def authorize_then_interleave(sid: str, body: Any) -> Any:
+        answer = original(sid, body)
+        if body["tool_call_id"] == "d1" and not interleaved:
+            interleaved.append("d2")
+            # A second identical delegate_task (another tool_call_id) is decided and
+            # allowed while the first one has not settled yet.
+            runner.agent_loop("delegate_task", args, sid="p", tcid="d2")
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", authorize_then_interleave)
+    runner.agent_loop("delegate_task", args, sid="p", tcid="d1")
+    assert runner.executions == 2, "both invocations were allowed"
+    reserved = server.calls("/delegations")
+    assert [r.body["tool_call_id"] for r in reserved] == ["d1", "d2"], "one reservation each"
+    assert len(adapter._delegations["p"]) == 2
+    assert not adapter._provisional_delegations
+
+    for child in ("c1", "c2"):
+        adapter.subagent_start(parent_session_id="p", child_session_id=child)
+        adapter.on_session_start(session_id=child, platform="subagent", model="m")
+    admitted = {
+        r.body["hermes_session_id"]: r.body.get("delegation_id")
+        for r in server.calls("/v1/hermes/runtime/sessions")
+    }
+    assert admitted["c1"]
+    assert admitted["c2"]
+    assert admitted["c1"] != admitted["c2"], "each child consumes its own reservation"
+
+
+def test_cached_authorization_never_serves_another_session(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    kw = Runner(adapter)._kw("read_file", "sess-a", "call_shared")
+    assert adapter.pre_tool_call(args={"path": "/tmp/a"}, **kw) is None
+    other = Runner(adapter)._kw("read_file", "sess-b", "call_shared")
+    assert adapter.pre_tool_call(args={"path": "/tmp/a"}, **other) is None
+    sessions = [r.path.split("/sessions/")[1].split("/")[0] for r in server.authorize_calls()]
+    assert sessions == ["sess-a", "sess-b"], "each session asks the gateway for its own call"
+
+
+def test_heartbeat_stays_within_the_guard_deadline(server: FakeAgenomic, tmp_path: Path) -> None:
+    server.heartbeat_interval_secs = 300
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.tick()
+    assert adapter._heartbeat_s <= plugin_mod.DEFAULT_MAX_AGE_S / 3
+
+
+def test_heartbeat_before_hello_stays_within_a_short_guard_deadline(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Until the server sets an interval the default one must still refresh the status file
+    # within a third of the guard's deadline.
+    monkeypatch.setenv("AGENOMIC_HERMES_GUARD_MAX_AGE_S", "9")
+    adapter = make_adapter(server.url, tmp_path)
+    assert adapter._heartbeat_s <= 3.0
+    monkeypatch.setenv("AGENOMIC_HERMES_GUARD_MAX_AGE_S", "0.5")
+    assert plugin_mod._guard_max_age_s() / 3 >= 1.0, "the clamp matches the guard minimum"
+
+
+def test_failed_command_ack_is_retried(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    real = adapter.client.ack_command
+    failures = {"left": 1}
+
+    def flaky(command_id: str, status: str, detail: Any) -> Any:
+        if status == "applied" and failures["left"]:
+            failures["left"] -= 1
+            raise HermesApiError("unreachable", "connection refused", 0)
+        return real(command_id, status, detail)
+
+    monkeypatch.setattr(adapter.client, "ack_command", flaky)
+    adapter.handle_command({"id": "c9", "kind": "pause", "target_kind": "instance"})
+    assert [(c, b.get("status")) for c, b in server.acks] == [("c9", "received")]
+    adapter.tick()
+    assert ("c9", "applied") in [(c, b.get("status")) for c, b in server.acks]
+
+
+def test_post_status_of_another_session_never_hides_an_execution(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    blocked_kw = runner._kw("read_file", "sess-x", "call_same")
+    adapter.post_tool_call(args={"path": "/tmp/a"}, result="{}", status="blocked", **blocked_kw)
+    runner.agent_loop("read_file", {"path": "/tmp/a"}, sid="sess-y", tcid="call_same")
+    assert runner.executions == 1
+    assert len(server.reports()) == 1, "the executed call of sess-y is reported"
+
+
+def test_rejected_approval_drops_its_delegation_reservation(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    runner.agent_loop("delegate_task", {"tasks": [{"goal": "x"}]}, sid="p", tcid="d1")
+    assert adapter._provisional_delegations
+    for approval in server.approvals.values():
+        approval["status"] = "rejected"
+    runner.agent_loop("delegate_task", {"tasks": [{"goal": "x"}]}, sid="p", tcid="d1")
+    assert not adapter._provisional_delegations, "a rejected action never keeps its reservation"
+
+
+def test_stale_blocked_status_never_describes_a_later_execution(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_reused")
+    adapter.post_tool_call(args={"path": "/tmp/a"}, result="{}", status="blocked", **kw)
+    runner.direct("read_file", {"path": "/tmp/a"}, tcid="call_reused")
+    assert runner.executions == 1
+    assert len(server.reports()) == 1, "the later execution is reported"
+
+
+def test_later_ack_supersedes_a_queued_earlier_one(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    real = adapter.client.ack_command
+
+    def flaky(command_id: str, status: str, detail: Any) -> Any:
+        if status == "received":
+            raise HermesApiError("unreachable", "connection refused", 0)
+        return real(command_id, status, detail)
+
+    monkeypatch.setattr(adapter.client, "ack_command", flaky)
+    adapter.handle_command({"id": "c7", "kind": "pause", "target_kind": "instance"})
+    assert not adapter._ack_retries, "received is dropped once applied was accepted"
+
+
+def test_failed_hello_after_a_mutator_change_is_resent(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.tick()
+    assert server.calls("/hello")[-1].body["foreign_mutators"] == []
+
+    def other_plugin(**kwargs: Any) -> dict[str, Any]:
+        return {"action": "modify", "args": {}}
+
+    adapter.ctx._manager._hooks["pre_tool_call"].append(other_plugin)
+    real = adapter.client.hello
+    failures = {"left": 1}
+
+    def flaky(body: Any) -> Any:
+        if failures["left"]:
+            failures["left"] -= 1
+            raise HermesApiError("unreachable", "connection refused", 0)
+        return real(body)
+
+    monkeypatch.setattr(adapter.client, "hello", flaky)
+    adapter.tick()
+    assert failures["left"] == 0, "the changed mutator list triggered a hello"
+    adapter.tick()
+    hello = server.calls("/hello")[-1].body
+    assert len(hello["foreign_mutators"]) == 1, "the server learns about the new mutator"
+
+
+@pytest.mark.parametrize("outcome", ["blocked", "raised", "error"])
+def test_unexecuted_delegation_drops_its_reservation(
+    server: FakeAgenomic, tmp_path: Path, outcome: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="parent", platform="cli", model="m")
+    args: dict[str, Any] = {"tasks": [{"goal": "a"}]}
+    kw = Runner(adapter)._kw("delegate_task", "parent", "d1")
+
+    def terminal(next_args: Optional[dict[str, Any]] = None) -> str:
+        assert adapter.pre_tool_call(args=args, **kw) is None
+        if outcome == "blocked":
+            # Another Hermes hook blocks the call after Agenomic allowed it.
+            result = json.dumps({"error": "blocked by another plugin"})
+            adapter.post_tool_call(args=args, result=result, status="blocked", **kw)
+            return result
+        if outcome == "raised":
+            raise RuntimeError("delegation failed")
+        return json.dumps({"error": "no child started"})
+
+    try:
+        adapter.tool_execution(args=args, next_call=terminal, **kw)
+    except RuntimeError:
+        assert outcome == "raised"
+    assert len(server.calls("/delegations")) == 1
+    assert not adapter._delegations.get("parent"), "no reservation outlives the failed call"
+
+    adapter.subagent_start(
+        parent_session_id="parent",
+        child_session_id="later-child",
+        child_subagent_id="sa-1",
+        child_goal="b",
+    )
+    adapter.on_session_start(session_id="later-child", platform="subagent", model="m")
+    child = [
+        r.body
+        for r in server.calls("/v1/hermes/runtime/sessions")
+        if r.body["hermes_session_id"] == "later-child"
+    ]
+    assert "delegation_id" not in child[0], "an unrelated child never takes a stale delegation"
+
+
+def test_shutdown_makes_the_guard_block(server: FakeAgenomic, tmp_path: Path) -> None:
+    config = AdapterConfig.model_validate(
+        {"endpoint": server.url, "buffer": {"flush_interval_s": 0.05}}
+    )
+    ctx = FakeCtx()
+    adapter = HermesAdapter(
+        config, SecretStr("agmhr_t"), ctx=ctx, hermes_home=tmp_path / "h", identity=dict(PINNED)
+    )
+    adapter.install(ctx)
+    server.heartbeat_interval_secs = 1
+    adapter.on_session_start(session_id="s", platform="cli")
+    assert wait_for(lambda: len(server.calls("/heartbeat")) >= 1)
+    status = guard_mod._read_status(adapter.status_file)
+    assert os.environ[guard_mod.GUARD_EPOCH_ENV] == adapter._guard_epoch
+    epoch = adapter._guard_epoch
+    assert guard_mod.evaluate(status, epoch=epoch, max_age_s=60) is None, (
+        "the loaded adapter allows"
+    )
+    assert guard_mod.evaluate(status, epoch="restarted", max_age_s=60) is not None
+
+    assert ctx.unload
+    for callback in ctx.unload:
+        callback()
+    assert adapter._thread is not None
+    assert not adapter._thread.is_alive()
+    status = guard_mod._read_status(adapter.status_file)
+    assert status is not None
+    assert status["loaded"] is False
+    assert guard_mod.evaluate(status, epoch=epoch, max_age_s=60) is not None, "blocks after unload"
+    adapter.tick()  # a late heartbeat never reopens the guard
+    assert guard_mod._read_status(adapter.status_file)["loaded"] is False  # type: ignore[index]
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_new_mutator_is_confirmed_before_authorizing(
+    server: FakeAgenomic, tmp_path: Path, order: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")  # the first hello; no heartbeat tick follows
+    assert server.calls("/hello")[-1].body["foreign_mutators"] == []
+
+    def other_plugin(**kwargs: Any) -> dict[str, Any]:
+        return {"action": "modify", "args": {}}
+
+    adapter.ctx._manager._hooks["pre_tool_call"].append(other_plugin)
+    result = getattr(Runner(adapter), order)("read_file", {"path": "/tmp/x"})
+    assert json.loads(result) == {"success": True}
+    paths = [r.path for r in server.requests if r.method == "POST"]
+    last_hello = len(paths) - 1 - paths[::-1].index("/v1/hermes/runtime/hello")
+    first_authorize = next(i for i, p in enumerate(paths) if p.endswith("/actions/authorize"))
+    assert last_hello < first_authorize, "hello with the new mutator precedes the authorization"
+    assert len(server.calls("/hello")[-1].body["foreign_mutators"]) == 1
+
+
+@pytest.mark.parametrize("state", ["enforce", "shadow"])
+def test_unconfirmed_mutator_change_blocks_in_enforce(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    server.effective_state = state
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")  # the first hello; no heartbeat tick follows
+
+    def other_plugin(**kwargs: Any) -> dict[str, Any]:
+        return {"action": "modify", "args": {}}
+
+    adapter.ctx._manager._hooks["pre_tool_call"].append(other_plugin)
+
+    def down(body: Any) -> Any:
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(adapter.client, "hello", down)
+    runner = Runner(adapter)
+    result = runner.direct("read_file", {"path": "/tmp/x"})
+    adapter.exporter.flush(3.0)
+    decisions = [e for e in server.events if e.get("type") == "tool.call.decision"]
+    assert any(e["extra"].get("foreign_mutators_unconfirmed") for e in decisions)
+    if state == "enforce":
+        assert runner.executions == 0
+        assert "not confirmed" in json.loads(result)["error"]
+        assert server.authorize_calls() == []
+    else:
+        assert runner.executions == 1, "shadow records the change but does not block"
+        assert len(server.authorize_calls()) == 1
+
+
+def test_shutdown_closes_the_client_and_releases_the_atexit_hook(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hooks: list[Callable[[], None]] = []
+    monkeypatch.setattr(plugin_mod.atexit, "register", hooks.append)
+    monkeypatch.setattr(
+        plugin_mod.atexit, "unregister", lambda f: [hooks.remove(h) for h in list(hooks) if h == f]
+    )
+    config = AdapterConfig.model_validate(
+        {"endpoint": server.url, "buffer": {"flush_interval_s": 0.05}}
+    )
+    ctx = FakeCtx()
+    adapter = HermesAdapter(
+        config, SecretStr("agmhr_t"), ctx=ctx, hermes_home=tmp_path / "h", identity=dict(PINNED)
+    )
+    adapter.install(ctx)
+    adapter.on_session_start(session_id="s", platform="cli")
+    assert hooks == [adapter.shutdown]
+    assert not adapter.client.closed
+
+    closes: list[float] = []
+    original_close = adapter.exporter.close
+    monkeypatch.setattr(
+        adapter.exporter, "close", lambda timeout=None: closes.append(1) or original_close(timeout)
+    )
+    adapter.shutdown()
+    assert hooks == [], "the unloaded adapter is no longer kept alive by atexit"
+    assert adapter.client.closed
+    assert closes == [1]
+    adapter.shutdown()  # idempotent: nothing is drained or closed twice
+    assert closes == [1]
+    # A callback after the unload neither restarts the adapter nor runs the tool.
+    out = Runner(adapter).agent_loop("terminal", {"command": "ls"}, sid="s", tcid="late")
+    assert "error" in json.loads(out)
+    assert hooks == []
+
+
+# ---------------------------------------------------------------- shadow never changes execution
+
+
+def _local_decisions(server: FakeAgenomic, reason: str) -> list[dict[str, Any]]:
+    return [
+        e
+        for e in server.events
+        if e.get("type") == "tool.call.decision" and e.get("reason") == reason
+    ]
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+@pytest.mark.parametrize("state", ["observe", "shadow", "enforce"])
+@pytest.mark.parametrize(
+    "bad",
+    [float("nan"), 10**400, {"a", "b"}, object()],
+    ids=["nan", "huge_int", "set", "object"],
+)
+def test_arguments_without_canonical_form_block_only_in_enforce(
+    server: FakeAgenomic, tmp_path: Path, order: str, state: str, bad: object
+) -> None:
+    server.effective_state = state
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    result = getattr(runner, order)("read_file", {"path": "/tmp/x", "injected": bad})
+    adapter.exporter.flush(3.0)
+    recorded = _local_decisions(server, "arguments_not_canonical")
+    assert len(recorded) == 1, "recorded once, whichever gate sees the call first"
+    event = recorded[0]
+    assert event["decision"] == "deny"
+    assert event["extra"]["local"] is True
+    assert event["extra"]["local_mode"] == state
+    assert server.authorize_calls() == []
+    if state == "enforce":
+        assert runner.executions == 0
+        assert "no canonical form" in json.loads(result)["error"]
+        assert "counterfactual" not in event["extra"]
+    else:
+        assert runner.executions == 1, f"{state} never changes execution"
+        assert event["extra"]["counterfactual"] == {
+            "outcome": "deny",
+            "reason_codes": ["arguments_not_canonical"],
+        }
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+@pytest.mark.parametrize("state", ["observe", "shadow", "enforce"])
+def test_reused_call_id_with_non_canonical_arguments_is_recorded_each_time(
+    server: FakeAgenomic, tmp_path: Path, order: str, state: str
+) -> None:
+    # A later invocation reusing a (session, tool, tool_call_id) is a new action: it gets
+    # its own audit record instead of being taken for the second gate of the first one.
+    server.effective_state = state
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    for _ in range(2):
+        getattr(runner, order)("read_file", {"path": "/tmp/x", "bad": float("nan")}, tcid="call_1")
+    adapter.exporter.flush(3.0)
+    assert len(_local_decisions(server, "arguments_not_canonical")) == 2
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_pending_approval_from_enforce_never_blocks_in_shadow(
+    server: FakeAgenomic, tmp_path: Path, order: str
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    args = {"path": "/tmp/x", "content": "x"}
+    first = json.loads(getattr(runner, order)("write_file", args, tcid="call_1"))
+    assert "approval" in first["error"]
+    assert runner.executions == 0
+
+    server.effective_state = "shadow"
+    adapter.tick()  # the server now answers shadow
+    assert adapter.local_mode() == "shadow"
+    getattr(runner, order)("write_file", args, tcid="call_2")
+    assert runner.executions == 1, "a still pending approval does not block in shadow"
+    assert server.authorize_calls()[-1].body["tool_call_id"] == "call_2"
+    assert adapter._pending, "the enforce approval stays for a later enforce"
+
+
+@pytest.mark.parametrize("state", ["shadow", "enforce"])
+def test_refused_delegation_is_recorded_and_blocks_only_in_enforce(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    server.effective_state = state
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    monkeypatch.setattr(
+        adapter.client,
+        "reserve_delegation",
+        lambda sid, body: (403, {"decision": "deny", "explanation": "delegation limit reached"}),
+    )
+    runner = Runner(adapter)
+    runner.direct("delegate_task", {"tasks": [{"goal": "a"}]})
+    adapter.exporter.flush(3.0)
+    assert _local_decisions(server, "Agenomic denied delegate_task: delegation limit reached")
+    assert runner.executions == (1 if state == "shadow" else 0)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
+def test_status_file_is_owner_only_even_over_a_leftover_temporary(tmp_path: Path) -> None:
+    import os
+    import threading
+
+    path = tmp_path / "agenomic" / "status.json"
+    path.parent.mkdir()
+    leftover = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    leftover.write_text("stale")
+    os.chmod(leftover, 0o666)
+    plugin_mod.write_status(path, loaded=True, instance_status="active", effective_state="observe")
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+
+
+# ---------------------------------------------------------------- subagent cancel races
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+@pytest.mark.parametrize("state", ["observe", "shadow", "enforce"])
+@pytest.mark.parametrize("known", ["session", "link_only"])
+def test_pending_subagent_cancel_blocks_child_calls_in_every_mode(
+    server: FakeAgenomic,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    order: str,
+    state: str,
+    known: str,
+) -> None:
+    server.effective_state = state
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == state
+    monkeypatch.setattr(adapter, "_interrupt_subagent", lambda sid: True)
+    adapter.subagent_start(parent_session_id="p", child_session_id="c", child_subagent_id="sa-1")
+    if known == "session":
+        adapter.on_session_start(session_id="c", platform="subagent")
+    adapter.handle_command(
+        {
+            "id": "k9",
+            "kind": "cancel",
+            "target_kind": "subagent",
+            "target_ref": "sa-1",
+            "status": "requested",
+        }
+    )
+    runner = Runner(adapter)
+    target = tmp_path / "raced.txt"
+    # The interrupt is asynchronous: the child's next tool call races with it.
+    out = json.loads(
+        getattr(runner, order)(
+            "write_file",
+            {"path": str(target), "content": "x"},
+            sid="c",
+            effect=write_effect(target),
+        )
+    )
+    assert runner.executions == 0, f"a pending subagent cancel blocks in {state}"
+    assert not target.exists()
+    assert out["error"] == "Agenomic cancelled this subagent; the action was not executed."
+    assert server.authorize_calls() == []
+    adapter.exporter.flush(3.0)
+    recorded = _local_decisions(server, out["error"])
+    assert len(recorded) == 1
+    assert recorded[0]["extra"]["local"] is True
+    assert recorded[0]["extra"]["reason_codes"] == ["cancel_pending"]
+    assert [b["status"] for _, b in server.acks] == ["received"], "not applied before the end"
+    # Another session is not affected.
+    getattr(runner, order)("read_file", {"path": "/tmp/a"}, sid="p", tcid="call_2")
+    assert runner.executions == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symbolic links")
+def test_status_write_ignores_a_link_planted_at_the_old_temporary_name(tmp_path: Path) -> None:
+    import os
+    import threading
+
+    path = tmp_path / "agenomic" / "status.json"
+    path.parent.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious")
+    planted = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    planted.symlink_to(victim)
+    plugin_mod.write_status(path, loaded=True, instance_status="active", effective_state="observe")
+    assert victim.read_text() == "precious"
+    assert json.loads(path.read_text())["loaded"] is True
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+
+
+# ---------------------------------------------------------------- concurrent approvals
+
+
+def test_every_concurrently_issued_approval_keeps_its_identity(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    target = tmp_path / "approved.txt"
+    args = {"path": str(target), "content": "x"}
+    original = adapter.client.authorize
+    inner: list[str] = []
+
+    def answer_then_interleave(sid: str, body: Any) -> Any:
+        answer = original(sid, body)
+        if body["tool_call_id"] == "call_a" and not inner:
+            # Both identical calls reached the gateway before either answer was stored:
+            # call_b's approval is stored first, then call_a's answer arrives.
+            inner.append(runner.agent_loop("write_file", args, tcid="call_b"))
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", answer_then_interleave)
+    outer = json.loads(runner.agent_loop("write_file", args, tcid="call_a"))
+    monkeypatch.undo()
+    a1 = server.pending_by_call["call_b"]  # stored first
+    a2 = server.pending_by_call["call_a"]
+    assert a1 != a2
+    assert json.loads(inner[0])["error"] == APPROVAL_MESSAGE.format(approval_id=a1)
+    assert outer["error"] == APPROVAL_MESSAGE.format(approval_id=a2)
+    server.approve(a2)  # only the approval whose message named a2 is granted
+    runner.agent_loop("write_file", args, tcid="call_c", effect=write_effect(target))
+    assert runner.executions == 1
+    assert target.read_text() == "x"
+    retry = server.authorize_calls()[-1].body
+    assert retry["tool_call_id"] == "call_a", "resumed under a2's identity, not a1's"
+    assert server.approvals[a2]["status"] == "consumed"
+    assert server.approvals[a1]["status"] == "pending"
+    assert server.reports()[0].body["logical_call_id"] == "call_a"
+    remaining = adapter._pending[("s1", "write_file", arguments_hash(args))]
+    assert [p.approval_id for p in remaining] == [a1], "a1 still waits for its own retry"
+
+    still = json.loads(runner.agent_loop("write_file", args, tcid="call_d"))
+    assert "still pending" in still["error"]
+    assert a1 in still["error"]
+    assert runner.executions == 1
+    server.approve(a1)
+    runner.agent_loop("write_file", args, tcid="call_e", effect=write_effect(target))
+    assert runner.executions == 2
+    assert server.authorize_calls()[-1].body["tool_call_id"] == "call_b"
+    assert not adapter._pending
+
+
+def test_concurrent_approvals_each_keep_their_delegation_reservation(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    args: dict[str, Any] = {"tasks": [{"goal": "same"}]}
+    original = adapter.client.authorize
+    inner: list[str] = []
+
+    def answer_then_interleave(sid: str, body: Any) -> Any:
+        answer = original(sid, body)
+        if body["tool_call_id"] == "d_a" and not inner:
+            inner.append(runner.agent_loop("delegate_task", args, sid="p", tcid="d_b"))
+        return answer
+
+    reserved: list[str] = []
+
+    def reserve(sid: str, body: Any) -> Any:
+        reserved.append(body["tool_call_id"])
+        return 200, {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
+
+    monkeypatch.setattr(adapter.client, "reserve_delegation", reserve)
+    monkeypatch.setattr(adapter.client, "authorize", answer_then_interleave)
+    runner.agent_loop("delegate_task", args, sid="p", tcid="d_a")
+    monkeypatch.setattr(adapter.client, "authorize", original)
+    assert sorted(reserved) == ["d_a", "d_b"]
+    a2 = server.pending_by_call["d_a"]
+    server.decide = lambda body: "allow"
+    server.approve(a2)
+    runner.agent_loop("delegate_task", args, sid="p", tcid="d_c")
+    assert runner.executions == 1
+    assert sorted(reserved) == ["d_a", "d_b"], "the retry reuses a reservation"
+    assert server.authorize_calls()[-1].body["tool_call_id"] == "d_a"
+    queued = adapter._delegations["p"]
+    assert [r[0] for r in queued] == ["del-d_a"], "the reservation made under a2 follows a2"
+    (slot,) = adapter._provisional_delegations
+    assert slot[3] == server.pending_by_call["d_b"]
+    (waiting,) = adapter._provisional_delegations[slot]
+    assert waiting.reservation[0] == "del-d_b"
+
+
+def _observe_decisions(server: FakeAgenomic) -> list[dict[str, Any]]:
+    return [
+        e
+        for e in server.events
+        if e.get("type") == "tool.call.decision" and e["extra"].get("local_mode") == "observe"
+    ]
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+@pytest.mark.parametrize("check", ["protected_path", "hermes_incompatible", "mutator"])
+def test_observe_records_local_checks_as_counterfactuals(
+    server: FakeAgenomic, tmp_path: Path, order: str, check: str
+) -> None:
+    server.effective_state = "observe"
+    identity = (
+        {"version": "0.22.0", "release_date": None, "commit": None}
+        if check == "hermes_incompatible"
+        else None
+    )
+    adapter = make_adapter(server.url, tmp_path, identity=identity)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "observe"
+    hellos = len(server.calls("/hello"))
+    target = tmp_path / "out.txt"
+    if check == "protected_path":
+        target = tmp_path / "home" / "skills" / "evil" / "SKILL.md"
+        target.parent.mkdir(parents=True)
+    if check == "mutator":
+
+        def other_plugin(**kwargs: Any) -> dict[str, Any]:
+            return {"action": "modify", "args": {}}
+
+        adapter.ctx._manager._hooks["pre_tool_call"].append(other_plugin)
+    runner = Runner(adapter)
+    getattr(runner, order)(
+        "write_file", {"path": str(target), "content": "x"}, effect=write_effect(target)
+    )
+    assert runner.executions == 1, "observe never changes execution"
+    assert target.read_text() == "x"
+    adapter.exporter.flush(3.0)
+    assert server.authorize_calls() == []
+    assert server.calls("/delegations") == []
+    assert len(server.calls("/hello")) == hellos, "observe asks the gateway nothing"
+    code = "foreign_mutators_unconfirmed" if check == "mutator" else check
+    recorded = _observe_decisions(server)
+    assert len(recorded) == 1, "recorded once, whichever gate sees the call first"
+    event = recorded[0]
+    assert event["decision"] == "deny"
+    assert event["extra"]["local"] is True
+    assert event["extra"]["reason_codes"] == [code]
+    assert event["extra"]["counterfactual"] == {"outcome": "deny", "reason_codes": [code]}
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_observe_records_an_outstanding_enforce_approval_without_touching_it(
+    server: FakeAgenomic, tmp_path: Path, order: str
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    target = tmp_path / "out.txt"
+    args = {"path": str(target), "content": "x"}
+    first = json.loads(
+        getattr(runner, order)("write_file", args, tcid="call_1", effect=write_effect(target))
+    )
+    approval_id = next(iter(server.approvals))
+    assert first["error"] == APPROVAL_MESSAGE.format(approval_id=approval_id)
+    assert runner.executions == 0
+    (key,) = adapter._pending
+    (entry,) = adapter._pending[key]
+    before = (entry.logical_call_id, entry.attempt, entry.approval_id, entry.claimed_by)
+    authorizations = len(server.authorize_calls())
+    approval_reads = len(server.calls(f"/approvals/{approval_id}", "GET"))
+
+    adapter._effective_state = "observe"
+    getattr(runner, order)("write_file", args, tcid="call_2", effect=write_effect(target))
+    assert runner.executions == 1, "observe never changes execution"
+    assert target.read_text() == "x"
+    assert len(server.authorize_calls()) == authorizations
+    assert len(server.calls(f"/approvals/{approval_id}", "GET")) == approval_reads
+    assert server.calls("/delegations") == []
+    assert adapter._pending[key] == [entry], "the approval stays for a later enforce retry"
+    assert (entry.logical_call_id, entry.attempt, entry.approval_id, entry.claimed_by) == before
+    assert server.approvals[approval_id]["status"] == "pending"
+    adapter.exporter.flush(3.0)
+    recorded = _observe_decisions(server)
+    assert len(recorded) == 1, "recorded once, whichever gate sees the call first"
+    event = recorded[0]
+    assert event["decision"] == "require_approval"
+    assert event["span_id"] == "call_2"
+    assert event["extra"]["approval_id"] == approval_id
+    assert event["extra"]["reason_codes"] == ["approval_pending"]
+    assert event["extra"]["counterfactual"] == {
+        "outcome": "require_approval",
+        "reason_codes": ["approval_pending"],
+    }
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_observe_without_a_local_finding_records_no_decision(
+    server: FakeAgenomic, tmp_path: Path, order: str
+) -> None:
+    server.effective_state = "observe"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    getattr(runner, order)("read_file", {"path": "/tmp/x"})
+    assert runner.executions == 1
+    adapter.exporter.flush(3.0)
+    assert _observe_decisions(server) == []
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_hello_switching_to_observe_fails_open_on_authorization_errors(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, order: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+
+    def other_plugin(**kwargs: Any) -> dict[str, Any]:
+        return {"action": "modify", "args": {}}
+
+    adapter.ctx._manager._hooks["pre_tool_call"].append(other_plugin)
+    # The hello confirming the new mutator answers observe; authorize is unreachable.
+    server.effective_state = "observe"
+    authorize_attempts: list[str] = []
+
+    def down(sid: str, body: Any) -> Any:
+        authorize_attempts.append(sid)
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(adapter.client, "authorize", down)
+    runner = Runner(adapter)
+    result = getattr(runner, order)("read_file", {"path": "/tmp/x"})
+    assert json.loads(result) == {"success": True}
+    assert runner.executions == 1, "observe never changes execution"
+    assert adapter.local_mode() == "observe"
+    assert len(server.calls("/hello")[-1].body["foreign_mutators"]) == 1
+    assert authorize_attempts == [], "observe never asks for an authorization"
+    adapter.exporter.flush(3.0)
+    assert "tool.call.requested" in server.event_types()
+
+
+@pytest.mark.parametrize("state", ["observe", "shadow"])
+def test_authorization_outage_fails_open_outside_enforce(
+    server: FakeAgenomic, tmp_path: Path, state: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._effective_state = state
+    exc = HermesApiError("unreachable", "connection refused", 0)
+    assert adapter._unavailable("s1", "read_file", "call_1", exc) is None
+    adapter._effective_state = "enforce"
+    assert adapter._unavailable("s1", "read_file", "call_1", exc)
+    adapter.exporter.flush(3.0)
+    assert "authorization.unavailable" in server.event_types()
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+@pytest.mark.parametrize("state", ["observe", "shadow", "enforce"])
+@pytest.mark.parametrize("kind", ["pause", "quarantine", "revoke"])
+def test_stop_command_between_the_gates_blocks_a_cached_authorization(
+    server: FakeAgenomic,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    order: str,
+    state: str,
+    kind: str,
+) -> None:
+    server.effective_state = state
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    # The command lands after the first gate answered, before the second gate runs.
+    second_gate = "pre_tool_call" if order == "agent_loop" else "tool_execution"
+    real = getattr(adapter, second_gate)
+
+    def stop_then_gate(**kwargs: Any) -> Any:
+        adapter.handle_command({"id": "stop-1", "kind": kind, "target_kind": "instance"})
+        return real(**kwargs)
+
+    monkeypatch.setattr(adapter, second_gate, stop_then_gate)
+    runner = Runner(adapter)
+    target = tmp_path / "raced.txt"
+    out = getattr(runner, order)(
+        "write_file", {"path": str(target), "content": "x"}, effect=write_effect(target)
+    )
+    status = {"pause": "paused", "quarantine": "quarantined", "revoke": "revoked"}[kind]
+    message = f"Agenomic: this instance is {status}; the action was not executed."
+    assert runner.executions == 0, f"a local {kind} stops the call in {state}"
+    assert not target.exists()
+    assert message in out
+    adapter.exporter.flush(3.0)
+    recorded = _local_decisions(server, message)
+    assert len(recorded) == 1
+    assert recorded[0]["extra"]["reason_codes"] == ["instance_stopped"]
+
+
+@pytest.mark.parametrize("order", ["agent_loop", "direct"])
+def test_each_child_takes_the_reservation_of_the_invocation_that_built_it(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, order: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+
+    def reserve(sid: str, body: Any) -> Any:
+        return 200, {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
+
+    monkeypatch.setattr(adapter.client, "reserve_delegation", reserve)
+    args = {"tasks": [{"goal": "x"}]}
+    kw = Runner(adapter)._kw
+
+    def start_child(child: str) -> Callable[..., str]:
+        def build(*_: Any) -> str:
+            # Hermes builds the children on the thread running delegate_task.
+            adapter.subagent_start(parent_session_id="p", child_session_id=child)
+            adapter.on_session_start(session_id=child, platform="subagent", model="m")
+            return json.dumps({"success": True})
+
+        return build
+
+    if order == "direct":
+        # Both calls are authorized (A first), then B builds its child before A.
+        assert adapter.pre_tool_call(args=args, **kw("delegate_task", "p", "d_a")) is None
+        assert adapter.pre_tool_call(args=args, **kw("delegate_task", "p", "d_b")) is None
+        adapter.tool_execution(
+            args=args, next_call=start_child("c_b"), **kw("delegate_task", "p", "d_b")
+        )
+        adapter.tool_execution(
+            args=args, next_call=start_child("c_a"), **kw("delegate_task", "p", "d_a")
+        )
+    else:
+        # A is authorized first; while A runs, B is authorized and builds its child, then A.
+        def run_a(*_: Any) -> str:
+            assert adapter.pre_tool_call(args=args, **kw("delegate_task", "p", "d_a")) is None
+            adapter.tool_execution(
+                args=args,
+                next_call=lambda *_: (
+                    adapter.pre_tool_call(args=args, **kw("delegate_task", "p", "d_b")),
+                    start_child("c_b")(),
+                )[1],
+                **kw("delegate_task", "p", "d_b"),
+            )
+            return start_child("c_a")()
+
+        adapter.tool_execution(args=args, next_call=run_a, **kw("delegate_task", "p", "d_a"))
+    admitted = {
+        r.body["hermes_session_id"]: r.body.get("delegation_id")
+        for r in server.calls("/v1/hermes/runtime/sessions")
+    }
+    assert admitted["c_a"] == "del-d_a"
+    assert admitted["c_b"] == "del-d_b"
+    assert not adapter._delegations.get("p"), "both reservations are used up"
+
+
+def test_failed_identical_delegations_each_keep_their_reservation(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    args = {"tasks": [{"goal": "x"}]}
+
+    def reserve(sid: str, body: Any) -> Any:
+        return 200, {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
+
+    monkeypatch.setattr(adapter.client, "reserve_delegation", reserve)
+    original = adapter.client.authorize
+
+    def unreachable_then_interleave(sid: str, body: Any) -> Any:
+        # d2 reserves while d1 is still deciding; both authorizations then fail.
+        if body["tool_call_id"] == "d1":
+            runner.direct("delegate_task", args, sid="p", tcid="d2")
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(adapter.client, "authorize", unreachable_then_interleave)
+    runner.direct("delegate_task", args, sid="p", tcid="d1")
+    assert runner.executions == 0
+    (waiting,) = adapter._provisional_delegations.values()
+    assert [p.reservation[0] for p in waiting] == ["del-d1", "del-d2"], "neither is dropped"
+    monkeypatch.setattr(adapter.client, "authorize", original)
+    # A retry under d2 takes back d2's reservation; another retry takes the oldest one.
+    runner.direct("delegate_task", args, sid="p", tcid="d2")
+    runner.direct("delegate_task", args, sid="p", tcid="d3")
+    assert runner.executions == 2
+    assert [r[0] for r in adapter._delegations["p"]] == ["del-d2", "del-d1"]
+    assert not adapter._provisional_delegations
+
+
+def test_call_blocked_before_the_middleware_retires_its_authorization(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+
+    def reserve(sid: str, body: Any) -> Any:
+        return 200, {"decision": "allow", "delegation_id": f"del-{body['tool_call_id']}"}
+
+    monkeypatch.setattr(adapter.client, "reserve_delegation", reserve)
+    args = {"tasks": [{"goal": "x"}]}
+    kw = Runner(adapter)._kw("delegate_task", "p", "d1")
+    # Direct dispatch: this adapter authorizes, then a later pre_tool_call callback blocks
+    # and Hermes reports the call blocked; tool_execution is never entered.
+    assert adapter.pre_tool_call(args=args, **kw) is None
+    assert [r[0] for r in adapter._delegations["p"]] == ["del-d1"]
+    adapter.post_tool_call(args=args, result="{}", status="blocked", **kw)
+    assert adapter._auth[("p", "delegate_task", "d1")].state == "done"
+    assert not adapter._delegations.get("p"), "the blocked call's reservation is dropped"
+    # A child started later without a reservation of its own never takes d1's delegation.
+    adapter.subagent_start(parent_session_id="p", child_session_id="c1")
+    adapter.on_session_start(session_id="c1", platform="subagent", model="m")
+    admitted = {
+        r.body["hermes_session_id"]: r.body.get("delegation_id")
+        for r in server.calls("/v1/hermes/runtime/sessions")
+    }
+    assert admitted["c1"] is None
+    adapter.exporter.flush(3.0)
+    assert [e for e in server.events if e.get("type") == "tool.call.not_executed"]
+
+
+@pytest.mark.parametrize("same_args", [True, False], ids=["same_args", "other_args"])
+def test_observe_between_the_gates_never_leaves_the_authorization_reusable(
+    server: FakeAgenomic, tmp_path: Path, same_args: bool
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    assert adapter.pre_tool_call(args=args, **kw) is None
+    first = len(server.authorize_calls())
+    # The server switches to observe before the execution gate runs.
+    adapter._set_state("observe")
+    exec_args = args if same_args else {"path": "/tmp/b"}
+    adapter.tool_execution(args=exec_args, next_call=lambda *_: "{}", **kw)
+    assert adapter._auth[("s1", "read_file", "call_1")].state == "done"
+    # Back in enforce, a call reusing the id asks the gateway again.
+    adapter._set_state("enforce")
+    runner.direct("read_file", args, tcid="call_1")
+    assert len(server.authorize_calls()) == first + 1, "no reuse of the old permit"
+
+
+@pytest.mark.parametrize("first", ["subagent", "session"])
+def test_session_and_subagent_cancels_of_one_child_are_both_applied(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    monkeypatch.setattr(adapter, "_interrupt_subagent", lambda sid: True)
+    adapter.subagent_start(parent_session_id="p", child_session_id="c", child_subagent_id="sa-1")
+    adapter.on_session_start(session_id="c", platform="subagent", model="m")
+    commands = {
+        "subagent": {
+            "id": "k_sub",
+            "kind": "cancel",
+            "target_kind": "subagent",
+            "target_ref": "sa-1",
+        },
+        "session": {"id": "k_ses", "kind": "cancel", "target_kind": "session", "target_ref": "c"},
+    }
+    for kind in (first, "session" if first == "subagent" else "subagent"):
+        adapter.handle_command({**commands[kind], "status": "requested"})
+    adapter.subagent_stop(parent_session_id="p", child_session_id="c", child_status="interrupted")
+    applied = sorted(c for c, b in server.acks if b["status"] == "applied")
+    assert applied == ["k_ses", "k_sub"], "every cancel waiting for this end is acknowledged"
+
+
+@pytest.mark.parametrize("target_kind", ["session", "subagent"])
+def test_every_cancel_of_one_target_is_applied(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target_kind: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    monkeypatch.setattr(adapter, "_interrupt_subagent", lambda sid: True)
+    adapter.subagent_start(parent_session_id="p", child_session_id="c", child_subagent_id="sa-1")
+    adapter.on_session_start(session_id="c", platform="subagent", model="m")
+    target = "c" if target_kind == "session" else "sa-1"
+    for command_id in ("k1", "k2"):
+        adapter.handle_command(
+            {
+                "id": command_id,
+                "kind": "cancel",
+                "target_kind": target_kind,
+                "target_ref": target,
+                "status": "requested",
+            }
+        )
+    adapter.subagent_stop(parent_session_id="p", child_session_id="c", child_status="interrupted")
+    applied = [c for c, b in server.acks if b["status"] == "applied"]
+    assert applied == ["k1", "k2"], "each waiting cancel is acknowledged once"
+
+
+def test_shadow_decision_is_asked_again_when_enforce_starts_between_the_gates(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.effective_state = "shadow"
+    server.decide = lambda body: "deny"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "shadow"
+    runner = Runner(adapter)
+    kw = runner._kw("write_file", "s1", "call_1")
+    args = {"path": "/tmp/x", "content": "y"}
+    # Direct dispatch: shadow records the deny and lets the call through...
+    assert adapter.pre_tool_call(args=args, **kw) is None
+    asked = len(server.authorize_calls())
+    # ...then enforce becomes active before the execution gate.
+    server.effective_state = "enforce"
+    adapter._set_state("enforce")
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert len(server.authorize_calls()) == asked + 1, "decided again under enforce"
+    assert runner.executions == 0, "the enforce deny blocks"
+    assert "error" in json.loads(str(out))
+
+
+def test_enforce_starting_inside_a_shadow_execution_blocks_at_the_second_gate(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server.effective_state = "shadow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real = adapter.pre_tool_call
+
+    def enforce_then_gate(**kwargs: Any) -> Any:
+        server.effective_state = "enforce"
+        adapter._set_state("enforce")
+        return real(**kwargs)
+
+    monkeypatch.setattr(adapter, "pre_tool_call", enforce_then_gate)
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("write_file", {"path": "/tmp/x", "content": "y"}))
+    assert runner.executions == 0
+    assert "enforce became active" in out["error"]
+
+
+def test_argument_change_never_blocks_once_shadow_is_active(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    real = adapter.pre_tool_call
+
+    def shadow_then_gate(**kwargs: Any) -> Any:
+        server.effective_state = "shadow"
+        adapter._set_state("shadow")
+        # Another plugin changed the arguments before this gate sees them.
+        return real(**{**kwargs, "args": {"path": "/tmp/b"}})
+
+    monkeypatch.setattr(adapter, "pre_tool_call", shadow_then_gate)
+    runner = Runner(adapter)
+    # Agent loop: the middleware authorized under enforce; shadow is active when the
+    # second gate sees the changed arguments.
+    runner.agent_loop("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 1, "shadow never changes execution"
+
+
+@pytest.mark.parametrize("newer", ["enforce_blocked", "paused", "quarantined", "revoked"])
+def test_stale_observe_answer_never_downgrades_a_newer_blocking_state(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newer: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    original = adapter.client.authorize
+
+    def observe_answer_delayed(sid: str, body: Any) -> Any:
+        server.effective_state = "observe"
+        answer = original(sid, body)
+        # The heartbeat thread receives a newer blocking state before this answer lands.
+        adapter._set_state(newer)
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", observe_answer_delayed)
+    runner = Runner(adapter)
+    out = json.loads(runner.direct("write_file", {"path": "/tmp/x", "content": "y"}))
+    assert adapter._effective_state == newer, "the newer state is kept"
+    assert runner.executions == 0
+    assert newer in out["error"]
+
+
+def test_shadow_records_an_outstanding_enforce_approval_without_touching_it(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.decide = lambda body: "require_approval"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    args = {"path": str(tmp_path / "out.txt"), "content": "x"}
+    runner.direct("write_file", args, tcid="call_1")
+    approval_id = next(iter(server.approvals))
+    (key,) = adapter._pending
+    (entry,) = adapter._pending[key]
+    # The server switches to shadow: the retry runs and the approval is recorded.
+    server.effective_state = "shadow"
+    server.decide = lambda body: "allow"
+    adapter._set_state("shadow")
+    runner.direct("write_file", args, tcid="call_2")
+    assert runner.executions == 1, "shadow never changes execution"
+    assert adapter._pending[key] == [entry], "the approval stays for a later enforce retry"
+    assert entry.claimed_by is None
+    adapter.exporter.flush(3.0)
+    recorded = [
+        e
+        for e in server.events
+        if e.get("type") == "tool.call.decision"
+        and e["extra"].get("local_mode") == "shadow"
+        and e["extra"].get("reason_codes") == ["approval_pending"]
+    ]
+    assert len(recorded) == 1
+    assert recorded[0]["decision"] == "require_approval"
+    assert recorded[0]["extra"]["approval_id"] == approval_id
+    assert recorded[0]["span_id"] == "call_2"
+
+
+def test_dropped_acknowledgement_lets_the_command_be_delivered_again(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    real = adapter.client.ack_command
+
+    def ack_endpoint_down(command_id: str, status: str, detail: Any) -> Any:
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(adapter.client, "ack_command", ack_endpoint_down)
+    limit = adapter._ack_retries.maxlen
+    assert limit is not None
+    # Each command queues two acknowledgements (received, applied): the oldest are dropped.
+    for i in range(limit):
+        adapter.handle_command({"id": f"c{i}", "kind": "pause", "target_kind": "instance"})
+    # c0's terminal acknowledgement was dropped: its result is kept as a tombstone.
+    assert adapter._terminal_acks["c0"][0] == "applied"
+    monkeypatch.setattr(adapter.client, "ack_command", real)
+    adapter.handle_command({"id": "c0", "kind": "pause", "target_kind": "instance"})
+    assert ("c0", "applied") in [(c, b.get("status")) for c, b in server.acks]
+    assert "c0" not in adapter._terminal_acks
+
+
+def test_redelivered_cancel_whose_applied_ack_was_dropped_is_answered_applied(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    monkeypatch.setattr(adapter, "_interrupt_subagent", lambda sid: True)
+    real = adapter.client.ack_command
+
+    def ack_endpoint_down(command_id: str, status: str, detail: Any) -> Any:
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(adapter.client, "ack_command", ack_endpoint_down)
+    adapter.subagent_start(parent_session_id="p", child_session_id="c", child_subagent_id="sa-1")
+    adapter.on_session_start(session_id="c", platform="subagent", model="m")
+    cancel = {"id": "k1", "kind": "cancel", "target_kind": "session", "target_ref": "c"}
+    adapter.handle_command({**cancel, "status": "requested"})
+    adapter.subagent_stop(parent_session_id="p", child_session_id="c", child_status="interrupted")
+    limit = adapter._ack_retries.maxlen
+    assert limit is not None
+    for i in range(limit):  # the outage drops k1's acknowledgements
+        adapter.handle_command({"id": f"x{i}", "kind": "pause", "target_kind": "instance"})
+    monkeypatch.setattr(adapter.client, "ack_command", real)
+    # The session ended long ago: re-executing the cancel would answer refused.
+    adapter.handle_command({**cancel, "status": "received"})
+    k1 = [b.get("status") for c, b in server.acks if c == "k1"]
+    assert k1 == ["applied"], "the observed result is delivered, not a refusal"
+
+
+@pytest.mark.parametrize("request_kind", ["hello", "create_session"])
+def test_delayed_state_response_never_replaces_a_newer_heartbeat_state(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request_kind: str
+) -> None:
+    server.effective_state = "observe"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "observe"
+    original = getattr(adapter.client, request_kind)
+
+    def overtaken_by_a_heartbeat(*args: Any) -> Any:
+        answer = original(*args)  # carries effective_state "observe"
+        # The heartbeat thread sends a later request and applies enforce first.
+        adapter._set_state("enforce", adapter._state_request())
+        return answer
+
+    monkeypatch.setattr(adapter.client, request_kind, overtaken_by_a_heartbeat)
+    if request_kind == "hello":
+        assert adapter._hello()
+    else:
+        adapter.on_session_start(session_id="s-late", platform="cli")
+    assert adapter._effective_state == "enforce", "the stale observe answer is ignored"
+    assert adapter.local_mode() == "enforce"
+
+
+@pytest.mark.parametrize("newer", ["shadow", "observe"])
+def test_delayed_enforce_verdict_is_read_in_the_newer_nonblocking_mode(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newer: str
+) -> None:
+    server.decide = lambda body: "deny"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    original = adapter.client.authorize
+
+    def enforce_deny_overtaken(sid: str, body: Any) -> Any:
+        answer = original(sid, body)  # an enforce deny
+        adapter._set_state(newer, adapter._state_request())  # newer heartbeat
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", enforce_deny_overtaken)
+    runner = Runner(adapter)
+    runner.direct("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 1, f"{newer} never blocks on a stale enforce deny"
+    assert adapter._effective_state == newer
+
+
+def test_failed_mutator_hello_blocks_when_enforce_starts_meanwhile(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server.effective_state = "shadow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "shadow"
+
+    def other_plugin(**kwargs: Any) -> dict[str, Any]:
+        return {"action": "modify", "args": {}}
+
+    adapter.ctx._manager._hooks["pre_tool_call"].append(other_plugin)
+
+    def hello_fails_while_enforce_starts(body: Any) -> Any:
+        server.effective_state = "enforce"
+        adapter._set_state("enforce", adapter._state_request())  # concurrent heartbeat
+        raise HermesApiError("unreachable", "connection refused", 0)
+
+    monkeypatch.setattr(adapter.client, "hello", hello_fails_while_enforce_starts)
+    runner = Runner(adapter)
+    out = json.loads(runner.direct("read_file", {"path": "/tmp/a"}))
+    assert runner.executions == 0
+    assert "has not confirmed them" in out["error"]
+
+
+def test_repeated_enforce_answer_orders_an_older_heartbeat_out(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    runner = Runner(adapter)
+    runner.direct("read_file", {"path": "/tmp/a"}, tcid="call_0")  # session admitted
+    heartbeat_seq = adapter._state_request()  # a heartbeat is in flight
+    runner.direct("read_file", {"path": "/tmp/a"}, tcid="call_1")  # authorize: enforce
+    assert not adapter._set_state("observe", heartbeat_seq), "the older answer is rejected"
+    assert adapter.local_mode() == "enforce"
+
+
+@pytest.mark.parametrize("interrupted", [True, False])
+def test_subagent_ending_while_it_is_interrupted_applies_the_cancel(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted: bool
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.subagent_start(parent_session_id="p", child_session_id="c", child_subagent_id="sa-1")
+    adapter.on_session_start(session_id="c", platform="subagent", model="m")
+
+    def stops_before_the_interrupt_returns(subagent_id: str) -> bool:
+        # The child ends on another thread before the interrupt call returns.
+        adapter.subagent_stop(
+            parent_session_id="p", child_session_id="c", child_status="interrupted"
+        )
+        return interrupted
+
+    monkeypatch.setattr(adapter, "_interrupt_subagent", stops_before_the_interrupt_returns)
+    adapter.handle_command(
+        {"id": "k1", "kind": "cancel", "target_kind": "subagent", "target_ref": "sa-1"}
+    )
+    k1 = [b.get("status") for c, b in server.acks if c == "k1"]
+    assert k1 == ["received", "applied"], "the end found the cancel waiting"
+    assert not adapter._cancel_subagents
+
+
+def test_stale_observe_verdict_under_a_newer_shadow_proceeds(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    original = adapter.client.authorize
+
+    def observe_answer_overtaken_by_shadow(sid: str, body: Any) -> Any:
+        server.effective_state = "observe"
+        answer = original(sid, body)  # an observe answer
+        adapter._set_state("shadow", adapter._state_request())
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", observe_answer_overtaken_by_shadow)
+    runner = Runner(adapter)
+    runner.direct("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 1, "shadow never changes execution"
+    assert adapter.local_mode() == "shadow"
+
+
+def test_cancel_racing_a_session_end_is_applied_or_refused_never_stuck(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    real_sessions = adapter._sessions
+    ended = threading.Event()
+
+    class EndsDuringLookup(dict):  # type: ignore[type-arg]
+        def get(self, key: Any, default: Any = None) -> Any:
+            if key == "s1" and not ended.is_set():
+                ended.set()
+                # The session ends on another thread while the cancel is being registered.
+                t = threading.Thread(
+                    target=adapter.on_session_finalize, kwargs={"session_id": "s1"}
+                )
+                t.start()
+                t.join(0.2)
+            return super().get(key, default)
+
+    adapter._sessions = EndsDuringLookup(real_sessions)
+    adapter.handle_command(
+        {"id": "k1", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+    assert wait_for(lambda: not adapter._sessions["s1"].active)
+    assert wait_for(
+        lambda: [b.get("status") for c, b in server.acks if c == "k1"][-1:] != ["received"]
+    )
+    statuses = [b.get("status") for c, b in server.acks if c == "k1"]
+    assert statuses[-1] in ("applied", "refused")
+    assert "s1" not in adapter._cancel_sessions, "no waiter left behind"
+
+
+@pytest.mark.parametrize("newer", ["enforce_blocked", "paused", "quarantined", "revoked"])
+def test_stale_allow_after_a_blocking_heartbeat_is_blocked(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newer: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    original = adapter.client.authorize
+
+    def allow_overtaken(sid: str, body: Any) -> Any:
+        answer = original(sid, body)  # an enforce allow
+        adapter._set_state(newer, adapter._state_request())  # newer blocking heartbeat
+        return answer
+
+    monkeypatch.setattr(adapter.client, "authorize", allow_overtaken)
+    runner = Runner(adapter)
+    out = json.loads(runner.direct("read_file", {"path": "/tmp/a"}))
+    assert runner.executions == 0
+    assert newer in out["error"]
+
+
+def test_cached_permit_is_decided_again_once_enforce_becomes_blocked(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    assert adapter.pre_tool_call(args=args, **kw) is None  # cached enforce permit
+    asked = len(server.authorize_calls())
+    # enforce -> enforce_blocked between the gates (both map to the enforce local mode)
+    server.effective_state = "enforce_blocked"
+    adapter._set_state("enforce_blocked")
+    adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, "never executed under the old permit"
+    assert adapter._auth[("s1", "read_file", "call_1")].state == "done"
+    assert len(server.authorize_calls()) >= asked
+
+
+@pytest.mark.parametrize("newer", ["enforce_blocked", "paused"])
+def test_allow_losing_the_state_update_race_to_a_blocking_heartbeat_is_blocked(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, newer: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    runner.direct("read_file", {"path": "/tmp/a"}, tcid="call_0")  # session admitted
+    real_set_state = adapter._set_state
+
+    def blocking_heartbeat_wins(state: object, seq: Any = None) -> bool:
+        if seq is not None and state == "enforce":
+            # The heartbeat (sent later) applies its blocking state just before this update.
+            real_set_state(newer, adapter._state_request())
+        return real_set_state(state, seq)
+
+    monkeypatch.setattr(adapter, "_set_state", blocking_heartbeat_wins)
+    before = runner.executions
+    out = json.loads(runner.agent_loop("read_file", {"path": "/tmp/a"}, tcid="call_1"))
+    assert runner.executions == before, "not executed under the stale allow"
+    assert newer in out["error"]
+
+
+def test_enforce_applied_after_the_stale_check_stops_a_shadow_admission(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server.effective_state = "shadow"
+    server.decide = lambda body: "deny"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    kw = runner._kw("write_file", "s1", "call_1")
+    args = {"path": "/tmp/x", "content": "y"}
+    assert adapter.pre_tool_call(args=args, **kw) is None  # cached shadow decision
+    real_retire = adapter._retire_stale
+
+    def heartbeat_right_after_the_check(auth: Any) -> bool:
+        retired = real_retire(auth)
+        adapter._set_state("enforce", adapter._state_request())  # lands before admission
+        return retired
+
+    monkeypatch.setattr(adapter, "_retire_stale", heartbeat_right_after_the_check)
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, "a shadow decision never executes under enforce"
+    assert "mode changed" in json.loads(str(out))["error"]
+    assert adapter._auth[("s1", "write_file", "call_1")].state == "done"
+
+
+@pytest.mark.parametrize("command", ["pause", "quarantine", "revoke", "cancel_session"])
+def test_local_command_applied_after_the_first_check_stops_admission(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    assert adapter.pre_tool_call(args=args, **kw) is None  # cached enforce permit
+    real_retire = adapter._retire_stale
+
+    def command_right_after_the_check(auth: Any) -> bool:
+        retired = real_retire(auth)
+        if command == "cancel_session":
+            cmd = {"id": "k1", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+        else:
+            cmd = {"id": "k1", "kind": command, "target_kind": "instance"}
+        adapter.handle_command({**cmd, "status": "requested"})  # lands before admission
+        return retired
+
+    monkeypatch.setattr(adapter, "_retire_stale", command_right_after_the_check)
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, "never executed once the local command applied"
+    message = json.loads(str(out))["error"]
+    assert "not executed" in message
+    assert adapter._auth[("s1", "read_file", "call_1")].state == "done"
+    adapter.exporter.flush(3.0)
+    recorded = _local_decisions(server, message)
+    assert len(recorded) == 1
+    reason = "cancel_pending" if command == "cancel_session" else "instance_stopped"
+    assert recorded[0]["extra"]["reason_codes"] == [reason]
+
+
+def test_blocking_state_applied_after_the_stale_check_stops_admission(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    assert adapter.pre_tool_call(args=args, **kw) is None  # cached enforce permit
+    real_retire = adapter._retire_stale
+
+    def heartbeat_right_after_the_check(auth: Any) -> bool:
+        retired = real_retire(auth)
+        adapter._set_state("paused", adapter._state_request())  # lands before admission
+        return retired
+
+    monkeypatch.setattr(adapter, "_retire_stale", heartbeat_right_after_the_check)
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, "never executed under the stale permit"
+    assert "paused" in json.loads(str(out))["error"]
+    assert adapter._auth[("s1", "read_file", "call_1")].state == "done"
+
+
+@pytest.mark.parametrize("status", [408, 425, 429])
+def test_transient_4xx_command_ack_is_retried(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    from agenomic.integrations.hermes.client import HermesApiError
+
+    adapter = make_adapter(server.url, tmp_path)
+    original = adapter.client.ack_command
+    failures = {"n": 1}
+
+    def rate_limited(command_id: str, ack: str, detail: dict[str, Any]) -> Any:
+        if ack == "applied" and failures["n"]:
+            failures["n"] -= 1
+            raise HermesApiError("rate_limited", "slow down", status)
+        return original(command_id, ack, detail)
+
+    monkeypatch.setattr(adapter.client, "ack_command", rate_limited)
+    adapter.handle_command(
+        {"id": "c1", "kind": "pause", "target_kind": "instance", "status": "requested"}
+    )
+    assert [b["status"] for _, b in server.acks] == ["received"]
+    adapter._retry_acks()
+    assert [b["status"] for _, b in server.acks] == ["received", "applied"]
+
+
+@pytest.mark.parametrize("applied", ["pause", "cancel_session", "enforce", "quarantined"])
+def test_observe_execution_rechecks_blockers_applied_during_its_checks(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, applied: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    assert adapter.pre_tool_call(args=args, **kw) is None  # cached enforce permit
+    adapter._set_state("observe", adapter._state_request())  # then observe applies
+    real_checks = adapter._observe_local_checks
+
+    def command_during_the_checks(*a: Any, **k: Any) -> Any:
+        out = real_checks(*a, **k)
+        if applied == "pause":
+            adapter.handle_command({"id": "k1", "kind": "pause", "target_kind": "instance"})
+        elif applied == "cancel_session":
+            adapter.handle_command(
+                {"id": "k1", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+            )
+        else:
+            adapter._set_state(applied, adapter._state_request())
+        return out
+
+    monkeypatch.setattr(adapter, "_observe_local_checks", command_during_the_checks)
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, f"{applied} applied during the observe checks stops the call"
+    assert "not executed" in json.loads(str(out))["error"]
+    assert adapter._auth[("s1", "read_file", "call_1")].state == "done"
+
+
+def test_foreign_mutator_label_never_uses_the_repr(server: FakeAgenomic, tmp_path: Path) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+
+    class TokenHook:
+        def __init__(self) -> None:
+            self.token = "sk-live-secret-token"
+
+        def __repr__(self) -> str:
+            return f"TokenHook(token={self.token!r})"
+
+        def __call__(self, **kwargs: Any) -> None:
+            return None
+
+    adapter.ctx._manager._hooks["pre_tool_call"].append(TokenHook())
+    adapter._ensure_started("cli")
+    hello = server.calls("/hello")[0].body
+    assert "sk-live-secret-token" not in json.dumps(hello)
+    labels = [f["callback"] for f in hello["foreign_mutators"]]
+    assert any("TokenHook" in label for label in labels)
+
+
+@pytest.mark.parametrize("applied", ["pause", "enforce"])
+def test_inner_gate_rechecks_observe_before_letting_the_call_run(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, applied: str
+) -> None:
+    server.effective_state = "observe"
+    server.decide = lambda body: "deny"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "observe"
+    runner = Runner(adapter)
+    real_checks = adapter._observe_local_checks
+
+    def applied_during_the_inner_gate(*a: Any, **k: Any) -> Any:
+        out = real_checks(*a, **k)
+        if a[-1] == "pre":  # the middleware's observe admission is already done
+            if applied == "pause":
+                adapter.handle_command({"id": "k1", "kind": "pause", "target_kind": "instance"})
+            else:
+                server.effective_state = "enforce"
+                adapter._set_state("enforce", adapter._state_request())
+        return out
+
+    monkeypatch.setattr(adapter, "_observe_local_checks", applied_during_the_inner_gate)
+    out = runner.agent_loop("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 0, f"{applied} applied inside the middleware stops the call"
+    assert "error" in json.loads(out)
+
+
+@pytest.mark.parametrize("state", ["enforce_blocked", "paused"])
+def test_inner_gate_rejects_a_cached_permit_once_a_blocking_state_applies(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    runner = Runner(adapter)
+    real_emit = adapter._emit
+
+    def heartbeat_inside_the_middleware(event_type: str, *a: Any, **k: Any) -> Any:
+        if event_type == "tool.call.requested":  # inner pre_tool_call, after admission
+            adapter._set_state(state, adapter._state_request())
+        return real_emit(event_type, *a, **k)
+
+    monkeypatch.setattr(adapter, "_emit", heartbeat_inside_the_middleware)
+    out = runner.agent_loop("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 0, f"{state} applied inside the middleware stops the call"
+    assert state in json.loads(out)["error"]
+
+
+@pytest.mark.parametrize("admitted", ["observe", "shadow"])
+def test_inner_gate_blocks_when_enforce_starts_after_the_middleware_admission(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, admitted: str
+) -> None:
+    server.effective_state = admitted
+    server.decide = lambda body: "allow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == admitted
+    runner = Runner(adapter)
+    real_emit = adapter._emit
+
+    def enforce_inside_the_middleware(event_type: str, *a: Any, **k: Any) -> Any:
+        if event_type == "tool.call.requested":  # inner pre_tool_call, after admission
+            server.effective_state = "enforce"
+            adapter._set_state("enforce", adapter._state_request())
+        return real_emit(event_type, *a, **k)
+
+    monkeypatch.setattr(adapter, "_emit", enforce_inside_the_middleware)
+    asked = len(server.authorize_calls())
+    out = runner.agent_loop("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 0, "never run under a permit no execution plan owns"
+    assert f"decided in {admitted}" in json.loads(out)["error"]
+    assert len(server.authorize_calls()) == asked + (1 if admitted == "shadow" else 0)
+    assert not [a for a in adapter._auth.values() if a.state == "authorized"], (
+        "no authorization is left reusable"
+    )
+
+
+def test_start_up_failure_still_starts_the_heartbeat_and_is_retried(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._start_threads = True
+    beats: list[bool] = []
+    monkeypatch.setattr(adapter, "_heartbeat_loop", lambda: beats.append(True))
+    real_discover = adapter.discover_tools
+    failures = {"n": 1}
+
+    def broken_registry() -> int:
+        if failures["n"]:
+            failures["n"] -= 1
+            raise RuntimeError("third-party registry failed")
+        return real_discover()
+
+    monkeypatch.setattr(adapter, "discover_tools", broken_registry)
+    try:
+        adapter._ensure_started("cli")  # never raises
+        assert adapter._thread is not None
+        adapter._thread.join(2.0)
+        assert beats == [True], "the heartbeat thread runs despite the failed start up"
+        assert json.loads(adapter.status_file.read_text())["loaded"] is True
+        adapter._tools_sent = False
+        adapter.tick()
+        assert failures["n"] == 0, "discovery is retried by the heartbeat"
+    finally:
+        adapter.shutdown()
+
+
+def test_staged_skill_carrying_a_credential_is_never_proposed(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    secret = "agmhr_" + "s3cretvalue123456"
+    record = {
+        "id": "ab12cd34",
+        "summary": "new skill",
+        "payload": {
+            "action": "create",
+            "name": "summarize",
+            "content": f"---\nname: summarize\n---\nuse token {secret}",
+        },
+    }
+    fake = types.ModuleType("tools.write_approval")
+    fake.list_pending = lambda subsystem: [record] if subsystem == "skills" else []  # type: ignore[attr-defined]
+    fake.skill_pending_diff = lambda r: r["payload"]["content"]  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools.write_approval", fake)
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.post_tool_call(
+        tool_name="skill_manage",
+        args={"action": "create", "name": "summarize"},
+        result=json.dumps({"success": True, "staged": True, "pending_id": "ab12cd34"}),
+        session_id="s1",
+        tool_call_id="call_s",
+        status="ok",
+    )
+    assert server.calls("/proposals") == [], "a credential-bearing proposal is not sent"
+    adapter.exporter.flush(3.0)
+    assert secret not in json.dumps([r.body for r in server.requests])
+    refused = [e for e in server.events if e["type"] == "skill.proposal.refused"]
+    assert refused[0]["extra"]["reason_codes"] == ["credential_detected"]
+
+
+def test_hello_never_sends_provider_url_credentials(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    url = "https://user:pa55word@gw.example/v1?key=xyz123secret"
+    monkeypatch.setattr(
+        plugin_mod,
+        "_hermes_config",
+        lambda: {"model": {"provider": "custom", "base_url": url}},
+    )
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    hello = server.calls("/hello")[0].body
+    sent = json.dumps(hello)
+    assert "pa55word" not in sent
+    assert "xyz123secret" not in sent
+    assert hello["provider"]["base_url"].startswith("https://***@gw.example/v1")
+
+
+def test_compound_command_mentioning_the_guard_is_a_foreign_mutator(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+
+    def guard(**kwargs: Any) -> None:
+        return None
+
+    def wrapper(**kwargs: Any) -> None:
+        return None
+
+    guard.__qualname__ = "shell_hook[pre_tool_call:agenomic-hermes-guard]"
+    wrapper.__qualname__ = "shell_hook[pre_tool_call:agenomic-hermes-guard && other-check]"
+    adapter.ctx._manager._hooks["pre_tool_call"] += [guard, wrapper]
+    found = adapter.foreign_mutators()
+    assert [f["callback"] for f in found] == [wrapper.__qualname__]
+
+
+def test_failing_tool_registry_never_stops_the_heartbeat(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+
+    def broken_registry() -> int:
+        raise RuntimeError("third-party registry failed")
+
+    monkeypatch.setattr(adapter, "discover_tools", broken_registry)
+    adapter._tools_sent = False
+    beats = len(server.calls("/heartbeat"))
+    adapter.tick()
+    adapter.tick()
+    assert len(server.calls("/heartbeat")) == beats + 2, "commands are still polled"
+
+
+def test_terminal_ack_queued_during_a_rebuild_is_never_lost(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+    from collections import deque
+
+    from agenomic.integrations.hermes.client import HermesApiError
+
+    adapter = make_adapter(server.url, tmp_path)
+
+    def gateway_down_for_c2(command_id: str, status: str, detail: dict[str, Any]) -> Any:
+        if command_id == "c2":
+            raise HermesApiError("unavailable", "down", 503)
+        return {}
+
+    monkeypatch.setattr(adapter.client, "ack_command", gateway_down_for_c2)
+    racer: dict[str, threading.Thread] = {}
+
+    class RacingDeque(deque):  # type: ignore[type-arg]
+        def clear(self) -> None:
+            if "t" not in racer:
+                # A terminal callback fails its ack while the heartbeat rebuilds the queue.
+                racer["t"] = threading.Thread(target=adapter._ack, args=("c2", "applied", {}))
+                racer["t"].start()
+                racer["t"].join(0.3)
+            super().clear()
+
+    adapter._ack_retries = RacingDeque([("c1", "received", {})], maxlen=500)
+    adapter._drop_superseded_acks("c1", "applied")
+    racer["t"].join(5.0)
+    assert [(c, s) for c, s, _ in adapter._ack_retries] == [("c2", "applied")]
+
+
+def test_foreign_hook_label_carrying_a_token_is_masked_in_hello(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    secret = "agmhr_" + "s3cretvalue123456"
+
+    def hook(**kwargs: Any) -> None:
+        return None
+
+    hook.__qualname__ = f"shell_hook[pre_tool_call:check --token {secret}]"
+    adapter.ctx._manager._hooks["pre_tool_call"].append(hook)
+    adapter._ensure_started("cli")
+    hello = server.calls("/hello")[0].body
+    assert len(hello["foreign_mutators"]) == 1
+    assert "s3cretvalue123456" not in json.dumps(hello)
+
+
+@pytest.mark.parametrize("then", ["enforce", "shadow"])
+def test_shadow_fail_open_admission_never_leaves_an_orphan_authorization(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, then: str
+) -> None:
+    server.effective_state = "shadow"
+    server.decide = lambda body: "allow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "shadow"
+    server.authorize_status = 503  # the middleware's authorization fails open in shadow
+    runner = Runner(adapter)
+    real_emit = adapter._emit
+
+    def recover_inside_the_middleware(event_type: str, *a: Any, **k: Any) -> Any:
+        if event_type == "tool.call.requested":  # inner pre_tool_call, after admission
+            server.authorize_status = None
+            if then == "enforce":
+                server.effective_state = "enforce"
+                adapter._set_state("enforce", adapter._state_request())
+        return real_emit(event_type, *a, **k)
+
+    monkeypatch.setattr(adapter, "_emit", recover_inside_the_middleware)
+    out = runner.agent_loop("read_file", {"path": "/tmp/a"})
+    if then == "enforce":
+        assert runner.executions == 0
+        assert "decided in shadow" in json.loads(out)["error"]
+    else:
+        assert runner.executions == 1, "shadow never blocks"
+    assert not [a for a in adapter._auth.values() if a.state == "authorized"], (
+        "no authorization is left reusable"
+    )
+
+
+def test_invalid_reload_shuts_the_previous_adapter_down(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hh"))
+    monkeypatch.delenv("AGENOMIC_HERMES_CONFIG", raising=False)
+    monkeypatch.setenv("AGENOMIC_HERMES_RUNTIME_TOKEN", "agmhr_entry")
+    plugin_mod.register(FakeCtx({"endpoint": server.url}))
+    previous = plugin_mod.current_adapter()
+    assert previous is not None
+    status = tmp_path / "hh" / "agenomic" / "status.json"
+    monkeypatch.delenv("AGENOMIC_HERMES_RUNTIME_TOKEN")  # the reload's config is invalid
+    try:
+        with pytest.raises(ConfigError):
+            plugin_mod.register(FakeCtx({"endpoint": server.url}))
+        assert previous._shut_down, "the old adapter never keeps running"
+        assert plugin_mod.current_adapter() is None
+        previous._write_status()  # a late refresh from the old adapter
+        assert json.loads(status.read_text())["loaded"] is False
+    finally:
+        previous.shutdown()
+
+
+@pytest.mark.parametrize("applied", ["pause", "cancel_session", "enforce", "enforce_blocked"])
+def test_shadow_fail_open_rechecks_before_executing(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, applied: str
+) -> None:
+    server.effective_state = "shadow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert adapter.local_mode() == "shadow"
+    server.authorize_status = 503  # fails open in shadow
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    real_unavailable = adapter._unavailable
+
+    def applied_during_the_outage(*a: Any, **k: Any) -> Any:
+        out = real_unavailable(*a, **k)  # read the shadow mode: fail open
+        if applied == "pause":
+            adapter.handle_command({"id": "k1", "kind": "pause", "target_kind": "instance"})
+        elif applied == "cancel_session":
+            adapter.handle_command(
+                {"id": "k1", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+            )
+        else:
+            adapter._set_state(applied, adapter._state_request())
+        return out
+
+    monkeypatch.setattr(adapter, "_unavailable", applied_during_the_outage)
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, f"{applied} applied during the outage stops the call"
+    assert "not executed" in json.loads(str(out))["error"]
+
+
+@pytest.mark.parametrize("applied", ["pause", "enforce"])
+def test_pre_tool_call_failure_fallback_rechecks_before_allowing(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, applied: str
+) -> None:
+    server.effective_state = "shadow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "shadow"
+
+    def broken_authorize(**kwargs: Any) -> Any:
+        raise RuntimeError("third-party registry failed")
+
+    monkeypatch.setattr(adapter, "authorize", broken_authorize)
+    real_unavailable = adapter._unavailable
+
+    def applied_during_the_fallback(*a: Any, **k: Any) -> Any:
+        out = real_unavailable(*a, **k)  # read shadow: no block message
+        if applied == "pause":
+            adapter.handle_command({"id": "k1", "kind": "pause", "target_kind": "instance"})
+        else:
+            adapter._set_state("enforce", adapter._state_request())
+        return out
+
+    monkeypatch.setattr(adapter, "_unavailable", applied_during_the_fallback)
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    directive = adapter.pre_tool_call(args={"path": "/tmp/a"}, **kw)
+    assert directive is not None
+    assert directive["action"] == "block"
+
+
+@pytest.mark.parametrize("applied", ["pause", "enforce"])
+def test_tool_execution_failure_fallback_rechecks_before_executing(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, applied: str
+) -> None:
+    server.effective_state = "shadow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    real_mode = adapter.local_mode
+    calls = {"n": 0}
+
+    def broken_gate(kwargs: Any) -> Any:
+        raise RuntimeError("bug in the gate")
+
+    def mode_then_command() -> Any:
+        mode = real_mode()
+        calls["n"] += 1
+        if calls["n"] == 1:  # the fallback read shadow; a command lands right after
+            if applied == "pause":
+                adapter.handle_command({"id": "k1", "kind": "pause", "target_kind": "instance"})
+            else:
+                adapter._set_state("enforce", adapter._state_request())
+        return mode
+
+    monkeypatch.setattr(adapter, "_execution_gate", broken_gate)
+    monkeypatch.setattr(adapter, "local_mode", mode_then_command)
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, f"{applied} applied during the fallback stops the call"
+    assert "error" in json.loads(str(out))
+
+
+def test_session_end_reason_is_masked_before_it_is_sent(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.on_session_start(session_id="s", platform="cli")
+    secret = "agmhr_" + "s3cretvalue123456"
+    adapter.on_session_finalize(session_id="s", reason=f"exit with token {secret}")
+    ends = server.calls("/end")
+    assert ends
+    assert "s3cretvalue123456" not in json.dumps([c.body for c in ends])
+
+
+def test_full_report_retry_queue_reports_the_evicted_action(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from collections import deque
+
+    from agenomic.integrations.hermes.client import HermesApiError
+
+    adapter = make_adapter(server.url, tmp_path)
+
+    def gateway_down(sid: str, body: dict[str, Any]) -> Any:
+        raise HermesApiError("unavailable", "down", 503)
+
+    monkeypatch.setattr(adapter.client, "report", gateway_down)
+    adapter._report_retries = deque(maxlen=2)
+    for n in range(3):
+        adapter._report(
+            plugin_mod._ReportRetry("s1", {"logical_call_id": f"act-{n}", "tool": "read_file"})
+        )
+    assert [i.body["logical_call_id"] for i in adapter._report_retries] == ["act-1", "act-2"]
+    adapter.exporter.flush(3.0)
+    dropped = [e for e in server.events if e["type"] == "action.report_dropped"]
+    assert [e["action_id"] for e in dropped] == ["act-0"]
+    assert dropped[0]["extra"]["external_state"] == "unknown"
+
+
+def test_reload_with_a_non_utf8_config_shuts_the_previous_adapter_down(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hh"))
+    monkeypatch.delenv("AGENOMIC_HERMES_CONFIG", raising=False)
+    monkeypatch.setenv("AGENOMIC_HERMES_RUNTIME_TOKEN", "agmhr_entry")
+    plugin_mod.register(FakeCtx({"endpoint": server.url}))
+    previous = plugin_mod.current_adapter()
+    assert previous is not None
+    bad = tmp_path / "adapter.yaml"
+    bad.write_bytes(b"endpoint: \xff\xfe\n")
+    monkeypatch.setenv("AGENOMIC_HERMES_CONFIG", str(bad))
+    try:
+        with pytest.raises(ConfigError, match="UTF-8"):
+            plugin_mod.register(FakeCtx({"endpoint": server.url}))
+        assert previous._shut_down
+        assert plugin_mod.current_adapter() is None
+    finally:
+        previous.shutdown()
+
+
+def test_staged_skill_whose_target_carries_a_credential_is_never_proposed(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    name = "agmhr_" + "s3cretvalue123456"
+    record = {
+        "id": "ab12cd34",
+        "summary": "new skill",
+        "payload": {"action": "create", "name": name, "content": "---\nname: x\n---\nbody"},
+    }
+    fake = types.ModuleType("tools.write_approval")
+    fake.list_pending = lambda subsystem: [record] if subsystem == "skills" else []  # type: ignore[attr-defined]
+    fake.skill_pending_diff = lambda r: r["payload"]["content"]  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools.write_approval", fake)
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.post_tool_call(
+        tool_name="skill_manage",
+        args={"action": "create", "name": name},
+        result=json.dumps({"success": True, "staged": True, "pending_id": "ab12cd34"}),
+        session_id="s1",
+        tool_call_id="call_s",
+        status="ok",
+    )
+    assert server.calls("/proposals") == []
+
+
+def test_concurrent_report_evictions_are_all_accounted_for(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+    from collections import deque
+
+    from agenomic.integrations.hermes.client import HermesApiError
+
+    adapter = make_adapter(server.url, tmp_path)
+
+    def gateway_down(sid: str, body: dict[str, Any]) -> Any:
+        raise HermesApiError("unavailable", "down", 503)
+
+    monkeypatch.setattr(adapter.client, "report", gateway_down)
+    racer: dict[str, threading.Thread] = {}
+
+    def item(n: int) -> Any:
+        return plugin_mod._ReportRetry("s1", {"logical_call_id": f"act-{n}", "tool": "t"})
+
+    class RacingDeque(deque):  # type: ignore[type-arg]
+        def popleft(self) -> Any:
+            out = super().popleft()
+            if "t" not in racer:
+                # Another tool thread fails its report while this one is evicting.
+                racer["t"] = threading.Thread(target=adapter._report, args=(item(2),))
+                racer["t"].start()
+                racer["t"].join(0.3)
+            return out
+
+    adapter._report_retries = RacingDeque([item(0)], maxlen=1)
+    adapter._report(item(1))
+    racer["t"].join(5.0)
+    adapter.exporter.flush(3.0)
+    dropped = [e["action_id"] for e in server.events if e["type"] == "action.report_dropped"]
+    kept = [i.body["logical_call_id"] for i in adapter._report_retries]
+    assert len(dropped) + len(kept) == 3, "every report is either queued or reported dropped"
+
+
+def test_discovered_tool_schemas_are_redacted_before_export(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    secret = "sk-" + "s3cretvalue123456"
+    schema = {
+        "name": "fetch",
+        "parameters": {
+            "type": "object",
+            "properties": {"api_key": {"type": "string", "default": secret}},
+        },
+    }
+
+    class Registry:
+        def get_all_tool_names(self) -> list[str]:
+            return ["fetch"]
+
+        def get_schema(self, name: str) -> dict[str, Any]:
+            return schema
+
+        def get_toolset_for_tool(self, name: str) -> str:
+            return "web"
+
+    fake = types.ModuleType("tools.registry")
+    fake.registry = Registry()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools.registry", fake)
+    adapter = make_adapter(server.url, tmp_path)
+    sent: list[Any] = []
+    monkeypatch.setattr(adapter.client, "tools_discovered", lambda tools: sent.extend(tools))
+    assert adapter.discover_tools() == 1
+    assert "s3cretvalue123456" not in json.dumps(sent)
+    assert adapter._schema_hashes["fetch"] == plugin_mod.schema_hash(schema), (
+        "the hash is of the original schema"
+    )
+
+
+def test_staged_skill_with_an_oversized_target_is_refused_not_truncated(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    record = {
+        "id": "ab12cd34",
+        "summary": "new file",
+        "payload": {
+            "action": "write_file",
+            "name": "s",
+            "file_path": "x" * 600 + ".md",
+            "file_content": "body",
+        },
+    }
+    fake = types.ModuleType("tools.write_approval")
+    fake.list_pending = lambda subsystem: [record] if subsystem == "skills" else []  # type: ignore[attr-defined]
+    fake.skill_pending_diff = lambda r: "body"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools.write_approval", fake)
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.post_tool_call(
+        tool_name="skill_manage",
+        args={},
+        result=json.dumps({"success": True, "staged": True, "pending_id": "ab12cd34"}),
+        session_id="s1",
+        tool_call_id="call_s",
+        status="ok",
+    )
+    assert server.calls("/proposals") == []
+
+
+def test_argument_change_never_blocks_once_observe_is_active(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    real = adapter.pre_tool_call
+
+    def observe_then_gate(**kwargs: Any) -> Any:
+        server.effective_state = "observe"
+        adapter._set_state("observe", adapter._state_request())
+        return real(**{**kwargs, "args": {"path": "/tmp/b"}})
+
+    monkeypatch.setattr(adapter, "pre_tool_call", observe_then_gate)
+    runner = Runner(adapter)
+    runner.agent_loop("read_file", {"path": "/tmp/a"})
+    assert runner.executions == 1, "observe never changes execution"
+
+
+@pytest.mark.parametrize("applied", ["pause", "enforce"])
+def test_shadow_rerun_of_an_executing_call_rechecks_state(
+    server: FakeAgenomic, tmp_path: Path, applied: str
+) -> None:
+    server.effective_state = "shadow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    second: dict[str, Any] = {}
+
+    def first_execution(*_: Any) -> Any:
+        if applied == "pause":
+            adapter.handle_command({"id": "k1", "kind": "pause", "target_kind": "instance"})
+        else:
+            adapter._set_state("enforce", adapter._state_request())
+        # A second chain for the same call while the first one executes.
+        second["out"] = adapter.tool_execution(
+            args=args, next_call=lambda *_: runner._execute(args, None), **kw
+        )
+        return runner._execute(args, None)
+
+    adapter.tool_execution(args=args, next_call=first_execution, **kw)
+    assert runner.executions == 1, "the rerun never executes under the stale shadow decision"
+    assert "error" in json.loads(str(second["out"]))
+
+
+def test_staged_empty_file_is_proposed_as_empty_not_as_its_diff(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+    import types
+
+    record = {
+        "id": "ab12cd34",
+        "summary": "empty file",
+        "payload": {
+            "action": "write_file",
+            "name": "s",
+            "file_path": "notes.md",
+            "file_content": "",
+        },
+    }
+    fake = types.ModuleType("tools.write_approval")
+    fake.list_pending = lambda subsystem: [record] if subsystem == "skills" else []  # type: ignore[attr-defined]
+    fake.skill_pending_diff = lambda r: "--- a/notes.md\n+++ b/notes.md\n"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools.write_approval", fake)
+    adapter = make_adapter(server.url, tmp_path)
+    adapter.post_tool_call(
+        tool_name="skill_manage",
+        args={},
+        result=json.dumps({"success": True, "staged": True, "pending_id": "ab12cd34"}),
+        session_id="s1",
+        tool_call_id="call_s",
+        status="ok",
+    )
+    sent = server.calls("/proposals")
+    assert len(sent) == 1
+    assert sent[0].body["content"] == ""
+
+
+def test_unknown_state_applied_between_the_gates_blocks(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    args = {"path": "/tmp/a"}
+    assert adapter.pre_tool_call(args=args, **kw) is None  # cached enforce permit
+    adapter._set_state("something_new", adapter._state_request())  # a newer server's state
+    out = adapter.tool_execution(args=args, next_call=lambda *_: runner._execute(args, None), **kw)
+    assert runner.executions == 0, "an unknown state is never allowed"
+    assert "something_new" in json.loads(str(out))["error"]
+
+
+def test_session_cancel_arriving_during_admission_is_not_refused(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+
+    def cancel_delivered_while_admitting(body: dict[str, Any]) -> Any:
+        resp = real_create(body)
+        # The gateway already knows the session: the heartbeat delivers a cancel by its
+        # Agenomic id before this admission returns and publishes the mapping.
+        adapter.handle_command(
+            {
+                "id": "k1",
+                "kind": "cancel",
+                "target_kind": "session",
+                "target_ref": resp["session"]["id"],
+                "status": "requested",
+            }
+        )
+        return resp
+
+    monkeypatch.setattr(adapter.client, "create_session", cancel_delivered_while_admitting)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert ("k1", "refused") not in [(c, b["status"]) for c, b in server.acks]
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("read_file", {"path": "/tmp/a"}, sid="s1"))
+    assert runner.executions == 0, "the cancel is pending and blocks the session's calls"
+    assert "cancelled" in out["error"]
+
+
+def test_session_cancel_for_an_unknown_id_is_refused_once_admissions_settle(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+
+    def cancel_for_another_id(body: dict[str, Any]) -> Any:
+        adapter.handle_command(
+            {
+                "id": "k2",
+                "kind": "cancel",
+                "target_kind": "session",
+                "target_ref": "no-such-session",
+                "status": "requested",
+            }
+        )
+        return real_create(body)
+
+    monkeypatch.setattr(adapter.client, "create_session", cancel_for_another_id)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert ("k2", "refused") in [(c, b["status"]) for c, b in server.acks]
+
+
+@pytest.mark.parametrize("mode", ["observe", "shadow"])
+def test_observe_after_enforce_with_changed_arguments_reports_no_stale_permit(
+    server: FakeAgenomic, tmp_path: Path, mode: str
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    runner = Runner(adapter)
+    kw = runner._kw("read_file", "s1", "call_1")
+    ran: list[dict[str, Any]] = []
+
+    def inner() -> str:
+        # The mode changes between the gates and a foreign middleware mutates the
+        # arguments before the inner pre_tool_call.
+        server.effective_state = mode
+        adapter._set_state(mode, adapter._state_request())
+        mutated = {"path": "/etc/passwd"}
+        assert adapter.pre_tool_call(args=mutated, **kw) is None, f"{mode} never blocks"
+        ran.append(mutated)
+        return json.dumps({"success": True})
+
+    adapter.tool_execution(args={"path": "/tmp/a"}, next_call=inner, **kw)
+    assert ran, "the call ran"
+    assert server.reports() == [], "no permit-backed report for arguments that did not run"
+    adapter.exporter.flush(3.0)
+    assert "authorization.argument_mismatch" in server.event_types()
+
+
+def test_llm_request_replaces_the_session_header_case_insensitively(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    request = {"model": "m", "extra_headers": {"x-agenomic-hermes-session": "other", "A": "b"}}
+    out = adapter.llm_request(request=request, session_id="s1", base_url=server.model_base_url)
+    assert out is not None
+    assert out["request"]["extra_headers"] == {"A": "b", "X-Agenomic-Hermes-Session": "s1"}  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["https://user:pw@a.example", "https://user@a.example", "ftp://a.example", "a.example"],
+)
+@pytest.mark.parametrize("cls", ["RuntimeClient", "SupervisorClient"])
+def test_api_clients_refuse_an_endpoint_the_adapter_would_refuse(endpoint: str, cls: str) -> None:
+    from agenomic.integrations.hermes import client as client_module
+
+    token = "agmhr_x" if cls == "RuntimeClient" else "agmhs_x"
+    with pytest.raises(ValueError, match="endpoint"):
+        getattr(client_module, cls)(endpoint, token)
+
+
+@pytest.mark.parametrize("where", ["name", "toolset"])
+def test_credential_shaped_tool_identifiers_are_not_catalogued(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    import sys
+    import types
+
+    secret = "github_pat_" + "A1b2C3d4E5f6G7h8I9j0K1"
+    leaky_name = secret if where == "name" else "fetch_mcp"
+
+    class Registry:
+        def get_all_tool_names(self) -> list[str]:
+            return ["read_file", leaky_name]
+
+        def get_schema(self, name: str) -> dict[str, Any]:
+            return {"name": name, "parameters": {"type": "object"}}
+
+        def get_toolset_for_tool(self, name: str) -> str:
+            if name == leaky_name and where == "toolset":
+                return "mcp-" + secret
+            return "file"
+
+    fake = types.ModuleType("tools.registry")
+    fake.registry = Registry()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tools.registry", fake)
+    adapter = make_adapter(server.url, tmp_path)
+    sent: list[Any] = []
+    monkeypatch.setattr(adapter.client, "tools_discovered", lambda tools: sent.extend(tools))
+    assert adapter.discover_tools() == 1
+    assert [t["tool_name"] for t in sent] == ["read_file"]
+    assert "A1b2C3d4E5f6G7h8I9j0K1" not in json.dumps(sent)
+
+
+@pytest.mark.parametrize("mode", ["enforce", "shadow"])
+def test_credential_shaped_tool_name_never_reaches_authorize(
+    server: FakeAgenomic, tmp_path: Path, mode: str
+) -> None:
+    server.effective_state = mode
+    server.decide = lambda body: "allow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == mode
+    runner = Runner(adapter)
+    secret = "github_pat_" + "A1b2C3d4E5f6G7h8I9j0K1"
+    for order in ("agent_loop", "direct"):
+        out = getattr(runner, order)(secret, {"q": 1}, tcid=f"c_{order}")
+        if mode == "enforce":
+            assert "unavailable" in json.loads(out)["error"]
+    assert runner.executions == (0 if mode == "enforce" else 2), "shadow never blocks"
+    assert all(secret not in json.dumps(r.body) for r in server.authorize_calls())
+
+
+@pytest.mark.parametrize(
+    ("cls", "token"),
+    [
+        ("RuntimeClient", "sk-" + "providerkey123456"),
+        ("RuntimeClient", "agmhs_x"),
+        ("SupervisorClient", "agmhr_x"),
+        ("SupervisorClient", "ghp_" + "0123456789abcdefABCD"),
+    ],
+)
+def test_api_clients_refuse_a_token_of_another_role(cls: str, token: str) -> None:
+    from agenomic.integrations.hermes import client as client_module
+
+    with pytest.raises(ValueError, match="token must be an agmh"):
+        getattr(client_module, cls)("https://a.example", token)
+
+
+def test_concurrent_first_gates_for_one_call_get_a_single_permit(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    server.decide = lambda body: "allow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    inside = threading.Event()
+    release = threading.Event()
+    real = adapter.client.authorize
+
+    def slow_authorize(sid: str, body: Any) -> Any:
+        inside.set()
+        assert release.wait(5)
+        return real(sid, body)
+
+    monkeypatch.setattr(adapter.client, "authorize", slow_authorize)
+    kw = Runner(adapter)._kw("read_file", "s1", "call_1")
+    results: list[Any] = []
+    first = threading.Thread(
+        target=lambda: results.append(adapter.pre_tool_call(args={"path": "/tmp/a"}, **kw))
+    )
+    first.start()
+    assert inside.wait(5)
+    second = adapter.pre_tool_call(args={"path": "/tmp/a"}, **kw)
+    release.set()
+    first.join(5)
+    assert results == [None], "the first invocation is authorized"
+    assert second is not None, "the racing invocation never gets its own permit"
+    assert "being authorized" in second["message"]
+    assert len(server.authorize_calls()) == 1
+
+
+def test_credential_values_in_arguments_never_reach_the_gateway(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.decide = lambda body: "allow"
+    adapter = make_adapter(server.url, tmp_path)
+    runner = Runner(adapter)
+    secret = "sk-" + "abcdefghijklmnop"
+    pat = "ghp_" + "0123456789abcdefABCD"
+    args = {"api_key": secret, "url": "https://api.example/v1", "note": f"use {pat}"}
+    out = runner.agent_loop("web_fetch", args)
+    assert "error" not in json.loads(out)
+    assert runner.executions == 1, "the original arguments execute"
+    (call,) = server.authorize_calls()
+    (report,) = server.reports()
+    for body in (call.body, report.body):
+        dumped = json.dumps(body)
+        assert secret not in dumped
+        assert pat not in dumped
+    assert call.body["arguments"]["url"] == "https://api.example/v1"
+    assert report.body["arguments"] == call.body["arguments"], "the permit's copy is reported"
+
+
+@pytest.mark.parametrize(("decision", "mode"), [("observe", "enforce"), ("observe", "shadow")])
+def test_an_observe_decision_under_a_stricter_mode_never_downgrades(
+    server: FakeAgenomic,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    decision: str,
+    mode: str,
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    monkeypatch.setattr(
+        adapter.client,
+        "authorize",
+        lambda sid, body: (200, {"decision": decision, "effective_mode": mode}),
+    )
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("write_file", {"path": "/tmp/a"}))
+    assert "invalid_response" in out["error"]
+    assert runner.executions == 0
+    assert adapter.local_mode() == "enforce", "the global state is not set to observe"
+
+
+def test_a_cancel_survives_an_admission_whose_answer_was_lost(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+    created: dict[str, Any] = {}
+
+    def committed_then_lost(body: dict[str, Any]) -> Any:
+        created.update(real_create(body))
+        # The gateway created the session and delivers a cancel by its id while the
+        # admission answer is lost on the way back.
+        adapter.handle_command(
+            {
+                "id": "k3",
+                "kind": "cancel",
+                "target_kind": "session",
+                "target_ref": created["session"]["id"],
+                "status": "requested",
+            }
+        )
+        raise HermesApiError("transport_error", "connection reset", 0)
+
+    monkeypatch.setattr(adapter.client, "create_session", committed_then_lost)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert ("k3", "refused") not in [(c, b["status"]) for c, b in server.acks]
+    monkeypatch.setattr(adapter.client, "create_session", real_create)  # the retry succeeds
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("read_file", {"path": "/tmp/a"}, sid="s1"))
+    assert ("k3", "refused") not in [(c, b["status"]) for c, b in server.acks]
+    assert runner.executions == 0, "the cancel applies once the retry publishes the id"
+    assert "cancelled" in out["error"]
+
+
+def test_a_cancel_for_an_unadmitted_session_is_refused_once_it_ends(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+
+    def lost(body: dict[str, Any]) -> Any:
+        raise HermesApiError("transport_error", "connection reset", 0)
+
+    monkeypatch.setattr(adapter.client, "create_session", lost)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {"id": "k4", "kind": "cancel", "target_kind": "session", "target_ref": "ags_x"}
+    )
+    assert ("k4", "refused") not in [(c, b["status"]) for c, b in server.acks]
+    adapter.on_session_finalize(session_id="s1", reason="exit")
+    assert ("k4", "refused") in [(c, b["status"]) for c, b in server.acks]
+
+
+@pytest.mark.parametrize(("status", "decision"), [(202, "allow"), (403, "allow"), (200, "deny")])
+def test_an_authorize_decision_contradicting_its_status_blocks(
+    server: FakeAgenomic,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    decision: str,
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    answer = {
+        "decision": decision,
+        "effective_mode": "enforce",
+        "record_id": "rec-1",
+        "permit": {"document": {"record_id": "rec-1"}, "signature": "x"},
+    }
+    monkeypatch.setattr(adapter.client, "authorize", lambda sid, body: (status, answer))
+    runner = Runner(adapter)
+    out = json.loads(runner.agent_loop("write_file", {"path": "/tmp/a"}))
+    assert "invalid_response" in out["error"]
+    assert runner.executions == 0
+
+
+def test_a_cancel_is_acknowledged_only_once_the_terminal_end_is_reported(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {"id": "k5", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+    real_end = adapter.client.end_session
+    failures = {"left": 1}
+
+    def end_fails_once(sid: str, body: dict[str, Any]) -> Any:
+        if failures["left"]:
+            failures["left"] -= 1
+            raise HermesApiError("transport_error", "connection reset", 0)
+        return real_end(sid, body)
+
+    monkeypatch.setattr(adapter.client, "end_session", end_fails_once)
+    adapter.on_session_finalize(session_id="s1", reason="exit")
+    acks = lambda: [(c, b["status"]) for c, b in server.acks]  # noqa: E731
+    assert ("k5", "applied") not in acks(), "the gateway does not know the end yet"
+    adapter.tick()
+    assert ("k5", "applied") in acks(), "acknowledged once the retried end is reported"
+
+
+@pytest.mark.parametrize("status", [401, 405, 410, 413, 415])
+def test_a_permanently_refused_report_is_not_requeued(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+
+    def refuse(sid: str, body: Any) -> Any:
+        raise HermesApiError("refused", "permanent", status)
+
+    monkeypatch.setattr(adapter.client, "report", refuse)
+    item = plugin_mod._ReportRetry("s1", {"logical_call_id": "c1", "attempt": 1, "tool": "t"})
+    assert adapter._report(item) is False
+    assert len(adapter._report_retries) == 0
+
+
+def test_a_terminal_end_stays_pending_however_long_the_gateway_is_unavailable(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {"id": "k6", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+    real_end = adapter.client.end_session
+    down = {"on": True}
+
+    def end(sid: str, body: dict[str, Any]) -> Any:
+        if down["on"]:
+            raise HermesApiError("timeout", "gateway unavailable", 0)
+        return real_end(sid, body)
+
+    monkeypatch.setattr(adapter.client, "end_session", end)
+    adapter.on_session_finalize(session_id="s1", reason="exit")
+    for _ in range(15):  # past any retry budget
+        adapter.tick()
+    acks = lambda: [(c, b["status"]) for c, b in server.acks]  # noqa: E731
+    assert ("k6", "applied") not in acks()
+    down["on"] = False
+    adapter.tick()
+    assert ("k6", "applied") in acks()
+
+
+def test_an_end_a_cancel_waits_for_is_never_evicted(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(plugin_mod, "_MAX_AUTH", 2)
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    for sid in ("s1", "s2", "s3", "s4"):
+        adapter.on_session_start(session_id=sid, platform="cli")
+    adapter.handle_command(
+        {"id": "k7", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+    real_end = adapter.client.end_session
+    down = {"on": True}
+
+    def end(sid: str, body: dict[str, Any]) -> Any:
+        if down["on"]:
+            raise HermesApiError("timeout", "gateway unavailable", 0)
+        return real_end(sid, body)
+
+    monkeypatch.setattr(adapter.client, "end_session", end)
+    for sid in ("s1", "s2", "s3", "s4"):  # more pending ends than the cap
+        adapter.on_session_finalize(session_id=sid, reason="exit")
+    assert "s1" in adapter._pending_ends, "the end the cancel waits for is kept"
+    assert len(adapter._pending_ends) == 2
+    down["on"] = False
+    adapter.tick()
+    assert ("k7", "applied") in [(c, b["status"]) for c, b in server.acks]
+
+
+def test_a_delivered_newer_end_supersedes_a_pending_older_one(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {"id": "k8", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+    real_end = adapter.client.end_session
+    sent: list[dict[str, Any]] = []
+    failures = {"left": 1}
+
+    def end(sid: str, body: dict[str, Any]) -> Any:
+        if failures["left"]:
+            failures["left"] -= 1
+            raise HermesApiError("timeout", "gateway unavailable", 0)
+        sent.append(dict(body))
+        return real_end(sid, body)
+
+    monkeypatch.setattr(adapter.client, "end_session", end)
+    adapter.on_session_end(session_id="s1", interrupted=True)  # non-final, fails
+    assert "s1" in adapter._pending_ends
+    adapter.on_session_finalize(session_id="s1", reason="exit")  # final, delivered
+    adapter.tick()
+    assert [b["final"] for b in sent] == [True], "the obsolete non-final end is never replayed"
+    assert ("k8", "applied") in [(c, b["status"]) for c, b in server.acks]
+
+
+def test_a_retried_end_and_a_newer_end_are_never_delivered_out_of_order(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    real_end = adapter.client.end_session
+    delivered: list[bool] = []
+    state = {"fail": True}
+    in_retry = threading.Event()
+    release = threading.Event()
+    final_sent = threading.Event()
+
+    def end(sid: str, body: dict[str, Any]) -> Any:
+        if state["fail"]:
+            state["fail"] = False
+            raise HermesApiError("timeout", "gateway unavailable", 0)
+        if not body["final"] and not in_retry.is_set():
+            in_retry.set()  # the heartbeat replay of the old end is in flight
+            assert release.wait(5)
+        resp = real_end(sid, body)
+        delivered.append(bool(body["final"]))
+        if body["final"]:
+            final_sent.set()
+        return resp
+
+    monkeypatch.setattr(adapter.client, "end_session", end)
+    adapter.on_session_end(session_id="s1", interrupted=True)  # non-final, pending
+    retry = threading.Thread(target=adapter._retry_ends)
+    retry.start()
+    assert in_retry.wait(5)
+    final = threading.Thread(
+        target=lambda: adapter.on_session_finalize(session_id="s1", reason="exit")
+    )
+    final.start()
+    # Unserialized, the final end would be delivered while the replay is held: give it
+    # the time to, then let the replay finish.
+    final_sent.wait(1.0)
+    release.set()
+    retry.join(5)
+    final.join(5)
+    assert delivered[-1] is True, "the final end is never followed by the older one"
+
+
+def test_a_refused_terminal_end_refuses_the_cancel_instead_of_applying_it(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {"id": "k9", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+
+    def refused(sid: str, body: dict[str, Any]) -> Any:
+        raise HermesApiError("invalid_transition", "refused", 422)
+
+    monkeypatch.setattr(adapter.client, "end_session", refused)
+    adapter.on_session_finalize(session_id="s1", reason="exit")
+    acks = [(c, b["status"]) for c, b in server.acks]
+    assert ("k9", "applied") not in acks
+    assert ("k9", "refused") in acks
+    assert "s1" not in adapter._pending_ends
+
+
+def test_an_admission_lost_after_the_session_ended_settles_its_cancels(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+
+    def finalized_then_lost(body: dict[str, Any]) -> Any:
+        adapter.handle_command(
+            {"id": "k10", "kind": "cancel", "target_kind": "session", "target_ref": "ags_y"}
+        )
+        # The session ends while its admission is in flight, then the answer is lost.
+        adapter.on_session_finalize(session_id="s1", reason="exit")
+        raise HermesApiError("transport_error", "connection reset", 0)
+
+    monkeypatch.setattr(adapter.client, "create_session", finalized_then_lost)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert "s1" not in adapter._unadmitted
+    assert ("k10", "refused") in [(c, b["status"]) for c, b in server.acks], (
+        "the cancel is decided, not held forever"
+    )
+
+
+@pytest.mark.parametrize(("status", "decision"), [(403, "allow"), (200, "deny")])
+def test_a_delegation_decision_contradicting_its_status_blocks(
+    server: FakeAgenomic,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    decision: str,
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    # Through the real client and HTTP status, as the gateway would answer.
+    server.delegation_answer = (status, {"decision": decision, "delegation_id": "del-1"})
+    runner = Runner(adapter)
+    out = json.loads(runner.direct("delegate_task", {"tasks": [{"goal": "a"}]}))
+    assert "error" in out
+    assert runner.executions == 0
+
+
+def test_an_admission_answer_without_a_session_id_is_a_failed_admission(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    monkeypatch.setattr(
+        adapter.client, "create_session", lambda body: {"session": {}, "effective_state": "enforce"}
+    )
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert not adapter._sessions["s1"].admitted, "retried, not admitted"
+    assert "s1" in adapter._unadmitted
+
+
+def test_an_empty_delegation_id_is_never_a_reservation(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    server.delegation_answer = (200, {"decision": "allow", "delegation_id": ""})
+    runner = Runner(adapter)
+    out = json.loads(runner.direct("delegate_task", {"tasks": [{"goal": "a"}]}))
+    assert "invalid_response" in out["error"]
+    assert runner.executions == 0
+
+
+def test_a_delegation_reserved_under_observe_never_runs_under_an_enforce_permit(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    server.decide = lambda body: "allow"
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    assert adapter.local_mode() == "enforce"
+    # The reservation endpoint still answers observe (the mode changed in between).
+    server.delegation_answer = (200, {"decision": "observe"})
+    runner = Runner(adapter)
+    out = json.loads(runner.direct("delegate_task", {"tasks": [{"goal": "a"}]}))
+    assert "mode changed" in out["error"]
+    assert runner.executions == 0
+
+
+def test_the_heartbeat_retries_a_failed_admission_of_an_idle_session(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+    created: dict[str, Any] = {}
+
+    def committed_then_lost(body: dict[str, Any]) -> Any:
+        created.update(real_create(body))
+        raise HermesApiError("transport_error", "connection reset", 0)
+
+    monkeypatch.setattr(adapter.client, "create_session", committed_then_lost)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {
+            "id": "k11",
+            "kind": "cancel",
+            "target_kind": "session",
+            "target_ref": created["session"]["id"],
+        }
+    )
+    monkeypatch.setattr(adapter.client, "create_session", real_create)
+    adapter.tick()  # the session made no tool call since
+    assert adapter._sessions["s1"].admitted
+    assert "k11" in adapter._cancel_sessions.get("s1", []), "the cancel now waits on s1"
+
+
+def test_a_credential_shaped_model_id_is_masked_in_the_admission(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+    bodies: list[dict[str, Any]] = []
+
+    def capture(body: dict[str, Any]) -> Any:
+        bodies.append(dict(body))
+        return real_create(body)
+
+    monkeypatch.setattr(adapter.client, "create_session", capture)
+    secret = "sk-" + "abcdefghijklmnop"
+    adapter.on_session_start(session_id="s1", platform="cli", model=f"custom/{secret}")
+    assert bodies
+    assert secret not in json.dumps(bodies)
+
+
+def test_a_cancelled_interrupt_ends_the_session_for_the_adapter(
+    server: FakeAgenomic, tmp_path: Path
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    adapter.handle_command(
+        {"id": "k12", "kind": "cancel", "target_kind": "session", "target_ref": "s1"}
+    )
+    adapter.on_session_end(session_id="s1", interrupted=True)
+    assert not adapter._sessions["s1"].active, "no longer advertised nor admitted"
+    assert ("k12", "applied") in [(c, b["status"]) for c, b in server.acks]
+
+
+def test_admission_retries_are_bounded_within_a_heartbeat(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    calls: list[str] = []
+
+    def unavailable(body: dict[str, Any]) -> Any:
+        calls.append(body["hermes_session_id"])
+        raise HermesApiError("timeout", "gateway unavailable", 0)
+
+    monkeypatch.setattr(adapter.client, "create_session", unavailable)
+    for i in range(6):
+        adapter.on_session_start(session_id=f"s{i}", platform="cli")
+    assert len(adapter._unadmitted) == 6
+    calls.clear()
+    adapter.tick()
+    assert len(calls) == 1, "a failing gateway stops the retries of this heartbeat"
+
+
+def test_a_permanently_refused_admission_is_not_retried(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+
+    def refused(body: dict[str, Any]) -> Any:
+        raise HermesApiError("unprocessable", "refused", 422)
+
+    monkeypatch.setattr(adapter.client, "create_session", refused)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert "s1" not in adapter._unadmitted
+
+
+def test_a_failed_admission_after_a_concurrent_success_leaves_no_stale_entry(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+    nested = {"done": False}
+
+    def concurrent_success_then_lost(body: dict[str, Any]) -> Any:
+        if not nested["done"]:
+            nested["done"] = True
+            # Another callback admits the same session while this request is in flight.
+            monkeypatch.setattr(adapter.client, "create_session", real_create)
+            adapter._admit(adapter._sessions["s1"])
+            raise HermesApiError("timeout", "lost", 0)
+        return real_create(body)
+
+    monkeypatch.setattr(adapter.client, "create_session", concurrent_success_then_lost)
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert adapter._sessions["s1"].admitted
+    assert "s1" not in adapter._unadmitted
+
+
+def test_the_guard_status_is_refreshed_while_retry_queues_drain(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    for i in range(3):
+        adapter.on_session_start(session_id=f"s{i}", platform="cli")
+
+    def slow_gateway(sid: str, body: dict[str, Any]) -> Any:
+        raise HermesApiError("timeout", "gateway unavailable", 0)
+
+    monkeypatch.setattr(adapter.client, "end_session", slow_gateway)
+    for i in range(3):
+        adapter.on_session_finalize(session_id=f"s{i}", reason="exit")
+    assert len(adapter._pending_ends) == 3
+    writes: list[float] = []
+    real_write = adapter._write_status
+
+    def counting() -> None:
+        writes.append(time.monotonic())
+        real_write()
+
+    monkeypatch.setattr(adapter, "_write_status", counting)
+    adapter._heartbeat_s = 0.0  # every retry outlasts a heartbeat interval
+    adapter.tick()
+    assert len(writes) > 3, "the status file is rewritten between retries, not only after"
+
+
+def test_a_failing_admission_retry_rotates_so_later_sessions_are_retried(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    real_create = adapter.client.create_session
+    state = {"down": True}
+
+    def create(body: dict[str, Any]) -> Any:
+        if state["down"] or body["hermes_session_id"] == "s0":
+            raise HermesApiError("timeout", "lost", 0)
+        return real_create(body)
+
+    monkeypatch.setattr(adapter.client, "create_session", create)
+    adapter.on_session_start(session_id="s0", platform="cli")
+    adapter.on_session_start(session_id="s1", platform="cli")
+    assert list(adapter._unadmitted) == ["s0", "s1"]
+    state["down"] = False  # only s0 keeps failing
+    adapter.tick()
+    adapter.tick()
+    assert adapter._sessions["s1"].admitted, "s0 failing never starves s1"
+    assert "s0" in adapter._unadmitted
+
+
+def test_a_credential_shaped_platform_is_masked_in_hello_and_admission(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "sk-" + "abcdefghijklmnop"
+    adapter = make_adapter(server.url, tmp_path)
+    bodies: list[Any] = []
+    real_hello, real_create = adapter.client.hello, adapter.client.create_session
+    monkeypatch.setattr(adapter.client, "hello", lambda b: (bodies.append(b), real_hello(b))[1])
+    monkeypatch.setattr(
+        adapter.client, "create_session", lambda b: (bodies.append(b), real_create(b))[1]
+    )
+    adapter._ensure_started(f"custom-{secret}")
+    adapter.on_session_start(session_id="s1", platform=f"custom-{secret}")
+    assert len(bodies) >= 2
+    assert secret not in json.dumps(bodies)
+
+
+def test_hello_masks_a_credential_shaped_provider_id(
+    server: FakeAgenomic, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = "sk-" + "abcdefghijklmnop"
+    monkeypatch.setattr(
+        plugin_mod, "_hermes_config", lambda: {"model": {"provider": f"custom/{secret}"}}
+    )
+    adapter = make_adapter(server.url, tmp_path)
+    adapter._ensure_started("cli")
+    hello = server.calls("/hello")[0].body
+    assert secret not in json.dumps(hello)

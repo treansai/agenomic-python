@@ -1,0 +1,202 @@
+{
+  "schema": "agenomic.experiment_spec/v1",
+  "identity": {
+    "experiment_id": "exp_01jah3m5w8qk7r2t9v4x6y8z0c",
+    "org_id": "0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f",
+    "parent_experiment_id": null,
+    "created_by": "5e7a1c3b-9d2f-4b6e-8a0c-1f3e5d7b9a2c",
+    "arm_keys": {
+      "baseline": "arm_5d1c09e2",
+      "cand_1": "arm_e07f3a11"
+    }
+  },
+  "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+  "level": "agent",
+  "stage": "single",
+  "profile": "standard",
+  "aa_test": false,
+  "arms": [
+    {
+      "arm_id": "baseline",
+      "role": "baseline",
+      "release_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+      "release_name": "av_0006",
+      "genome_version": "sha256:97b4caf00ef3d316f21944ce3752de099c351b6efb831b145dbe8adf9e3aa51f",
+      "prompt_manifest_digest": "sha256:31bba769a53e828fc56d82f80d9a3c3457170ee458d5838ac1cac9b983d97df1",
+      "bundle_id": "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b",
+      "runtime_digest": "blake3:95f9b5cf0ee48e1e72ebab7543c4292f199528604a03b8e2faa4183ed4a82479",
+      "runtime_digest_source": "runner_declared",
+      "children": {
+        "7f3c9a1e-0b2d-4c5e-8f6a-9b0c1d2e3f4a": {
+          "release_id": "d4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70",
+          "genome_version": "sha256:9bb25e9d3a01ded061892a8b86b8aa9abf52e82686f65d5ac2fecf3cb9b3e107",
+          "prompt_manifest_digest": "sha256:06ec6e84e89b4692057d73bdc48593777319a363091821d95bfa2845caabee03"
+        }
+      }
+    },
+    {
+      "arm_id": "cand_1",
+      "role": "candidate",
+      "release_id": "a2b3c4d5-e6f7-4a8b-9c0d-1e2f3a4b5c6d",
+      "release_name": "av_0007",
+      "genome_version": "sha256:52e48f18d493a5f824495281c8c92c1fdbdd6e9d3b309a39b11627486b910d8f",
+      "prompt_manifest_digest": "sha256:bcd9ac85a40ba7094801ba71cd07ef1ca6b2c93f13863d1bebbea907f045142e",
+      "bundle_id": "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b",
+      "runtime_digest": "blake3:95f9b5cf0ee48e1e72ebab7543c4292f199528604a03b8e2faa4183ed4a82479",
+      "runtime_digest_source": "runner_declared",
+      "children": {
+        "7f3c9a1e-0b2d-4c5e-8f6a-9b0c1d2e3f4a": {
+          "release_id": "d4e5f6a7-b8c9-4d0e-8f1a-2b3c4d5e6f70",
+          "genome_version": "sha256:9bb25e9d3a01ded061892a8b86b8aa9abf52e82686f65d5ac2fecf3cb9b3e107",
+          "prompt_manifest_digest": "sha256:06ec6e84e89b4692057d73bdc48593777319a363091821d95bfa2845caabee03"
+        }
+      }
+    }
+  ],
+  "dataset": {
+    "dataset_id": "exds_01jag7k2m9p4r6t8v0w2x4y6z8",
+    "version": 3,
+    "digest": "sha256:a792959e1ca31f77479dbe4c90a2dda3beea1cb50e7bde443af528bde213bdf6",
+    "case_count": 40,
+    "case_ids_digest": "sha256:8359999dc7ecde48dc8a10777a37a7144f807888cdf8b08eb359d860f87c55a7",
+    "provenance": "user_provided"
+  },
+  "heldout": null,
+  "entry_point": null,
+  "node_scope": null,
+  "repetitions": 5,
+  "initial_state": {
+    "snapshot_digest": "sha256:aa8ce1ebffb7dbc414f38944bb72113251b7ae8f1e42b575d94bef46fcdd6daf",
+    "source": "dataset_cases"
+  },
+  "tool_mode": {
+    "mode": "recorded",
+    "tool_config_digest": "blake3:b1d88f1364b71f5fbb5bcc5bf6a1a1725f6ed1039370442ded35ad3427630128",
+    "fixture_sets": [
+      {
+        "ref": "crm-recorded@2",
+        "content_hash": "blake3:68b85cbe1296eaaee5b02268b0eea82b32fe458d7db5212f57cb36f5dceedb5b"
+      }
+    ],
+    "on_fixture_miss": "stop_trial",
+    "protect": "enforce"
+  },
+  "evaluators": [
+    {
+      "evaluator_id": "contract",
+      "kind": "output_contract",
+      "version": 1,
+      "digest": "sha256:708dd2e774774f5b9c4962f9f7dedd608be743e9c2e2f955faeb8e48f59a70e5",
+      "success_source": false
+    },
+    {
+      "evaluator_id": "success",
+      "kind": "expected_match",
+      "version": 1,
+      "digest": "sha256:2b0ba6c8005a930ff66ccfb3093bfd8e4736d6ee88aab38f7b7774056c169d1f",
+      "success_source": true
+    },
+    {
+      "evaluator_id": "tools",
+      "kind": "tool_selection",
+      "version": 1,
+      "digest": "sha256:40dfca4c79a2a81ebcb25978d3ddd88b44cf24140ad2fe8aefb1f4990b85c77e",
+      "success_source": false
+    }
+  ],
+  "metrics": {
+    "primary": {
+      "metric_id": "task_success",
+      "direction": "higher_is_better",
+      "rule": "superiority",
+      "margin": "0"
+    },
+    "guardrails": [
+      {
+        "metric_id": "output_contract_valid",
+        "direction": "higher_is_better",
+        "rule": "non_inferiority",
+        "margin": "0.10"
+      },
+      {
+        "metric_id": "policy_violation",
+        "direction": "lower_is_better",
+        "rule": "non_inferiority",
+        "margin": "0.10"
+      }
+    ],
+    "reported": [
+      "latency_ms",
+      "total_tokens",
+      "cost_micros",
+      "tool_selection_correct",
+      "escalated",
+      "human_intervention"
+    ]
+  },
+  "analysis": {
+    "estimator": "agenomic.experiments.paired_case_mean/v1",
+    "decision_interval": "paired_t",
+    "alpha": "0.05",
+    "min_paired_cases": 10,
+    "min_case_coverage": "0.90",
+    "min_rep_coverage": "0.5",
+    "bootstrap_resamples": 10000,
+    "multiplicity": "holm/v1",
+    "max_infra_error_rate_gap": "0.05",
+    "max_fixture_miss_rate_gap": "0.05",
+    "max_nonevaluable_rate_gap": "0.02"
+  },
+  "budgets": {
+    "max_trials": 400,
+    "max_total_tokens": 2000000,
+    "max_tokens_per_trial": 20000,
+    "max_model_calls_per_trial": 50,
+    "max_cost_micros": 50000000,
+    "max_live_calls": 0,
+    "max_wall_clock_seconds": 14400,
+    "max_trial_seconds": 900,
+    "max_concurrent_trials": 8
+  },
+  "stop_conditions": {
+    "max_infrastructure_error_rate": "0.20",
+    "infrastructure_error_min_trials": 20,
+    "max_consecutive_infrastructure_errors": 10,
+    "max_recorded_fixture_miss_rate": "0.50",
+    "max_policy_violations": null
+  },
+  "retries": {
+    "max_attempts": 3,
+    "backoff_seconds": 30,
+    "max_backoff_seconds": 600
+  },
+  "seed": "42",
+  "secret_refs": ["env:OPENAI_API_KEY"],
+  "price_table": {
+    "version": "user:2026-10-01",
+    "models": {
+      "gpt-4.1-mini": {
+        "input_micros_per_mtok": 400000,
+        "output_micros_per_mtok": 1600000
+      }
+    }
+  },
+  "capture": {
+    "outputs": "full",
+    "max_output_bytes": 262144
+  },
+  "runner_selector": {
+    "runner_ids": []
+  },
+  "rmp_session_id": "rmp_01JAH2Q8X4N6P0R2T4V6W8Y0Z2",
+  "intended_changes": [
+    {
+      "arm_id": "cand_1",
+      "slot_path": "planner.instructions",
+      "baseline": "prm_planner:7",
+      "candidate": "prm_planner:8"
+    }
+  ],
+  "confounders": [],
+  "classification": "prompt_only"
+}

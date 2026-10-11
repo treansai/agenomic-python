@@ -1,0 +1,85 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R028",
+  "intent": "an included fragment that uses a variable renders with the parent value",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "{>locale_rule}",
+      "variables": {
+        "locale": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {
+        "locale_rule": {
+          "prompt_id": "prm_locale_rule",
+          "version": 1,
+          "content_digest": "sha256:a7303511e6c2d20f6382b724cf86bbc692fa6e635021b158c94b349e23bba99d"
+        }
+      }
+    },
+    "fragments": {
+      "prm_locale_rule:1": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "Answer in {locale}.",
+          "variables": {
+            "locale": {
+              "type": "string",
+              "required": true
+            }
+          },
+          "partials": {},
+          "output_contract": null,
+          "fragments": {}
+        }
+      }
+    },
+    "variables": {
+      "locale": "en"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "Answer in en.",
+    "messages": null,
+    "expanded_template": "Answer in {locale}.",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:e6ead660ad273fb31fab5faae45ebf0012fbb2767c90d315960f19f772ebe9ad",
+      "kind": "text",
+      "text": "Answer in en.",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:b8d987d34e5e89660ff93e2d5f33637bffa7749657638f2cb6af33d5123d7ceb",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

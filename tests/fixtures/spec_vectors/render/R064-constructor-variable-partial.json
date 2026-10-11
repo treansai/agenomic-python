@@ -1,0 +1,59 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R064",
+  "intent": "a variable named constructor with a partial, not supplied, renders the partial; Object.prototype.constructor is never read",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Value: {constructor}",
+      "variables": {
+        "constructor": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "partials": {
+        "constructor": "c"
+      },
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {},
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": true,
+    "kind": "text",
+    "text": "Value: c",
+    "messages": null,
+    "expanded_template": "Value: {constructor}",
+    "rendered_document": {
+      "schema": "agenomic.rendered_prompt/v1",
+      "content_digest": "sha256:fb723cd41ebf87619541103449a592bb5522a87aa2cdc8d8103f4ff449d989b2",
+      "kind": "text",
+      "text": "Value: c",
+      "messages": null,
+      "history_count": 0
+    },
+    "rendered_hash": "sha256:f0018560fda926b1fd23fe06f1fb6537372a181d6ba88c05eb4d0e1102b6f926",
+    "warnings": [],
+    "langchain_parity": true
+  }
+}

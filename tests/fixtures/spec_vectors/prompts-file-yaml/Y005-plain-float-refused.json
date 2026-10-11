@@ -1,0 +1,21 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "prompts-file-yaml",
+  "id": "Y005",
+  "intent": "a plain scalar matching the YAML 1.2 float form is refused, never rounded or kept as a float",
+  "consumers": [
+    "python"
+  ],
+  "input": {
+    "yaml": "schema: agenomic.prompts_file/v1\nprompts:\n  - prompt_id: prm_support_planner\n    kind: text\n    name: Support planner\n    expected_latest_version: 1.5\n    content:\n      kind: text\n      body: Plan the next support step.\n      variables: {}\n"
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_import_invalid",
+      "item": {
+        "code": "float_not_allowed"
+      }
+    }
+  }
+}

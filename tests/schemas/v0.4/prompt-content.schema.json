@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agenomic.dev/spec/v0.4/prompt-content.schema.json",
+  "title": "Agenomic prompt content (v0.4)",
+  "description": "The behavior-relevant prompt artifact `agenomic.prompt_content/v1` (RFC 0012). The content digest is sha256 over the canonical JSON of this whole object. Every member is always present; absence is written null or an empty map. Semantic rules (template syntax, fragment resolution, variable use, partial types, secrets) are covered by the template and render conformance vectors.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "template_format",
+    "renderer_version",
+    "kind",
+    "body",
+    "variables",
+    "partials",
+    "output_contract",
+    "fragments"
+  ],
+  "properties": {
+    "schema": { "const": "agenomic.prompt_content/v1" },
+    "template_format": { "const": "agenomic-fstring/v1" },
+    "renderer_version": { "const": "1" },
+    "kind": { "enum": ["text", "chat"] },
+    "body": { "type": ["string", "array"] },
+    "variables": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": { "$ref": "prompt-common.schema.json#/$defs/variableName" },
+      "additionalProperties": { "$ref": "prompt-common.schema.json#/$defs/variableDecl" }
+    },
+    "partials": {
+      "type": "object",
+      "propertyNames": { "$ref": "prompt-common.schema.json#/$defs/variableName" },
+      "additionalProperties": { "$ref": "prompt-common.schema.json#/$defs/ajsScalar" }
+    },
+    "output_contract": {
+      "type": ["null", "object"],
+      "additionalProperties": false,
+      "required": ["type", "json_schema"],
+      "properties": {
+        "type": { "const": "json_schema" },
+        "json_schema": {
+          "type": "object",
+          "$ref": "prompt-common.schema.json#/$defs/ajsValue"
+        }
+      }
+    },
+    "fragments": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": { "$ref": "prompt-common.schema.json#/$defs/variableName" },
+      "additionalProperties": { "$ref": "prompt-common.schema.json#/$defs/contentPin" }
+    }
+  },
+  "if": {
+    "required": ["kind"],
+    "properties": { "kind": { "const": "text" } }
+  },
+  "then": {
+    "properties": {
+      "body": { "$ref": "prompt-common.schema.json#/$defs/templateString" }
+    }
+  },
+  "else": {
+    "properties": {
+      "body": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 256,
+        "items": { "$ref": "prompt-common.schema.json#/$defs/chatEntry" }
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "prompts-file-yaml",
+  "id": "Y007",
+  "intent": "an anchor and an alias are refused, so a file cannot share or expand nodes",
+  "consumers": [
+    "python"
+  ],
+  "input": {
+    "yaml": "schema: agenomic.prompts_file/v1\nprompts:\n  - prompt_id: prm_support_planner\n    kind: text\n    name: Support planner\n    content: &planner\n      kind: text\n      body: Plan the next support step.\n      variables: {}\n  - prompt_id: prm_support_writer\n    kind: text\n    name: Support writer\n    content: *planner\n"
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_import_invalid",
+      "item": {
+        "code": "yaml_alias_unsupported"
+      }
+    }
+  }
+}

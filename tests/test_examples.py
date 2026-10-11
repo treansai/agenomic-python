@@ -18,6 +18,13 @@ OFFLINE_EXAMPLES = [
     "07_offline_signed_release.py",
     "09_rmp.py",
     "12_vault_langgraph.py",
+    "12_managed_prompts_stategraph.py",
+    "13_langgraph_subagent_prompts.py",
+    "14_langgraph_async_streaming.py",
+    "15_langgraph_interrupt_restart.py",
+    "16_langgraph_promotion_pinning.py",
+    "17_prompt_experiment_counterfactual.py",
+    "12_hermes_agent/render_config.py",
 ]
 
 

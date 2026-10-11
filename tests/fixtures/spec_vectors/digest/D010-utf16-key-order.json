@@ -1,0 +1,51 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "digest",
+  "id": "D010",
+  "intent": "object keys sort by UTF-16 code units: a, U+1F600, U+E000, U+FFFF (code-point order would put U+1F600 last)",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "operation": "digest",
+    "document": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Fill the form.",
+      "variables": {},
+      "partials": {},
+      "output_contract": {
+        "type": "json_schema",
+        "json_schema": {
+          "type": "object",
+          "properties": {
+            "￿": {
+              "type": "string"
+            },
+            "😀": {
+              "type": "string"
+            },
+            "": {
+              "type": "string"
+            },
+            "a": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "fragments": {}
+    }
+  },
+  "expected": {
+    "ok": true,
+    "document_type": "agenomic.prompt_content/v1",
+    "canonical": "{\"body\":\"Fill the form.\",\"fragments\":{},\"kind\":\"text\",\"output_contract\":{\"json_schema\":{\"properties\":{\"a\":{\"type\":\"string\"},\"😀\":{\"type\":\"string\"},\"\":{\"type\":\"string\"},\"￿\":{\"type\":\"string\"}},\"type\":\"object\"},\"type\":\"json_schema\"},\"partials\":{},\"renderer_version\":\"1\",\"schema\":\"agenomic.prompt_content/v1\",\"template_format\":\"agenomic-fstring/v1\",\"variables\":{}}",
+    "digest": "sha256:f5ab56709d1b01626219f307e423fec33e58709581114e87580c1bbedf877109"
+  }
+}

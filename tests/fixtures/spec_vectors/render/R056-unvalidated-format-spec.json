@@ -1,0 +1,55 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R056",
+  "intent": "unvalidated content with a format spec fails with the syntax reason and a code-point position after CR, LF and an astral character",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Line 1\r\nLine 2 😀 {x:>10}",
+      "variables": {
+        "x": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "partials": {},
+      "output_contract": null,
+      "fragments": {}
+    },
+    "fragments": {},
+    "variables": {
+      "x": "v"
+    },
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_render_error",
+      "item": {
+        "code": "syntax_error",
+        "syntax": "format_spec",
+        "path": "/body",
+        "offset": 17,
+        "line": 2,
+        "column": 10
+      }
+    }
+  }
+}

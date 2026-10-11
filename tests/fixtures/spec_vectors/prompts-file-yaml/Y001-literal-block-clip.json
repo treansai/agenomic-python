@@ -1,0 +1,30 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "prompts-file-yaml",
+  "id": "Y001",
+  "intent": "a literal block scalar with the default clip chomping ends with exactly one line feed, even when blank lines follow it",
+  "consumers": [
+    "python"
+  ],
+  "input": {
+    "yaml": "schema: agenomic.prompts_file/v1\nprompts:\n  - prompt_id: prm_support_planner\n    kind: text\n    name: Support planner\n    content:\n      kind: text\n      body: |\n        Plan the next support step.\n        Ask for the order id first.\n\n      variables: {}\n"
+  },
+  "expected": {
+    "ok": true,
+    "json": {
+      "schema": "agenomic.prompts_file/v1",
+      "prompts": [
+        {
+          "prompt_id": "prm_support_planner",
+          "kind": "text",
+          "name": "Support planner",
+          "content": {
+            "kind": "text",
+            "body": "Plan the next support step.\nAsk for the order id first.\n",
+            "variables": {}
+          }
+        }
+      ]
+    }
+  }
+}

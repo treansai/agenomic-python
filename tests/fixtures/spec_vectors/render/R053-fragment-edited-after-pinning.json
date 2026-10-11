@@ -1,0 +1,65 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "render",
+  "id": "R053",
+  "intent": "a fragment whose content no longer matches the pinned digest is refused",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "method": "text",
+    "content": {
+      "schema": "agenomic.prompt_content/v1",
+      "template_format": "agenomic-fstring/v1",
+      "renderer_version": "1",
+      "kind": "text",
+      "body": "Rules: {>safety}",
+      "variables": {},
+      "partials": {},
+      "output_contract": null,
+      "fragments": {
+        "safety": {
+          "prompt_id": "prm_support_safety",
+          "version": 2,
+          "content_digest": "sha256:a2872f182adfd75526c1f6a8eb91424c907e42b500f38c24edd759575e7f239d"
+        }
+      }
+    },
+    "fragments": {
+      "prm_support_safety:2": {
+        "prompt_kind": "fragment",
+        "content": {
+          "schema": "agenomic.prompt_content/v1",
+          "template_format": "agenomic-fstring/v1",
+          "renderer_version": "1",
+          "kind": "text",
+          "body": "Never share internal notes!",
+          "variables": {},
+          "partials": {},
+          "output_contract": null,
+          "fragments": {}
+        }
+      }
+    },
+    "variables": {},
+    "options": {
+      "strict": true,
+      "history": null,
+      "allow_duplicate_system": false,
+      "secret_policy": "off"
+    }
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_render_error",
+      "item": {
+        "code": "fragment_digest_mismatch",
+        "fragment": "prm_support_safety:2"
+      }
+    }
+  }
+}

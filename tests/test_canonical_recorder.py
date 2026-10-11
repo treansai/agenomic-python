@@ -54,3 +54,17 @@ def test_completed_run_is_sealed() -> None:
     run.complete_run(output={})
     with pytest.raises(RuntimeError):
         run.log_error(message="too late")
+
+
+def test_prompt_version_is_the_pinned_manifest_digest(
+    v03_errors: Callable[[dict[str, Any]], list[str]],
+) -> None:
+    digest = "sha256:" + "5" * 64
+    run = start_run("agent://acme/support", prompt_manifest_digest=digest)
+    trace = run.complete_run(output={})
+    assert trace["components"]["prompt_version"] == digest
+    assert v03_errors(trace) == []
+    unpinned = start_run("agent://acme/support").complete_run(output={})
+    assert unpinned["components"]["prompt_version"] != digest
+    with pytest.raises(ValueError):
+        start_run("agent://acme/support", prompt_manifest_digest="prm_planner:7")

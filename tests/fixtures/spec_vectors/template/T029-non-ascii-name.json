@@ -1,0 +1,28 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T029",
+  "intent": "a non-ASCII name (LangChain accepts it)",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "template": "{é}"
+  },
+  "expected": {
+    "ok": false,
+    "error": {
+      "code": "prompt_template_invalid",
+      "item": {
+        "code": "syntax_error",
+        "syntax": "invalid_placeholder_name",
+        "offset": 0,
+        "line": 1,
+        "column": 1
+      }
+    }
+  }
+}

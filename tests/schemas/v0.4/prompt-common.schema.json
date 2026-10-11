@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agenomic.dev/spec/v0.4/prompt-common.schema.json",
+  "title": "Agenomic managed prompts: shared definitions (v0.4)",
+  "description": "Identifier grammars, the Agenomic JSON Subset (AJS) and the building blocks shared by every managed prompt document (RFC 0012). JSON Schema cannot express lone surrogates, nesting depth, digests or rendering; the conformance vectors under conformance/vectors/prompts/ cover those rules.",
+  "$defs": {
+    "promptId": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^prm_[a-z0-9]+(?:[_-][a-z0-9]+)*$"
+    },
+    "versionNumber": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "aliasName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    },
+    "uuidLower": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "slotPath": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
+    "variableName": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "channelName": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}$"
+    },
+    "sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "bundleHash": {
+      "type": "string",
+      "pattern": "^(blake3|blake3-merkle-v1):[0-9a-f]{64}$"
+    },
+    "wireId": {
+      "type": "string",
+      "pattern": "^(imp|bnd|obs|pgr|exp|exds|extr|exr|exev|exlt|exli|exart)_[0-9a-hjkmnp-tv-z]{26}$"
+    },
+    "bindingId": {
+      "type": "string",
+      "pattern": "^bnd_[0-9a-hjkmnp-tv-z]{26}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "repoPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/\\\\\\u0000][^\\\\\\u0000]*$",
+      "not": { "pattern": "(^|/)\\.\\.(/|$)" }
+    },
+    "promptRefKey": {
+      "type": "string",
+      "pattern": "^prm_[a-z0-9]+(?:[_-][a-z0-9]+)*:[1-9][0-9]{0,9}$"
+    },
+    "promptKind": {
+      "enum": ["text", "chat", "fragment"]
+    },
+    "ajsValue": {
+      "type": ["null", "boolean", "integer", "string", "array", "object"],
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "pattern": "^[^\\u0000]*$",
+      "items": { "$ref": "#/$defs/ajsValue" },
+      "propertyNames": { "pattern": "^[^\\u0000]*$" },
+      "additionalProperties": { "$ref": "#/$defs/ajsValue" }
+    },
+    "ajsScalar": {
+      "type": ["null", "boolean", "integer", "string"],
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "templateString": {
+      "type": "string",
+      "maxLength": 65536,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "contentPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt_id", "version", "content_digest"],
+      "properties": {
+        "prompt_id": { "$ref": "#/$defs/promptId" },
+        "version": { "$ref": "#/$defs/versionNumber" },
+        "content_digest": { "$ref": "#/$defs/sha256Digest" }
+      }
+    },
+    "roleEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "content"],
+      "properties": {
+        "role": { "enum": ["system", "user", "assistant"] },
+        "content": { "$ref": "#/$defs/templateString" }
+      }
+    },
+    "placeholderEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["placeholder", "optional"],
+      "properties": {
+        "placeholder": { "$ref": "#/$defs/variableName" },
+        "optional": { "type": "boolean" }
+      }
+    },
+    "chatEntry": {
+      "type": "object",
+      "if": { "required": ["role"] },
+      "then": { "$ref": "#/$defs/roleEntry" },
+      "else": { "$ref": "#/$defs/placeholderEntry" }
+    },
+    "variableDecl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "required"],
+      "properties": {
+        "type": { "enum": ["string", "integer", "boolean", "json", "messages"] },
+        "required": { "type": "boolean" }
+      }
+    },
+    "messageValue": {
+      "type": "object",
+      "required": ["role", "content"],
+      "properties": {
+        "role": { "enum": ["system", "user", "assistant", "tool"] },
+        "content": { "type": ["string", "array", "null"] }
+      }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user_id", "api_key_id"],
+      "properties": {
+        "user_id": {
+          "anyOf": [{ "$ref": "#/$defs/uuidLower" }, { "type": "null" }]
+        },
+        "api_key_id": {
+          "anyOf": [{ "$ref": "#/$defs/uuidLower" }, { "type": "null" }]
+        }
+      }
+    },
+    "releaseStatus": {
+      "enum": [
+        "draft",
+        "candidate",
+        "replay_required",
+        "replay_passed",
+        "replay_failed",
+        "awaiting_approval",
+        "changes_requested",
+        "approved",
+        "rejected",
+        "canary",
+        "production",
+        "rolled_back",
+        "deprecated"
+      ]
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "schema": "agenomic.conformance_vector/v1",
+  "suite": "template",
+  "id": "T007",
+  "intent": "a fragment include",
+  "consumers": [
+    "rust-cloud",
+    "rust-cli",
+    "python",
+    "typescript"
+  ],
+  "input": {
+    "template": "{>safety}"
+  },
+  "expected": {
+    "ok": true,
+    "tokens": [
+      {
+        "t": "include",
+        "name": "safety",
+        "offset": 0
+      }
+    ],
+    "source": "{>safety}"
+  }
+}
