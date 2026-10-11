@@ -81,6 +81,11 @@ emits no canonical event. Both work only on duck-typed graphs whose `nodes`
 mapping holds functions, such as `examples/05_langgraph_traced.py`. To
 observe a real graph, use `TrackingCallbackHandler` (next section).
 
+For a graph whose nodes act with credentials the agent must never see, see
+[Agents Vault](vault.md#langgraph) and `examples/12_vault_langgraph.py`: the
+state and the checkpoints carry opaque references (binding, `action_id`,
+`receipt_id`) and the node calls `client.tools.execute`.
+
 ## LangChain (live tracking)
 
 To feed the **live tracking** channel from a LangChain or LangGraph app, pass

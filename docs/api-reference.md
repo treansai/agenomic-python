@@ -19,6 +19,7 @@ are lazy — importing their modules never loads `openai`, `anthropic`,
 - [Integrations](#integrations)
 - [Hugging Face provider](#hugging-face-provider)
 - [Agent genome](#agent-genome)
+- [Agents Vault](#agents-vault-optional-commercial-module)
 - [Exceptions](#exceptions)
 
 ## Top level
@@ -34,8 +35,13 @@ tracking/RMP buffer locally; with a `base_url`, they drive Agenomic
 Cloud. No silent fallback between modes.
 
 ```python
-Client(api_key=None, base_url=None, *, timeout=30.0, transport=None)
+Client(api_key=None, base_url=None, *, timeout=30.0, transport=None,
+       runtime_token=None, vault_replay=None, vault_retry=None)
 ```
+
+`runtime_token` (a `vrt_` string or `Sensitive`) authenticates the agent plane
+of [Agents Vault](vault.md); `vault_replay` answers vault executions from
+fixtures; `vault_retry` is the `RetryPolicy` of vault technical retries.
 
 | attribute        | type               | purpose                          |
 | ---------------- | ------------------ | -------------------------------- |
@@ -46,6 +52,8 @@ Client(api_key=None, base_url=None, *, timeout=30.0, transport=None)
 | `client.review`  | `ReviewResource`   | pre-release review               |
 | `client.monitor` | `MonitorResource`  | production monitoring            |
 | `client.protect` | `ProtectResource`  | alerts, plans, recommendations   |
+| `client.tools`   | `ToolsResource`    | replay tool execution; `execute` for [Agents Vault](vault.md) |
+| `client.vault`   | `VaultResource`    | [Agents Vault](vault.md) administrative and runtime planes |
 
 ## Tracing
 
@@ -323,11 +331,35 @@ which targets an explicit `CanonicalRun`). Wrappers record on success
   `runtime.model`; HF aliases normalized), `save()`.
 - **`GenomeError`** — genome could not be located, parsed, or updated.
 
+## Agents Vault (optional commercial module)
+
+Needs the Agents Vault add-on of Agenomic Cloud/Enterprise. Full guide:
+[vault.md](vault.md).
+
+```python
+from agenomic.vault import (
+    Sensitive, IssuedToken, VaultReplay, ReplayFixture, ReplayOutcome,
+    ExecuteResult, ExecutionStatus, VaultStatus,
+    BindingContent, Destination, RequestTemplate, PathParam, BearerAuth, ProviderDescriptor,
+    VaultError, VaultNotEntitled, VaultApprovalRequired, VaultPolicyDenied,
+    VaultGrantUnusable, VaultRevoked, VaultOutcomeUnknown, VaultRateLimited,
+    VaultValidationError, ReplayFixtureMissing,
+)
+
+client.tools.execute(tool=, binding=, arguments=None, action_id=None, deadline_ms=None) -> ExecuteResult
+client.tools.get_execution(action_id) -> ExecutionStatus      # a-prefixed async variants
+client.vault.status() -> VaultStatus
+client.vault.{providers,secrets,rotations,bindings,grants,runtime_identities,
+              executions,receipts,revocations,runtime}
+client.vault.kill_switch(target_kind=, target_id=, reason=)
+```
+
 ## Exceptions
 
 See [Errors](errors.md): `AgenomicError` → `ValidationError`,
 `CryptoError`, `AtepError`, `ExportError`, `RedactionError`,
-`CloudError` → `AuthenticationError`.
+`CloudError` → `AuthenticationError`, `ToolExecutionError` → the
+Agents Vault errors (`VaultError` and subclasses).
 
 ## CLI
 
