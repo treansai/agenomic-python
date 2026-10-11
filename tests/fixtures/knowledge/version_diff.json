@@ -1,0 +1,132 @@
+{
+  "affected_agents": [
+    {
+      "agent_id": "2b1e5c3a-8d4f-4e6a-9b0c-1d2e3f4a5b6c",
+      "agent_name": "Customer Support Agent",
+      "binding_id": "kbnd_01jb3m5q7s9v1x3z5b7d9f0011",
+      "pinned_version": 3,
+      "selector": "pinned"
+    },
+    {
+      "agent_id": "6c2f8e1a-3b5d-4f7a-9c1e-2d4f6a8b0c1d",
+      "agent_name": "Claims Processing Agent",
+      "binding_id": "kbnd_01jb3m5q7s9v1x3z5b7d9f0013",
+      "pinned_version": null,
+      "selector": "published"
+    }
+  ],
+  "configuration": {
+    "chunking_changed": false,
+    "embedding_changed": false,
+    "index_config_changed": false,
+    "text_search_changed": false
+  },
+  "content": {
+    "documents": {
+      "added": [
+        {
+          "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0005",
+          "from_revision": null,
+          "path": "faq/international-shipping.md",
+          "to_revision": 1
+        },
+        {
+          "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0006",
+          "from_revision": null,
+          "path": "faq/subscription-cancellation.md",
+          "to_revision": 1
+        },
+        {
+          "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0007",
+          "from_revision": null,
+          "path": "product_documentation/devices/device-setup-guide.pdf",
+          "to_revision": 1
+        }
+      ],
+      "deleted": [
+        {
+          "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0008",
+          "from_revision": 3,
+          "path": "faq/legacy-loyalty-program.md",
+          "to_revision": null
+        }
+      ],
+      "modified": [
+        {
+          "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+          "from_revision": 6,
+          "path": "faq/refunds-and-returns.md",
+          "to_revision": 7
+        },
+        {
+          "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0002",
+          "from_revision": 3,
+          "path": "product_documentation/account-management.md",
+          "to_revision": 4
+        }
+      ],
+      "moved": []
+    },
+    "sections": [
+      {
+        "change": "modified",
+        "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+        "heading_path": [
+          "Refunds and Returns",
+          "Refund Policy"
+        ],
+        "path": "faq/refunds-and-returns.md",
+        "section_id": "sec_c41e8a5f2b9d7036"
+      },
+      {
+        "change": "modified",
+        "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0002",
+        "heading_path": [
+          "Account Management",
+          "Customer Verification"
+        ],
+        "path": "product_documentation/account-management.md",
+        "section_id": "sec_8f2b6d1e4a7c9035"
+      }
+    ]
+  },
+  "from": {
+    "index_config_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "manifest_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "version": 3
+  },
+  "identical": false,
+  "kb_id": "kb_customer_support",
+  "metadata": [
+    {
+      "after": [
+        "refunds",
+        "returns"
+      ],
+      "before": [
+        "refunds"
+      ],
+      "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+      "field": "tags",
+      "path": "faq/refunds-and-returns.md"
+    }
+  ],
+  "summary": {
+    "affected_agents": 2,
+    "configuration_changed": false,
+    "documents_added": 3,
+    "documents_deleted": 1,
+    "documents_modified": 2,
+    "documents_moved": 0,
+    "metadata_changes": 1,
+    "omitted_documents": 0,
+    "sections_added": 0,
+    "sections_deleted": 0,
+    "sections_modified": 2
+  },
+  "to": {
+    "index_config_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "manifest_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "version": 4
+  }
+}

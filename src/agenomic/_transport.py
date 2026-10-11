@@ -240,31 +240,43 @@ def _delay(response: Optional[httpx.Response], attempt: int) -> float:
     return retry_after if retry_after is not None else BACKOFF[attempt]
 
 
-def api_request(
-    client: Any,
-    method: str,
-    path: str,
-    body: Optional[Mapping[str, Any]] = None,
-    *,
-    idempotency_key: Optional[str] = None,
-    if_match: Optional[int] = None,
-    retry: bool = False,
-    params: Optional[Mapping[str, str]] = None,
+def _request_options(
+    body: Optional[Mapping[str, Any]],
+    content: Optional[bytes],
+    headers: dict[str, str],
+    params: Optional[Mapping[str, str]],
+) -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "headers": headers,
+        "params": None if params is None else dict(params),
+    }
+    if content is not None:
+        options["content"] = content
+    else:
+        options["json"] = None if body is None else dict(body)
+    return options
+
+
+def _upload_headers(
+    content_type: str, headers: Optional[Mapping[str, str]], if_match: Optional[int]
+) -> dict[str, str]:
+    merged = {"Content-Type": content_type}
+    if headers is not None:
+        merged.update(headers)
+    merged.update(_headers(None, if_match))
+    return merged
+
+
+def _send(
+    client: Any, method: str, path: str, options: Mapping[str, Any], retry: bool
 ) -> ApiResponse:
     http = pool_for(client).sync()
     attempts = len(BACKOFF) + 1 if retry else 1
-    headers = _headers(idempotency_key, if_match)
     attempt = 0
     while True:
         last = attempt + 1 >= attempts
         try:
-            response = http.request(
-                method,
-                path,
-                json=None if body is None else dict(body),
-                headers=headers,
-                params=None if params is None else dict(params),
-            )
+            response = http.request(method, path, **options)
         except httpx.HTTPError as error:
             if last:
                 raise _transport_failure(method, path, error) from error
@@ -280,31 +292,16 @@ def api_request(
         return _parse(method, path, response)
 
 
-async def aapi_request(
-    client: Any,
-    method: str,
-    path: str,
-    body: Optional[Mapping[str, Any]] = None,
-    *,
-    idempotency_key: Optional[str] = None,
-    if_match: Optional[int] = None,
-    retry: bool = False,
-    params: Optional[Mapping[str, str]] = None,
+async def _asend(
+    client: Any, method: str, path: str, options: Mapping[str, Any], retry: bool
 ) -> ApiResponse:
     http = pool_for(client).current()
     attempts = len(BACKOFF) + 1 if retry else 1
-    headers = _headers(idempotency_key, if_match)
     attempt = 0
     while True:
         last = attempt + 1 >= attempts
         try:
-            response = await http.request(
-                method,
-                path,
-                json=None if body is None else dict(body),
-                headers=headers,
-                params=None if params is None else dict(params),
-            )
+            response = await http.request(method, path, **options)
         except httpx.HTTPError as error:
             if last:
                 raise _transport_failure(method, path, error) from error
@@ -318,3 +315,67 @@ async def aapi_request(
             attempt += 1
             continue
         return _parse(method, path, response)
+
+
+def api_request(
+    client: Any,
+    method: str,
+    path: str,
+    body: Optional[Mapping[str, Any]] = None,
+    *,
+    idempotency_key: Optional[str] = None,
+    if_match: Optional[int] = None,
+    retry: bool = False,
+    params: Optional[Mapping[str, str]] = None,
+) -> ApiResponse:
+    options = _request_options(body, None, _headers(idempotency_key, if_match), params)
+    return _send(client, method, path, options, retry)
+
+
+async def aapi_request(
+    client: Any,
+    method: str,
+    path: str,
+    body: Optional[Mapping[str, Any]] = None,
+    *,
+    idempotency_key: Optional[str] = None,
+    if_match: Optional[int] = None,
+    retry: bool = False,
+    params: Optional[Mapping[str, str]] = None,
+) -> ApiResponse:
+    options = _request_options(body, None, _headers(idempotency_key, if_match), params)
+    return await _asend(client, method, path, options, retry)
+
+
+def api_request_bytes(
+    client: Any,
+    method: str,
+    path: str,
+    content: bytes,
+    *,
+    content_type: str,
+    headers: Optional[Mapping[str, str]] = None,
+    if_match: Optional[int] = None,
+    retry: bool = False,
+    params: Optional[Mapping[str, str]] = None,
+) -> ApiResponse:
+    merged = _upload_headers(content_type, headers, if_match)
+    options = _request_options(None, bytes(content), merged, params)
+    return _send(client, method, path, options, retry)
+
+
+async def aapi_request_bytes(
+    client: Any,
+    method: str,
+    path: str,
+    content: bytes,
+    *,
+    content_type: str,
+    headers: Optional[Mapping[str, str]] = None,
+    if_match: Optional[int] = None,
+    retry: bool = False,
+    params: Optional[Mapping[str, str]] = None,
+) -> ApiResponse:
+    merged = _upload_headers(content_type, headers, if_match)
+    options = _request_options(None, bytes(content), merged, params)
+    return await _asend(client, method, path, options, retry)

@@ -16,7 +16,14 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, TypeVar, Unio
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from agenomic._transport import ApiResponse, aapi_request, api_request, segment
+from agenomic._transport import (
+    ApiResponse,
+    aapi_request,
+    aapi_request_bytes,
+    api_request,
+    api_request_bytes,
+    segment,
+)
 from agenomic._version import __version__
 from agenomic.exceptions import ApiError
 from agenomic.prompts.bundle import BundleTrust, PromptBundle
@@ -121,6 +128,9 @@ class Call:
     params: Optional[Mapping[str, str]] = None
     if_match: Optional[int] = None
     retry: bool = False
+    content: Optional[bytes] = None
+    content_type: Optional[str] = None
+    headers: Optional[Mapping[str, str]] = None
 
 
 Step = Union[Call, Callable[[], Any]]
@@ -128,6 +138,18 @@ Flow = Generator[Step, Any, _R]
 
 
 def _execute(client: Client, step: Step) -> Any:
+    if isinstance(step, Call) and step.content is not None:
+        return api_request_bytes(
+            client,
+            step.method,
+            step.path,
+            step.content,
+            content_type=step.content_type or "application/octet-stream",
+            headers=step.headers,
+            if_match=step.if_match,
+            retry=step.retry,
+            params=step.params,
+        )
     if isinstance(step, Call):
         return api_request(
             client,
@@ -142,6 +164,18 @@ def _execute(client: Client, step: Step) -> Any:
 
 
 async def _aexecute(client: Client, step: Step) -> Any:
+    if isinstance(step, Call) and step.content is not None:
+        return await aapi_request_bytes(
+            client,
+            step.method,
+            step.path,
+            step.content,
+            content_type=step.content_type or "application/octet-stream",
+            headers=step.headers,
+            if_match=step.if_match,
+            retry=step.retry,
+            params=step.params,
+        )
     if isinstance(step, Call):
         return await aapi_request(
             client,

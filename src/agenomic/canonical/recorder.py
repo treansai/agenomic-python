@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -42,6 +43,30 @@ RunStatus = Literal["success", "error", "cancelled"]
 _SPEC_VERSION = "agenomic/v0.3"
 _ADAPTER_VERSION = "agenomic-python/0.1"
 _SHA256_URI = re.compile(r"sha256:[0-9a-f]{64}", re.ASCII)
+
+
+_RETRIEVAL_KEYS = (
+    "event_id",
+    "kb_id",
+    "version",
+    "version_manifest_digest",
+    "index_config_digest",
+    "mode",
+)
+_CITATION_KEYS = (
+    "uri",
+    "kb_id",
+    "version",
+    "document_id",
+    "document_revision",
+    "section_id",
+    "chunk_id",
+    "content_digest",
+)
+
+
+def _pick(item: Mapping[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    return {key: item[key] for key in keys if key in item}
 
 
 def _sha256_uri(text: str) -> str:
@@ -71,6 +96,7 @@ class CanonicalRun:
         agent_version: str = "0.0.0",
         genome_version: str | None = None,
         prompt_manifest_digest: str | None = None,
+        knowledge_manifest_digest: str | None = None,
         runtime_name: str = "python",
         runtime_version: str = "0.0.0",
         provider: str = "unknown",
@@ -117,11 +143,16 @@ class CanonicalRun:
         }
         if prompt_manifest_digest is not None and not _SHA256_URI.fullmatch(prompt_manifest_digest):
             raise ValueError("prompt_manifest_digest must be sha256:<64 lowercase hex>")
+        if knowledge_manifest_digest is not None and not _SHA256_URI.fullmatch(
+            knowledge_manifest_digest
+        ):
+            raise ValueError("knowledge_manifest_digest must be sha256:<64 lowercase hex>")
+        self._knowledge_manifest_digest = knowledge_manifest_digest
         self._components = {
             "prompt_version": prompt_manifest_digest or _sha256_uri("prompt"),
             "policy_version": _sha256_uri("policy"),
             "memory_version": _sha256_uri("memory"),
-            "knowledge_version": _sha256_uri("knowledge"),
+            "knowledge_version": knowledge_manifest_digest or _sha256_uri("knowledge"),
             "tool_versions": {},
         }
         self._input = self._io_payload(input_payload, classification)
@@ -260,6 +291,49 @@ class CanonicalRun:
         else:
             self._append("memory.write.proposed", "agent", self._agent_id, base)
             self._append("memory.write.committed", "system", store, base)
+
+    def log_knowledge(
+        self,
+        *,
+        retrievals: Sequence[Mapping[str, Any]],
+        citations: Sequence[Mapping[str, Any]] = (),
+        query: str | None = None,
+        agent_manifest_digest: str | None = None,
+    ) -> None:
+        """Record a ``knowledge.retrieve`` event with references and digests only.
+
+        Only the listed reference members of each retrieval and citation are
+        kept, so retrieved text never enters the trace; a query is stored as
+        its sha256 digest. An agent knowledge manifest digest becomes the
+        ``knowledge_version`` component; a second, different one raises.
+
+        Example:
+            >>> run = start_run("agent://acme/support")
+            >>> run.log_knowledge(
+            ...     retrievals=[{"event_id": "kret_1", "kb_id": "kb_faq", "version": 3}],
+            ...     citations=[{"kb_id": "kb_faq", "section_id": "sec_0123456789abcdef"}],
+            ...     query="refund window",
+            ... )
+            >>> run.complete_run()["events"][1]["type"]
+            'knowledge.retrieve'
+        """
+        if agent_manifest_digest is not None:
+            if not _SHA256_URI.fullmatch(agent_manifest_digest):
+                raise ValueError("agent_manifest_digest must be sha256:<64 lowercase hex>")
+            known = self._knowledge_manifest_digest
+            if known is not None and known != agent_manifest_digest:
+                raise ValueError("a run reads one agent knowledge manifest; this one differs")
+            self._knowledge_manifest_digest = agent_manifest_digest
+            self._components["knowledge_version"] = agent_manifest_digest
+        payload: dict[str, Any] = {
+            "retrievals": [_pick(item, _RETRIEVAL_KEYS) for item in retrievals],
+            "citations": [_pick(item, _CITATION_KEYS) for item in citations],
+        }
+        if query is not None:
+            payload["query_digest"] = _sha256_uri(query)
+        if agent_manifest_digest is not None:
+            payload["agent_manifest_digest"] = agent_manifest_digest
+        self._append("knowledge.retrieve", "agent", self._agent_id, payload)
 
     def log_policy_check(self, *, policy: str, outcome: str, detail: Any = None) -> None:
         """Record a ``policy.check.performed`` event."""

@@ -1,0 +1,141 @@
+{
+  "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+  "revision": 7,
+  "sections": [
+    {
+      "anchor": null,
+      "children": [
+        {
+          "anchor": "refund-policy",
+          "children": [
+            {
+              "anchor": "eligibility",
+              "children": [],
+              "content_digest": "sha256:2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c",
+              "depth": 2,
+              "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+              "heading": "Eligibility",
+              "heading_path": [
+                "Refunds and Returns",
+                "Refund Policy",
+                "Eligibility"
+              ],
+              "kind": "heading",
+              "line_end": 18,
+              "line_start": 9,
+              "ordinal": 2,
+              "page_end": null,
+              "page_start": null,
+              "parent_section_id": "sec_c41e8a5f2b9d7036",
+              "section_id": "sec_19d6b3e7a0c45f82",
+              "section_version": 5,
+              "tags": [
+                "refunds",
+                "returns"
+              ],
+              "token_count": 214
+            },
+            {
+              "anchor": "exceptions",
+              "children": [],
+              "content_digest": "sha256:3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d",
+              "depth": 2,
+              "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+              "heading": "Exceptions",
+              "heading_path": [
+                "Refunds and Returns",
+                "Refund Policy",
+                "Exceptions"
+              ],
+              "kind": "heading",
+              "line_end": 31,
+              "line_start": 19,
+              "ordinal": 3,
+              "page_end": null,
+              "page_start": null,
+              "parent_section_id": "sec_c41e8a5f2b9d7036",
+              "section_id": "sec_e85c2a91f7d3b640",
+              "section_version": 2,
+              "tags": [
+                "refunds",
+                "returns"
+              ],
+              "token_count": 287
+            }
+          ],
+          "content_digest": "sha256:1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
+          "depth": 1,
+          "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+          "heading": "Refund Policy",
+          "heading_path": [
+            "Refunds and Returns",
+            "Refund Policy"
+          ],
+          "kind": "heading",
+          "line_end": 8,
+          "line_start": 3,
+          "ordinal": 1,
+          "page_end": null,
+          "page_start": null,
+          "parent_section_id": "sec_7a3f19c2e48b5d06",
+          "section_id": "sec_c41e8a5f2b9d7036",
+          "section_version": 7,
+          "tags": [
+            "refunds",
+            "returns",
+            "policy"
+          ],
+          "token_count": 96
+        },
+        {
+          "anchor": "return-shipping",
+          "children": [],
+          "content_digest": "sha256:4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e4e",
+          "depth": 1,
+          "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+          "heading": "Return Shipping",
+          "heading_path": [
+            "Refunds and Returns",
+            "Return Shipping"
+          ],
+          "kind": "heading",
+          "line_end": 47,
+          "line_start": 32,
+          "ordinal": 4,
+          "page_end": null,
+          "page_start": null,
+          "parent_section_id": "sec_7a3f19c2e48b5d06",
+          "section_id": "sec_5b0d7e3a9c1f8264",
+          "section_version": 1,
+          "tags": [
+            "refunds",
+            "returns"
+          ],
+          "token_count": 341
+        }
+      ],
+      "content_digest": "sha256:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      "depth": 0,
+      "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+      "heading": "Refunds and Returns",
+      "heading_path": [
+        "Refunds and Returns"
+      ],
+      "kind": "document",
+      "line_end": 2,
+      "line_start": 1,
+      "ordinal": 0,
+      "page_end": null,
+      "page_start": null,
+      "parent_section_id": null,
+      "section_id": "sec_7a3f19c2e48b5d06",
+      "section_version": 1,
+      "tags": [
+        "refunds",
+        "returns"
+      ],
+      "token_count": 24
+    }
+  ],
+  "version": 4
+}

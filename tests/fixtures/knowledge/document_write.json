@@ -1,0 +1,85 @@
+{
+  "created": true,
+  "document": {
+    "byte_size": 1872,
+    "classification": "public",
+    "collection": "faq",
+    "content_digest": null,
+    "created_at": "2026-10-08T11:20:00Z",
+    "created_by": {
+      "api_key_id": null,
+      "user_id": "5d0b0e7c-3c1a-4b0e-9d77-1f2e3a4b5c6d"
+    },
+    "current_revision": 1,
+    "deleted_at": null,
+    "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0009",
+    "format": "markdown",
+    "kb_id": "kb_customer_support",
+    "media_type": "text/markdown",
+    "metadata": {
+      "owner_team": "support-ops"
+    },
+    "metadata_revision": 1,
+    "parse_status": "pending",
+    "path": "faq/gift-cards.md",
+    "section_count": 0,
+    "source": null,
+    "status": "active",
+    "tags": [
+      "gift-cards"
+    ],
+    "title": "Gift Cards",
+    "token_count": 0,
+    "updated_at": "2026-10-08T11:20:00Z",
+    "updated_by": {
+      "api_key_id": null,
+      "user_id": "5d0b0e7c-3c1a-4b0e-9d77-1f2e3a4b5c6d"
+    },
+    "uri": "kb://0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f/kb_customer_support/documents/kdoc_01jb3m5q7s9v1x3z5b7d9f0009"
+  },
+  "job": {
+    "attempts": 0,
+    "completed_at": null,
+    "error": null,
+    "error_code": null,
+    "job_id": "kjob_01jb3m5q7s9v1x3z5b7d9f0041",
+    "kb_id": "kb_customer_support",
+    "kind": "ingest_document",
+    "max_attempts": 5,
+    "progress": {},
+    "requested_at": "2026-10-08T11:20:00Z",
+    "requested_by": {
+      "api_key_id": null,
+      "user_id": "5d0b0e7c-3c1a-4b0e-9d77-1f2e3a4b5c6d"
+    },
+    "retry_at": null,
+    "started_at": null,
+    "status": "pending",
+    "subject": {
+      "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0009",
+      "revision": 1
+    }
+  },
+  "revision": {
+    "blob_digest": "sha256:9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c",
+    "byte_size": 1872,
+    "change_message": "Add the gift card FAQ",
+    "content_digest": null,
+    "created_at": "2026-10-08T11:20:00Z",
+    "created_by": {
+      "api_key_id": null,
+      "user_id": "5d0b0e7c-3c1a-4b0e-9d77-1f2e3a4b5c6d"
+    },
+    "format": "markdown",
+    "media_type": "text/markdown",
+    "parse_error_code": null,
+    "parse_status": "pending",
+    "parsed_at": null,
+    "parser_version": null,
+    "revision": 1,
+    "secret_findings": 0,
+    "section_count": 0,
+    "source": "inline",
+    "token_count": 0
+  }
+}

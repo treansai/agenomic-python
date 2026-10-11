@@ -1,0 +1,54 @@
+{
+  "created": true,
+  "job": {
+    "attempts": 0,
+    "completed_at": null,
+    "error": null,
+    "error_code": null,
+    "job_id": "kjob_01jb3m5q7s9v1x3z5b7d9f0047",
+    "kb_id": "kb_customer_support",
+    "kind": "build_version",
+    "max_attempts": 5,
+    "progress": {},
+    "requested_at": "2026-10-08T10:30:00Z",
+    "requested_by": {
+      "api_key_id": null,
+      "user_id": "5d0b0e7c-3c1a-4b0e-9d77-1f2e3a4b5c6d"
+    },
+    "retry_at": null,
+    "started_at": null,
+    "status": "pending",
+    "subject": {
+      "version": 4
+    }
+  },
+  "version": {
+    "change_message": "Extend the refund window to 30 days and add the international shipping FAQ",
+    "counts": {
+      "bytes": 2418906,
+      "chunks": 0,
+      "documents": 7,
+      "sections": 41,
+      "tokens": 14920
+    },
+    "created_at": "2026-10-08T10:30:00Z",
+    "created_by": {
+      "api_key_id": null,
+      "user_id": "5d0b0e7c-3c1a-4b0e-9d77-1f2e3a4b5c6d"
+    },
+    "decided_at": null,
+    "decided_by": null,
+    "decision_reason": null,
+    "index_config_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "kb_id": "kb_customer_support",
+    "manifest_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "parent_version": 3,
+    "publishable": false,
+    "published": false,
+    "ready_at": null,
+    "signature": null,
+    "status": "indexing",
+    "uri": "kb://0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f/kb_customer_support@v4",
+    "version": 4
+  }
+}

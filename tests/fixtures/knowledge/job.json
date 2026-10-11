@@ -1,0 +1,28 @@
+{
+  "job": {
+    "attempts": 1,
+    "completed_at": null,
+    "error": null,
+    "error_code": null,
+    "job_id": "kjob_01jb3m5q7s9v1x3z5b7d9f0047",
+    "kb_id": "kb_customer_support",
+    "kind": "build_version",
+    "max_attempts": 5,
+    "progress": {
+      "documents_indexed": 5,
+      "documents_total": 7,
+      "stage": "embedding"
+    },
+    "requested_at": "2026-10-08T10:30:00Z",
+    "requested_by": {
+      "api_key_id": null,
+      "user_id": "5d0b0e7c-3c1a-4b0e-9d77-1f2e3a4b5c6d"
+    },
+    "retry_at": null,
+    "started_at": "2026-10-08T10:31:00Z",
+    "status": "running",
+    "subject": {
+      "version": 4
+    }
+  }
+}

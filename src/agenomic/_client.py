@@ -23,6 +23,7 @@ from agenomic.client.auth import bearer_header
 from agenomic.client.retry import RetryPolicy
 from agenomic.exceptions import ApiError, CloudError
 from agenomic.experiments.resources import ExperimentsResource
+from agenomic.knowledge.resources import KnowledgeResource
 from agenomic.prompts.cache import PromptCache
 from agenomic.prompts.errors import PromptRefError
 from agenomic.prompts.local import LocalPromptEngine
@@ -102,6 +103,7 @@ class Client:
         self.bindings = BindingsResource(self)
         self.channels = ChannelsResource(self)
         self.experiments = ExperimentsResource(self)
+        self.knowledge = KnowledgeResource(self)
         #: Online tracking namespace.
         self.tracking = TrackingResource(self)
         #: Local agent genome namespace (load + configure_model).

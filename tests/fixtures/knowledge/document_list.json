@@ -1,0 +1,110 @@
+{
+  "documents": [
+    {
+      "byte_size": 6214,
+      "classification": "internal",
+      "collection": "faq",
+      "content_digest": "sha256:a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+      "created_at": "2026-10-01T09:40:00Z",
+      "created_by": {
+        "api_key_id": null,
+        "user_id": "5d0b0e7c-3c1a-4b0e-9d77-1f2e3a4b5c6d"
+      },
+      "current_revision": 7,
+      "deleted_at": null,
+      "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0001",
+      "format": "markdown",
+      "kb_id": "kb_customer_support",
+      "media_type": "text/markdown",
+      "metadata": {
+        "owner_team": "support-ops",
+        "review_cycle": "quarterly"
+      },
+      "metadata_revision": 3,
+      "parse_status": "parsed",
+      "path": "faq/refunds-and-returns.md",
+      "section_count": 5,
+      "source": null,
+      "status": "active",
+      "tags": [
+        "refunds",
+        "returns"
+      ],
+      "title": "Refunds and Returns",
+      "token_count": 962,
+      "updated_at": "2026-10-07T16:12:00Z",
+      "updated_by": {
+        "api_key_id": null,
+        "user_id": "5d0b0e7c-3c1a-4b0e-9d77-1f2e3a4b5c6d"
+      },
+      "uri": "kb://0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f/kb_customer_support/documents/kdoc_01jb3m5q7s9v1x3z5b7d9f0001"
+    },
+    {
+      "byte_size": 3102,
+      "classification": "public",
+      "collection": "faq",
+      "content_digest": "sha256:b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3",
+      "created_at": "2026-10-02T11:04:00Z",
+      "created_by": {
+        "api_key_id": null,
+        "user_id": null
+      },
+      "current_revision": 2,
+      "deleted_at": null,
+      "document_id": "kdoc_01jb3m5q7s9v1x3z5b7d9f0003",
+      "format": "markdown",
+      "kb_id": "kb_customer_support",
+      "media_type": "text/markdown",
+      "metadata": {},
+      "metadata_revision": 1,
+      "parse_status": "parsed",
+      "path": "faq/shipping-times.md",
+      "section_count": 4,
+      "source": {
+        "external_ref": "docs/faq/shipping-times.md@4f1c2e9",
+        "kind": "github",
+        "source_id": "ksrc_01jb3m5q7s9v1x3z5b7d9f0031"
+      },
+      "status": "active",
+      "tags": [
+        "shipping"
+      ],
+      "title": "Shipping Times",
+      "token_count": 702,
+      "updated_at": "2026-10-04T10:02:00Z",
+      "updated_by": {
+        "api_key_id": null,
+        "user_id": null
+      },
+      "uri": "kb://0b6c2f1e-7a44-4c8e-9f1d-2a3b4c5d6e7f/kb_customer_support/documents/kdoc_01jb3m5q7s9v1x3z5b7d9f0003"
+    }
+  ],
+  "next_cursor": "WyIyMDI2LTEwLTA0VDEwOjAyOjAwWiIsImtkb2NfMDFqYjNtNXE3czl2MXgzejViN2Q5ZjAwMDMiXQ",
+  "tree": [
+    {
+      "children": [],
+      "document_count": 1,
+      "name": "escalations",
+      "path": "escalations/"
+    },
+    {
+      "children": [],
+      "document_count": 4,
+      "name": "faq",
+      "path": "faq/"
+    },
+    {
+      "children": [
+        {
+          "children": [],
+          "document_count": 1,
+          "name": "devices",
+          "path": "product_documentation/devices/"
+        }
+      ],
+      "document_count": 2,
+      "name": "product_documentation",
+      "path": "product_documentation/"
+    }
+  ]
+}

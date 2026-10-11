@@ -37,9 +37,14 @@ _LANGGRAPH_BINDING = frozenset(
 )
 
 
+_KNOWLEDGE = frozenset({"KnowledgeRetriever", "knowledge_tool"})
+
+
 def __getattr__(name: str) -> Any:
     if name in _LANGGRAPH_BINDING:
         return getattr(import_module("agenomic.integrations.langgraph_binding"), name)
+    if name in _KNOWLEDGE:
+        return getattr(import_module("agenomic.knowledge.tools"), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
