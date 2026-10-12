@@ -1100,3 +1100,21 @@ byte for byte, and are refreshed only when that contract changes.
   state (`on_session_end` interrupted, `subagent_stop`, `on_session_finalize`).
 - `tests/test_hermes_integration.py` runs only in a venv with the pinned Hermes
   installed editable (`python -m pytest -m hermes`); it is skipped otherwise.
+
+# SDK wire conformance (PRA-04, PRA-05, D8, D9)
+
+The gateway DTOs are the source of truth; SDK public signatures stay stable.
+
+- `/v1/traces` and `/v1/traces/batch` take `{agent_id: UUID, external_id, payload, events:[{event_type, payload}]}`
+  (batch wraps in `{items}`). SDK envelopes use `agent://org/name`, so both SDKs resolve the reference to the
+  registered agent UUID (UUID passthrough, explicit `agent_ids`/`agentIds` map, else `GET /v1/agents` matching
+  slug or name against the last path segment; cached). Unknown agent raises instead of sending a body the gateway rejects.
+- Python `upload_bundle` sends JSON `{agent_id, version, hash:"", metadata, archive_base64}` (the server recomputes the
+  Merkle hash and accepts an empty one). `version` is a new optional kwarg, default parsed from `name-X.Y.Z.bundle...`.
+- There is no gateway ATEP segment route. `upload_atep_segment` reads the segment and posts each event to
+  `POST /v1/governance/events` with `source: "atep"`.
+- `get_replay_report` uses `/v1/replay-jobs/{id}/report`.
+- Python `TrackingResource.start` gains `baseline`, `allowed_tools` (merged into baseline) and `parent_session_id`,
+  sent only when set.
+- TS `TrackingEventType` now equals the Python vocabulary; the gateway accepts any `type` string.
+- TS `sendTraceToHttp` keeps posting to the given endpoint URL; the agent lookup derives the base by stripping `/v1/traces`.
