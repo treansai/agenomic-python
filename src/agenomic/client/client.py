@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 import httpx
 import ulid
+from pydantic import JsonValue
 
 from agenomic._version import __version__
 from agenomic.client.auth import bearer_header
@@ -148,7 +149,7 @@ class AgenomicClient:
         archive_path: Path,
         *,
         version: Optional[str] = None,
-        metadata: Optional[dict[str, Any]] = None,
+        metadata: Optional[Mapping[str, JsonValue]] = None,
     ) -> dict[str, Any]:
         archive_path = Path(archive_path)
         raw = await asyncio.to_thread(archive_path.read_bytes)
@@ -156,7 +157,7 @@ class AgenomicClient:
             "agent_id": await self.resolve_agent_id(agent_id),
             "version": version or _bundle_version(archive_path),
             "hash": "",
-            "metadata": metadata or {},
+            "metadata": dict(metadata or {}),
             "archive_base64": base64.b64encode(raw).decode("ascii"),
         }
         return await self._request("POST", "/v1/bundles", json=body)
@@ -337,7 +338,7 @@ class SyncAgenomicClient:
         archive_path: Path,
         *,
         version: Optional[str] = None,
-        metadata: Optional[dict[str, Any]] = None,
+        metadata: Optional[Mapping[str, JsonValue]] = None,
     ) -> dict[str, Any]:
         return asyncio.run(
             self._inner.upload_bundle(agent_id, archive_path, version=version, metadata=metadata)

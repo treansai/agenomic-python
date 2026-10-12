@@ -17,11 +17,26 @@ import contextlib
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional, TypedDict
 
 import ulid
 
 from agenomic.exceptions import CloudError
+
+
+class TrackingBaseline(TypedDict, total=False):
+    """Expected envelope of a tracking session, mirroring the gateway ``TrackingBaseline``.
+
+    Example:
+        >>> TrackingBaseline(allowed_tools=["search"], model_id="claude-x")
+        {'allowed_tools': ['search'], 'model_id': 'claude-x'}
+    """
+
+    allowed_tools: list[str]
+    model_provider: str
+    model_id: str
+    policy_ids: list[str]
+
 
 logger = logging.getLogger("agenomic.tracking")
 
@@ -262,7 +277,7 @@ class TrackingResource:
         genome_hash: Optional[str] = None,
         environment: str = "production",
         tracking_config: Optional[dict[str, Any]] = None,
-        baseline: Optional[dict[str, Any]] = None,
+        baseline: Optional[TrackingBaseline] = None,
         allowed_tools: Optional[list[str]] = None,
         parent_session_id: Optional[str] = None,
     ) -> TrackingSession:
@@ -286,7 +301,7 @@ class TrackingResource:
                 body["genome_hash"] = genome_hash
             if tracking_config:
                 body["tracking_config"] = tracking_config
-            merged = dict(baseline or {})
+            merged: TrackingBaseline = {**(baseline or {})}
             if allowed_tools is not None:
                 merged["allowed_tools"] = list(allowed_tools)
             if merged:

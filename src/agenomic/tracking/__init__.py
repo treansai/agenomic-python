@@ -3,6 +3,7 @@
 from agenomic.tracking.session import (
     SPEC_VERSION,
     TRACKING_EVENT_TYPES,
+    TrackingBaseline,
     TrackingResource,
     TrackingSession,
 )
@@ -10,6 +11,7 @@ from agenomic.tracking.session import (
 __all__ = [
     "SPEC_VERSION",
     "TRACKING_EVENT_TYPES",
+    "TrackingBaseline",
     "TrackingResource",
     "TrackingSession",
 ]
