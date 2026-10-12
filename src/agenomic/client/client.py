@@ -224,9 +224,14 @@ class AgenomicClient:
                 },
                 idempotency_key=f"atep:{event.causal_hash.hex()}",
             )
-            created = outcome.get("outcome", {}).get("event_id")
-            if created:
-                created_ids[event.causal_hash] = str(created)
+            body = outcome.get("outcome")
+            created = body.get("event_id") if isinstance(body, dict) else None
+            if not created:
+                raise CloudError(
+                    f"gateway response for ATEP event {header.event_id.hex()} carries no "
+                    f"outcome.event_id; stopped after {len(outcomes)} of {len(events)} events"
+                )
+            created_ids[event.causal_hash] = str(created)
             outcomes.append(outcome)
         return {"ingested": len(outcomes), "outcomes": outcomes}
 
@@ -309,6 +314,14 @@ class SyncAgenomicClient:
 
     def whoami(self) -> dict[str, Any]:
         return asyncio.run(self._inner.whoami())
+
+    def resolve_agent_id(self, agent: str) -> str:
+        """Resolve an agent reference to the gateway UUID. See :meth:`AgenomicClient.resolve_agent_id`.
+
+        Example:
+            >>> # SyncAgenomicClient("https://cloud.example", "k").resolve_agent_id("agent://o/a")  # doctest: +SKIP
+        """
+        return asyncio.run(self._inner.resolve_agent_id(agent))
 
     def upload_traces(self, envelopes: list[TraceEnvelope]) -> dict[str, Any]:
         return asyncio.run(self._inner.upload_traces(envelopes))

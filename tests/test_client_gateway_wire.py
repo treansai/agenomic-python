@@ -302,3 +302,46 @@ async def test_tampered_atep_segment_is_rejected_before_upload(
         await client.upload_atep_segment("agent://a/b", path)
     await client.aclose()
     assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_atep_upload_stops_when_gateway_returns_no_event_id(
+    httpx_mock: HTTPXMock, tmp_path: Path
+) -> None:
+    import ulid
+
+    from agenomic.atep.clock import Hlc
+    from agenomic.atep.event import AtepEvent, EventHeader, StreamId
+    from agenomic.atep.segment import SegmentWriter
+    from agenomic.crypto.signing import SigningKey
+
+    key = SigningKey.generate()
+    path = tmp_path / "s.atep"
+    with SegmentWriter(path) as writer:
+        for seq in range(2):
+            header = EventHeader(
+                event_id=ulid.new().bytes,
+                agent_id="agent://a/b",
+                stream=StreamId.RUNTIME,
+                stream_seq=seq,
+                clock=Hlc(1_760_000_000_000 + seq, 0, 0),
+                event_type="runtime.step",
+                payload_schema_uri="atep://schemas/v1/step",
+            )
+            writer.append(AtepEvent.seal(header, {"n": seq}, key))
+    httpx_mock.add_response(
+        url=f"{ENDPOINT}/v1/governance/events", status_code=202, json={"outcome": {}}
+    )
+    client = AgenomicClient(ENDPOINT, "k")
+    with pytest.raises(CloudError, match="outcome.event_id"):
+        await client.upload_atep_segment("agent://a/b", path)
+    await client.aclose()
+    assert len(httpx_mock.get_requests()) == 1
+
+
+def test_sync_client_resolves_agent_id(httpx_mock: HTTPXMock) -> None:
+    from agenomic.client.client import SyncAgenomicClient
+
+    httpx_mock.add_response(url=f"{ENDPOINT}/v1/agents", json=AGENTS_LISTING)
+    client = SyncAgenomicClient(ENDPOINT, "k")
+    assert client.resolve_agent_id("agent://portab/portab-claims-03cca6") == AGENT_UUID
