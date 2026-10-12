@@ -345,3 +345,32 @@ def test_sync_client_resolves_agent_id(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(url=f"{ENDPOINT}/v1/agents", json=AGENTS_LISTING)
     client = SyncAgenomicClient(ENDPOINT, "k")
     assert client.resolve_agent_id("agent://portab/portab-claims-03cca6") == AGENT_UUID
+
+
+@pytest.mark.asyncio
+async def test_atep_parent_links_span_one_event_segments(
+    httpx_mock: HTTPXMock, tmp_path: Path
+) -> None:
+    from agenomic.atep.store import AtepStore
+    from agenomic.crypto.signing import SigningKey
+    from agenomic.exporters.atep_local import AtepLocalExporter
+
+    store = AtepStore.open_or_init(tmp_path / "atep", "agent://portab/portab-claims")
+    exporter = AtepLocalExporter(store=store, signing_key=SigningKey.generate())
+    exporter.export(_env())
+    exporter.export(_env())
+    segments = sorted((tmp_path / "atep").rglob("*.atep"))
+    assert len(segments) == 2
+    for seq in range(2):
+        httpx_mock.add_response(
+            url=f"{ENDPOINT}/v1/governance/events",
+            status_code=202,
+            json={"outcome": {"event_id": f"gov-{seq}"}},
+        )
+    client = AgenomicClient(ENDPOINT, "k")
+    for segment in segments:
+        await client.upload_atep_segment("agent://portab/portab-claims", segment)
+    await client.aclose()
+    bodies = [json.loads(r.read()) for r in httpx_mock.get_requests()]
+    assert bodies[0]["parent_event_id"] is None
+    assert bodies[1]["parent_event_id"] == "gov-0"

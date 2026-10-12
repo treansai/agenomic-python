@@ -98,6 +98,9 @@ class AgenomicClient:
         self.endpoint = endpoint.rstrip("/")
         self._api_key = api_key
         self._agent_ids: dict[str, str] = dict(agent_ids or {})
+        # ATEP causal hash -> governance event id, kept across segment uploads
+        # because AtepStore writes one event per segment.
+        self._atep_event_ids: dict[bytes, str] = {}
         self._retry = retry_policy or RetryPolicy()
         headers = {
             **bearer_header(api_key),
@@ -162,9 +165,11 @@ class AgenomicClient:
         """Ingest every event of an ATEP segment as a gateway governance event.
 
         ``header.parents`` carries causal hashes, so ``parent_event_id`` is the
-        governance id the gateway returned for the parent event of this segment
-        (the hash itself stays in ``metadata.parent_causal_hashes``). Each event
-        is posted with an ``Idempotency-Key`` derived from its causal hash, so
+        governance id the gateway returned for the parent event (the hash itself
+        stays in ``metadata.parent_causal_hashes``). The hash-to-id mapping lives
+        on the client, so upload segments in order with the same client to keep
+        links across segments (``AtepStore`` writes one event per segment). Each
+        event is posted with an ``Idempotency-Key`` derived from its causal hash, so
         re-running a partially uploaded segment replays the accepted events
         instead of creating them twice. Every causal hash and the segment Merkle
         root are recomputed before the first POST, and each event's signature is
@@ -195,7 +200,7 @@ class AgenomicClient:
             raise CloudError(
                 f"segment {segment_path} holds events of {foreign}, not {agent_id!r}; nothing uploaded"
             )
-        created_ids: dict[bytes, str] = {}
+        created_ids = self._atep_event_ids
         outcomes: list[dict[str, Any]] = []
         for event in events:
             header = event.header
