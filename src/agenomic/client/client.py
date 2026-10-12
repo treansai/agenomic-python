@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import re
+import uuid
+from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,6 +24,51 @@ from agenomic.types.envelope import TraceEnvelope
 logger = logging.getLogger("agenomic.client")
 
 _RETRY_STATUS = {429, 502, 503, 504}
+_VERSION_IN_NAME = re.compile(r"-(\d+\.\d+\.\d+[0-9A-Za-z.+-]*?)\.bundle")
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _envelope_to_gateway(envelope: TraceEnvelope, agent_uuid: str) -> dict[str, Any]:
+    """Project a :class:`TraceEnvelope` onto the gateway ``CreateTraceRequest`` shape."""
+    full = envelope.model_dump(mode="json", exclude_none=True)
+    events: list[dict[str, Any]] = []
+    for call in full.get("model_calls", []):
+        events.append({"event_type": "model_call", "payload": call})
+    for call in full.get("tool_calls", []):
+        events.append({"event_type": "tool_call", "payload": call})
+    events.append(
+        {
+            "event_type": "run_completed",
+            "payload": {
+                "status": "error" if envelope.error else "success",
+                "duration_ms": envelope.duration_ms,
+                "error": envelope.error,
+            },
+        }
+    )
+    return {
+        "agent_id": agent_uuid,
+        "external_id": envelope.trace_id,
+        "payload": full,
+        "events": events,
+    }
+
+
+def _bundle_version(archive_path: Path) -> str:
+    match = _VERSION_IN_NAME.search(archive_path.name)
+    return match.group(1) if match else archive_path.name.split(".")[0]
+
+
+def _hlc_to_iso(physical_ms: int) -> str:
+    moment = datetime.fromtimestamp(physical_ms / 1000.0, tz=timezone.utc)
+    return moment.isoformat().replace("+00:00", "Z")
 
 
 class AgenomicClient:
@@ -43,9 +93,11 @@ class AgenomicClient:
         retry_policy: Optional[RetryPolicy] = None,
         user_agent: Optional[str] = None,
         transport: Optional[httpx.AsyncBaseTransport] = None,
+        agent_ids: Optional[Mapping[str, str]] = None,
     ) -> None:
         self.endpoint = endpoint.rstrip("/")
         self._api_key = api_key
+        self._agent_ids: dict[str, str] = dict(agent_ids or {})
         self._retry = retry_policy or RetryPolicy()
         headers = {
             **bearer_header(api_key),
@@ -61,31 +113,81 @@ class AgenomicClient:
     async def whoami(self) -> dict[str, Any]:
         return await self._request("GET", "/v1/whoami")
 
-    async def upload_traces(self, envelopes: list[TraceEnvelope]) -> dict[str, Any]:
-        body = {
-            "traces": [e.model_dump(mode="json", exclude_none=True) for e in envelopes],
-        }
-        return await self._request("POST", "/v1/traces", json=body)
+    async def resolve_agent_id(self, agent: str) -> str:
+        """Resolve an agent reference (UUID, slug, name or ``agent://org/name``) to the gateway UUID."""
+        if _is_uuid(agent):
+            return agent
+        cached = self._agent_ids.get(agent)
+        if cached:
+            return cached
+        tail = agent.rstrip("/").split("/")[-1]
+        listing = await self._request("GET", "/v1/agents")
+        for item in listing.get("agents", []):
+            if item.get("slug") in (agent, tail) or item.get("name") in (agent, tail):
+                self._agent_ids[agent] = str(item["id"])
+                return self._agent_ids[agent]
+        raise CloudError(f"cannot resolve agent {agent!r} to a registered agent id")
 
-    async def upload_bundle(self, agent_id: str, archive_path: Path) -> dict[str, Any]:
+    async def upload_traces(self, envelopes: list[TraceEnvelope]) -> dict[str, Any]:
+        items = [
+            _envelope_to_gateway(e, await self.resolve_agent_id(e.agent_id)) for e in envelopes
+        ]
+        return await self._request("POST", "/v1/traces/batch", json={"items": items})
+
+    async def upload_bundle(
+        self,
+        agent_id: str,
+        archive_path: Path,
+        *,
+        version: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
         archive_path = Path(archive_path)
-        body = await asyncio.to_thread(archive_path.read_bytes)
-        files = {"bundle": (archive_path.name, body, "application/octet-stream")}
-        data = {"agent_id": agent_id}
-        return await self._request("POST", "/v1/bundles", data=data, files=files)
+        raw = await asyncio.to_thread(archive_path.read_bytes)
+        body = {
+            "agent_id": await self.resolve_agent_id(agent_id),
+            "version": version or _bundle_version(archive_path),
+            "hash": "",
+            "metadata": metadata or {},
+            "archive_base64": base64.b64encode(raw).decode("ascii"),
+        }
+        return await self._request("POST", "/v1/bundles", json=body)
 
     async def upload_atep_segment(self, agent_id: str, segment_path: Path) -> dict[str, Any]:
-        segment_path = Path(segment_path)
-        body = await asyncio.to_thread(segment_path.read_bytes)
-        files = {"segment": (segment_path.name, body, "application/octet-stream")}
-        data = {"agent_id": agent_id}
-        return await self._request("POST", "/v1/atep/segments", data=data, files=files)
+        from agenomic.atep.segment import SegmentReader
+
+        reader = SegmentReader(Path(segment_path))
+        events = await asyncio.to_thread(lambda: list(reader.iter_events()))
+        outcomes: list[dict[str, Any]] = []
+        for event in events:
+            header = event.header
+            outcome = await self._request(
+                "POST",
+                "/v1/governance/events",
+                json={
+                    "source": "atep",
+                    "event_type": header.event_type,
+                    "monitored_agent_id": agent_id,
+                    "sequence_number": header.stream_seq,
+                    "timestamp": _hlc_to_iso(header.clock.physical_ms),
+                    "payload": event.payload,
+                    "parent_event_id": header.parents[0].hex() if header.parents else None,
+                    "metadata": {
+                        "event_id": header.event_id.hex(),
+                        "stream": header.stream.value,
+                        "causal_hash": event.causal_hash.hex(),
+                        "signer_key_id": event.attestation.signer_key_id,
+                    },
+                },
+            )
+            outcomes.append(outcome)
+        return {"ingested": len(outcomes), "outcomes": outcomes}
 
     async def create_release(self, request: dict[str, Any]) -> dict[str, Any]:
         return await self._request("POST", "/v1/releases", json=request)
 
     async def get_replay_report(self, job_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/v1/replays/{job_id}")
+        return await self._request("GET", f"/v1/replay-jobs/{job_id}/report")
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -163,8 +265,10 @@ class SyncAgenomicClient:
     def upload_traces(self, envelopes: list[TraceEnvelope]) -> dict[str, Any]:
         return asyncio.run(self._inner.upload_traces(envelopes))
 
-    def upload_bundle(self, agent_id: str, archive_path: Path) -> dict[str, Any]:
-        return asyncio.run(self._inner.upload_bundle(agent_id, archive_path))
+    def upload_bundle(
+        self, agent_id: str, archive_path: Path, **kwargs: Any
+    ) -> dict[str, Any]:
+        return asyncio.run(self._inner.upload_bundle(agent_id, archive_path, **kwargs))
 
     def upload_atep_segment(self, agent_id: str, segment_path: Path) -> dict[str, Any]:
         return asyncio.run(self._inner.upload_atep_segment(agent_id, segment_path))

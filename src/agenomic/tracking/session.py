@@ -262,8 +262,16 @@ class TrackingResource:
         genome_hash: Optional[str] = None,
         environment: str = "production",
         tracking_config: Optional[dict[str, Any]] = None,
+        baseline: Optional[dict[str, Any]] = None,
+        allowed_tools: Optional[list[str]] = None,
+        parent_session_id: Optional[str] = None,
     ) -> TrackingSession:
-        """Start a new online-tracking session."""
+        """Start a new online-tracking session.
+
+        ``baseline`` is the expected envelope (``allowed_tools``, ``model_provider``,
+        ``model_id``, ``policy_ids``); ``allowed_tools`` is a shorthand merged into it.
+        ``parent_session_id`` links this session to the session that spawned it.
+        """
         if getattr(self._client, "is_cloud", False):
             body: dict[str, Any] = {
                 "spec_version": SPEC_VERSION,
@@ -278,6 +286,13 @@ class TrackingResource:
                 body["genome_hash"] = genome_hash
             if tracking_config:
                 body["tracking_config"] = tracking_config
+            merged = dict(baseline or {})
+            if allowed_tools is not None:
+                merged["allowed_tools"] = list(allowed_tools)
+            if merged:
+                body["baseline"] = merged
+            if parent_session_id:
+                body["parent_session_id"] = parent_session_id
             response = self._client._post("/v1/tracking/sessions", body)
             session = response.get("session", response) if isinstance(response, dict) else {}
             session_id = session.get("session_id")

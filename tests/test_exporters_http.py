@@ -11,6 +11,8 @@ from agenomic.types.envelope import TraceEnvelope
 from agenomic.types.trace import TraceInput, TraceOutput
 
 ENDPOINT = "https://cloud.example.com"
+AGENT_UUID = "1e004ebf-0a2f-4b93-ad7e-d87c91fdb385"
+AGENT_IDS = {"agent://acme/demo": AGENT_UUID}
 
 
 def _env(i: int) -> TraceEnvelope:
@@ -25,8 +27,8 @@ def _env(i: int) -> TraceEnvelope:
 
 @pytest.mark.asyncio
 async def test_flush_sends_all(httpx_mock: HTTPXMock) -> None:
-    httpx_mock.add_response(url=f"{ENDPOINT}/v1/traces", json={"accepted": 3})
-    client = AgenomicClient(ENDPOINT, "k")
+    httpx_mock.add_response(url=f"{ENDPOINT}/v1/traces/batch", json={"accepted": 3})
+    client = AgenomicClient(ENDPOINT, "k", agent_ids=AGENT_IDS)
     exp = HttpExporter(client, batch_size=10, batch_interval_ms=0)
     for i in range(3):
         exp.export(_env(i))
@@ -40,8 +42,8 @@ async def test_flush_sends_all(httpx_mock: HTTPXMock) -> None:
 
 @pytest.mark.asyncio
 async def test_aclose_flushes(httpx_mock: HTTPXMock) -> None:
-    httpx_mock.add_response(url=f"{ENDPOINT}/v1/traces", json={"accepted": 1})
-    client = AgenomicClient(ENDPOINT, "k")
+    httpx_mock.add_response(url=f"{ENDPOINT}/v1/traces/batch", json={"accepted": 1})
+    client = AgenomicClient(ENDPOINT, "k", agent_ids=AGENT_IDS)
     exp = HttpExporter(client)
     exp.export(_env(0))
     await exp.aclose()
@@ -51,7 +53,7 @@ async def test_aclose_flushes(httpx_mock: HTTPXMock) -> None:
 
 @pytest.mark.asyncio
 async def test_flush_empty_is_noop() -> None:
-    client = AgenomicClient(ENDPOINT, "k")
+    client = AgenomicClient(ENDPOINT, "k", agent_ids=AGENT_IDS)
     exp = HttpExporter(client)
     await exp.flush()
     await client.aclose()
