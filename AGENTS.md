@@ -1110,7 +1110,8 @@ The gateway DTOs are the source of truth; SDK public signatures stay stable.
   registered agent UUID (UUID passthrough, explicit `agent_ids`/`agentIds` map, else `GET /v1/agents` matching
   slug or name against the last path segment; cached). Unknown agent raises instead of sending a body the gateway rejects.
 - Python `upload_bundle` sends JSON `{agent_id, version, hash:"", metadata, archive_base64}` (the server recomputes the
-  Merkle hash and accepts an empty one). `version` is a new optional kwarg, default parsed from `name-X.Y.Z.bundle...`.
+  Merkle hash and accepts an empty one). `version` is a new optional kwarg, default parsed from `name-X.Y.Z.bundle...`;
+  a name that does not parse raises `CloudError` instead of guessing.
 - There is no gateway ATEP segment route. `upload_atep_segment` reads the segment and posts each event to
   `POST /v1/governance/events` with `source: "atep"`.
 - `get_replay_report` uses `/v1/replay-jobs/{id}/report`.

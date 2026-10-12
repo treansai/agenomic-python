@@ -374,3 +374,19 @@ async def test_atep_parent_links_span_one_event_segments(
     bodies = [json.loads(r.read()) for r in httpx_mock.get_requests()]
     assert bodies[0]["parent_event_id"] is None
     assert bodies[1]["parent_event_id"] == "gov-0"
+
+
+@pytest.mark.asyncio
+async def test_bundle_without_parsable_version_requires_explicit_version(
+    httpx_mock: HTTPXMock, tmp_path: Path
+) -> None:
+    archive = tmp_path / "agent.bundle.tar.zst"
+    archive.write_bytes(b"x")
+    client = AgenomicClient(ENDPOINT, "k")
+    with pytest.raises(CloudError, match="version="):
+        await client.upload_bundle(AGENT_UUID, archive)
+    assert httpx_mock.get_requests() == []
+    httpx_mock.add_response(url=f"{ENDPOINT}/v1/bundles", json={"bundle": {}})
+    await client.upload_bundle(AGENT_UUID, archive, version="2.0.0")
+    await client.aclose()
+    assert json.loads(httpx_mock.get_requests()[0].read())["version"] == "2.0.0"

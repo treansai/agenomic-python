@@ -64,7 +64,16 @@ def _envelope_to_gateway(envelope: TraceEnvelope, agent_uuid: str) -> dict[str, 
 
 def _bundle_version(archive_path: Path) -> str:
     match = _VERSION_IN_NAME.search(archive_path.name)
-    return match.group(1) if match else archive_path.name.split(".")[0]
+    if match is None:
+        raise CloudError(
+            f"cannot parse a version from {archive_path.name!r} "
+            "(expected name-X.Y.Z.bundle...); pass version= explicitly"
+        )
+    return match.group(1)
+
+
+def _read_base64(path: Path) -> str:
+    return base64.b64encode(path.read_bytes()).decode("ascii")
 
 
 def _hlc_to_iso(physical_ms: int) -> str:
@@ -152,13 +161,14 @@ class AgenomicClient:
         metadata: Optional[Mapping[str, JsonValue]] = None,
     ) -> dict[str, Any]:
         archive_path = Path(archive_path)
-        raw = await asyncio.to_thread(archive_path.read_bytes)
+        resolved_version = version or _bundle_version(archive_path)
+        encoded = await asyncio.to_thread(_read_base64, archive_path)
         body = {
             "agent_id": await self.resolve_agent_id(agent_id),
-            "version": version or _bundle_version(archive_path),
+            "version": resolved_version,
             "hash": "",
             "metadata": dict(metadata or {}),
-            "archive_base64": base64.b64encode(raw).decode("ascii"),
+            "archive_base64": encoded,
         }
         return await self._request("POST", "/v1/bundles", json=body)
 
