@@ -128,6 +128,58 @@ async def test_atep_segment_ingested_as_governance_events(
 
     key = SigningKey.generate()
     path = tmp_path / "s.atep"
+    hashes: list[bytes] = []
+    with SegmentWriter(path) as writer:
+        for seq in range(2):
+            header = EventHeader(
+                event_id=ulid.new().bytes,
+                agent_id="agent://a/b",
+                stream=StreamId.RUNTIME,
+                stream_seq=seq,
+                clock=Hlc(1_760_000_000_000 + seq, 0, 0),
+                event_type="runtime.step",
+                payload_schema_uri="atep://schemas/v1/step",
+                parents=hashes[-1:],
+            )
+            event = AtepEvent.seal(header, {"n": seq}, key)
+            hashes.append(event.causal_hash)
+            writer.append(event)
+    for seq in range(2):
+        httpx_mock.add_response(
+            url=f"{ENDPOINT}/v1/governance/events",
+            status_code=202,
+            json={"outcome": {"event_id": f"gov-{seq}"}},
+        )
+    client = AgenomicClient(ENDPOINT, "k")
+    res = await client.upload_atep_segment("agent://a/b", path)
+    await client.aclose()
+    assert res["ingested"] == 2
+    bodies = [json.loads(r.read()) for r in httpx_mock.get_requests()]
+    assert [b["sequence_number"] for b in bodies] == [0, 1]
+    assert all(b["source"] == "atep" and b["event_type"] == "runtime.step" for b in bodies)
+    assert bodies[0]["timestamp"].startswith("2025-")
+    assert bodies[0]["monitored_agent_id"] == "agent://a/b"
+    # header.parents holds causal hashes; the gateway id of the parent is sent instead.
+    assert bodies[0]["parent_event_id"] is None
+    assert bodies[1]["parent_event_id"] == "gov-0"
+    assert bodies[1]["metadata"]["parent_causal_hashes"] == [hashes[0].hex()]
+    keys = [r.headers["Idempotency-Key"] for r in httpx_mock.get_requests()]
+    assert keys == [f"atep:{h.hex()}" for h in hashes]
+
+
+@pytest.mark.asyncio
+async def test_atep_segment_retry_reuses_idempotency_keys(
+    httpx_mock: HTTPXMock, tmp_path: Path
+) -> None:
+    import ulid
+
+    from agenomic.atep.clock import Hlc
+    from agenomic.atep.event import AtepEvent, EventHeader, StreamId
+    from agenomic.atep.segment import SegmentWriter
+    from agenomic.crypto.signing import SigningKey
+
+    key = SigningKey.generate()
+    path = tmp_path / "s.atep"
     with SegmentWriter(path) as writer:
         for seq in range(2):
             header = EventHeader(
@@ -140,21 +192,19 @@ async def test_atep_segment_ingested_as_governance_events(
                 payload_schema_uri="atep://schemas/v1/step",
             )
             writer.append(AtepEvent.seal(header, {"n": seq}, key))
-    httpx_mock.add_response(
-        url=f"{ENDPOINT}/v1/governance/events",
-        status_code=202,
-        json={"outcome": {"event_id": "e"}},
-        is_reusable=True,
-    )
+    url = f"{ENDPOINT}/v1/governance/events"
+    httpx_mock.add_response(url=url, status_code=202, json={"outcome": {"event_id": "a"}})
+    httpx_mock.add_response(url=url, status_code=400, json={"error": "bad"})
+    httpx_mock.add_response(url=url, status_code=202, json={"outcome": {"event_id": "a"}})
+    httpx_mock.add_response(url=url, status_code=202, json={"outcome": {"event_id": "b"}})
     client = AgenomicClient(ENDPOINT, "k")
+    with pytest.raises(CloudError):
+        await client.upload_atep_segment("agent://a/b", path)
     res = await client.upload_atep_segment("agent://a/b", path)
     await client.aclose()
     assert res["ingested"] == 2
-    bodies = [json.loads(r.read()) for r in httpx_mock.get_requests()]
-    assert [b["sequence_number"] for b in bodies] == [0, 1]
-    assert all(b["source"] == "atep" and b["event_type"] == "runtime.step" for b in bodies)
-    assert bodies[0]["timestamp"].startswith("2025-")
-    assert bodies[0]["monitored_agent_id"] == "agent://a/b"
+    keys = [r.headers["Idempotency-Key"] for r in httpx_mock.get_requests()]
+    assert keys[:2] == keys[2:]
 
 
 class _RecordingCloud:
@@ -186,4 +236,5 @@ def test_tracking_start_omits_optional_fields_by_default() -> None:
     cloud = _RecordingCloud()
     TrackingResource(cloud).start(agent="agent://a/b")
     _, body = cloud.posts[0]
-    assert "baseline" not in body and "parent_session_id" not in body
+    assert "baseline" not in body
+    assert "parent_session_id" not in body

@@ -154,13 +154,30 @@ class AgenomicClient:
         return await self._request("POST", "/v1/bundles", json=body)
 
     async def upload_atep_segment(self, agent_id: str, segment_path: Path) -> dict[str, Any]:
+        """Ingest every event of an ATEP segment as a gateway governance event.
+
+        ``header.parents`` carries causal hashes, so ``parent_event_id`` is the
+        governance id the gateway returned for the parent event of this segment
+        (the hash itself stays in ``metadata.parent_causal_hashes``). Each event
+        is posted with an ``Idempotency-Key`` derived from its causal hash, so
+        re-running a partially uploaded segment replays the accepted events
+        instead of creating them twice.
+
+        Example:
+            >>> # await client.upload_atep_segment("agent://org/a", Path("s.atep"))  # doctest: +SKIP
+        """
+        from agenomic.atep.event import AtepEvent
         from agenomic.atep.segment import SegmentReader
 
-        reader = SegmentReader(Path(segment_path))
-        events = await asyncio.to_thread(lambda: list(reader.iter_events()))
+        def _read() -> list[AtepEvent]:
+            return list(SegmentReader(Path(segment_path)).iter_events())
+
+        events = await asyncio.to_thread(_read)
+        created_ids: dict[bytes, str] = {}
         outcomes: list[dict[str, Any]] = []
         for event in events:
             header = event.header
+            parent_id = next((created_ids[p] for p in header.parents if p in created_ids), None)
             outcome = await self._request(
                 "POST",
                 "/v1/governance/events",
@@ -171,15 +188,20 @@ class AgenomicClient:
                     "sequence_number": header.stream_seq,
                     "timestamp": _hlc_to_iso(header.clock.physical_ms),
                     "payload": event.payload,
-                    "parent_event_id": header.parents[0].hex() if header.parents else None,
+                    "parent_event_id": parent_id,
                     "metadata": {
                         "event_id": header.event_id.hex(),
                         "stream": header.stream.value,
                         "causal_hash": event.causal_hash.hex(),
+                        "parent_causal_hashes": [p.hex() for p in header.parents],
                         "signer_key_id": event.attestation.signer_key_id,
                     },
                 },
+                idempotency_key=f"atep:{event.causal_hash.hex()}",
             )
+            created = outcome.get("outcome", {}).get("event_id")
+            if created:
+                created_ids[event.causal_hash] = str(created)
             outcomes.append(outcome)
         return {"ingested": len(outcomes), "outcomes": outcomes}
 
@@ -200,11 +222,12 @@ class AgenomicClient:
         json: Optional[dict[str, Any]] = None,
         data: Optional[dict[str, Any]] = None,
         files: Optional[dict[str, Any]] = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict[str, Any]:
         url = f"{self.endpoint}{path}"
         headers: dict[str, str] = {}
         if method.upper() == "POST":
-            headers["Idempotency-Key"] = ulid.new().str
+            headers["Idempotency-Key"] = idempotency_key or ulid.new().str
 
         last_error: Optional[Exception] = None
         for attempt in range(self._retry.max_retries + 1):
@@ -265,9 +288,7 @@ class SyncAgenomicClient:
     def upload_traces(self, envelopes: list[TraceEnvelope]) -> dict[str, Any]:
         return asyncio.run(self._inner.upload_traces(envelopes))
 
-    def upload_bundle(
-        self, agent_id: str, archive_path: Path, **kwargs: Any
-    ) -> dict[str, Any]:
+    def upload_bundle(self, agent_id: str, archive_path: Path, **kwargs: Any) -> dict[str, Any]:
         return asyncio.run(self._inner.upload_bundle(agent_id, archive_path, **kwargs))
 
     def upload_atep_segment(self, agent_id: str, segment_path: Path) -> dict[str, Any]:
