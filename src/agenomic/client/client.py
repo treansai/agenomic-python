@@ -114,7 +114,12 @@ class AgenomicClient:
         return await self._request("GET", "/v1/whoami")
 
     async def resolve_agent_id(self, agent: str) -> str:
-        """Resolve an agent reference (UUID, slug, name or ``agent://org/name``) to the gateway UUID."""
+        """Resolve an agent reference (UUID, slug, name or ``agent://org/name``) to the gateway UUID.
+
+        Example:
+            >>> # await client.resolve_agent_id("agent://portab/portab-claims")  # doctest: +SKIP
+            >>> # '1e004ebf-0a2f-4b93-ad7e-d87c91fdb385'
+        """
         if _is_uuid(agent):
             return agent
         cached = self._agent_ids.get(agent)
@@ -173,6 +178,11 @@ class AgenomicClient:
             return list(SegmentReader(Path(segment_path)).iter_events())
 
         events = await asyncio.to_thread(_read)
+        foreign = sorted({e.header.agent_id for e in events if e.header.agent_id != agent_id})
+        if foreign:
+            raise CloudError(
+                f"segment {segment_path} holds events of {foreign}, not {agent_id!r}; nothing uploaded"
+            )
         created_ids: dict[bytes, str] = {}
         outcomes: list[dict[str, Any]] = []
         for event in events:
@@ -191,6 +201,7 @@ class AgenomicClient:
                     "parent_event_id": parent_id,
                     "metadata": {
                         "event_id": header.event_id.hex(),
+                        "agent_id": header.agent_id,
                         "stream": header.stream.value,
                         "causal_hash": event.causal_hash.hex(),
                         "parent_causal_hashes": [p.hex() for p in header.parents],
@@ -288,8 +299,17 @@ class SyncAgenomicClient:
     def upload_traces(self, envelopes: list[TraceEnvelope]) -> dict[str, Any]:
         return asyncio.run(self._inner.upload_traces(envelopes))
 
-    def upload_bundle(self, agent_id: str, archive_path: Path, **kwargs: Any) -> dict[str, Any]:
-        return asyncio.run(self._inner.upload_bundle(agent_id, archive_path, **kwargs))
+    def upload_bundle(
+        self,
+        agent_id: str,
+        archive_path: Path,
+        *,
+        version: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        return asyncio.run(
+            self._inner.upload_bundle(agent_id, archive_path, version=version, metadata=metadata)
+        )
 
     def upload_atep_segment(self, agent_id: str, segment_path: Path) -> dict[str, Any]:
         return asyncio.run(self._inner.upload_atep_segment(agent_id, segment_path))
