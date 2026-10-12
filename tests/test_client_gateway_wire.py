@@ -269,3 +269,36 @@ async def test_atep_segment_of_another_agent_is_rejected_before_upload(
         await client.upload_atep_segment("agent://a/b", path)
     await client.aclose()
     assert httpx_mock.get_requests() == []
+
+
+@pytest.mark.asyncio
+async def test_tampered_atep_segment_is_rejected_before_upload(
+    httpx_mock: HTTPXMock, tmp_path: Path
+) -> None:
+    import ulid
+
+    from agenomic.atep.clock import Hlc
+    from agenomic.atep.event import AtepEvent, EventHeader, StreamId
+    from agenomic.atep.segment import SegmentWriter
+    from agenomic.crypto.signing import SigningKey
+
+    key = SigningKey.generate()
+    path = tmp_path / "s.atep"
+    header = EventHeader(
+        event_id=ulid.new().bytes,
+        agent_id="agent://a/b",
+        stream=StreamId.RUNTIME,
+        stream_seq=0,
+        clock=Hlc(1_760_000_000_000, 0, 0),
+        event_type="runtime.step",
+        payload_schema_uri="atep://schemas/v1/step",
+    )
+    sealed = AtepEvent.seal(header, {"n": 0}, key)
+    forged = sealed.model_copy(update={"payload": {"n": 1}})
+    with SegmentWriter(path) as writer:
+        writer.append(forged)
+    client = AgenomicClient(ENDPOINT, "k")
+    with pytest.raises(CloudError, match="causal hash"):
+        await client.upload_atep_segment("agent://a/b", path)
+    await client.aclose()
+    assert httpx_mock.get_requests() == []

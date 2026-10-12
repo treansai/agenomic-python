@@ -166,7 +166,9 @@ class AgenomicClient:
         (the hash itself stays in ``metadata.parent_causal_hashes``). Each event
         is posted with an ``Idempotency-Key`` derived from its causal hash, so
         re-running a partially uploaded segment replays the accepted events
-        instead of creating them twice.
+        instead of creating them twice. Every causal hash and the segment Merkle
+        root are recomputed before the first POST, and each event's signature is
+        forwarded in ``metadata`` so the gateway can verify it.
 
         Example:
             >>> # await client.upload_atep_segment("agent://org/a", Path("s.atep"))  # doctest: +SKIP
@@ -175,7 +177,17 @@ class AgenomicClient:
         from agenomic.atep.segment import SegmentReader
 
         def _read() -> list[AtepEvent]:
-            return list(SegmentReader(Path(segment_path)).iter_events())
+            reader = SegmentReader(Path(segment_path))
+            read = list(reader.iter_events())
+            for e in read:
+                if AtepEvent.compute_causal_hash(e.header, e.payload) != e.causal_hash:
+                    raise CloudError(
+                        f"segment {segment_path}: event {e.header.event_id.hex()} does not "
+                        "match its causal hash; nothing uploaded"
+                    )
+            if not reader.verify_merkle_root():
+                raise CloudError(f"segment {segment_path}: Merkle root mismatch; nothing uploaded")
+            return read
 
         events = await asyncio.to_thread(_read)
         foreign = sorted({e.header.agent_id for e in events if e.header.agent_id != agent_id})
@@ -206,6 +218,8 @@ class AgenomicClient:
                         "causal_hash": event.causal_hash.hex(),
                         "parent_causal_hashes": [p.hex() for p in header.parents],
                         "signer_key_id": event.attestation.signer_key_id,
+                        "signature": event.attestation.signature.hex(),
+                        "signature_algo": event.attestation.algo,
                     },
                 },
                 idempotency_key=f"atep:{event.causal_hash.hex()}",
