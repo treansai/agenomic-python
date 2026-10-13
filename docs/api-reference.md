@@ -174,9 +174,11 @@ All are context managers.
   -> TrackingSession`**
 - **`TrackingSession`** — `event(type, **fields)`, `step(name)` (context
   manager), `model_call(...)`, `tool_call(...)`, `intent(value)`,
-  `memory_write(...)`, `stop()`, `report()` (cloud), `to_jsonl()`
-  (local), `.events`, `.cloud`, `.session_id`. Context manager.
-- Constants: `SPEC_VERSION = "agenomic/v0.3"`, `TRACKING_EVENT_TYPES`.
+  `memory_write(...)`, `stop(status="completed")`, `report()` (cloud),
+  `to_jsonl()` (local), `.events`, `.cloud`, `.session_id`. Context manager.
+- Constants: `SPEC_VERSION = "agenomic/v0.3"`, `TRACKING_EVENT_TYPES`,
+  `STOP_STATUSES` (the `StopStatus` values `completed`, `failed`,
+  `cancelled`).
 
 ## RMP
 
