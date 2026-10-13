@@ -73,7 +73,13 @@ session.stop()                                # idempotent
 `session.step(name)` is a context manager: it emits `agent.step.started`
 on entry, `agent.step.completed` on success, and `agent.failed` (then
 re-raises) when the body raises. The session itself is also a context
-manager — leaving the `with` block calls `stop()`.
+manager: leaving the `with` block calls `stop()`.
+
+`stop()` takes the terminal `status` of the run: `"completed"` (default),
+`"failed"` or `"cancelled"`. Any other value raises `ValueError` before
+anything is sent. A `with` block that raises an exception stops the session
+as `failed`; one interrupted by `KeyboardInterrupt` or task cancellation
+stops it as `cancelled`.
 
 ## From a framework
 

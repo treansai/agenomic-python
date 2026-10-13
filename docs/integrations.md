@@ -108,6 +108,10 @@ await graph.ainvoke(state, config={"callbacks": [TrackingCallbackHandler(session
 session.stop()   # drains the emitter, then closes the session
 ```
 
+When the run raises, stop the session with `session.stop(status="failed")`.
+The handler emits `turn.failed` for the root run but never stops the session
+itself, because one session can span several turns.
+
 Build one handler per request and share the session. The mapping:
 
 | LangChain run             | tracking events                           |
