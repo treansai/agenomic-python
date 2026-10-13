@@ -40,5 +40,7 @@ header value overrides the exponential delay.
 
 ## Sync wrapper
 
-When async is not feasible, use `SyncAgenomicClient`. It wraps each
-method with `asyncio.run`. Prefer the async client whenever possible.
+When async is not feasible, use `SyncAgenomicClient`. It runs every
+method on one event loop owned by the client, so consecutive calls reuse
+the same connections; call `close()` when done. It is not usable inside a
+running event loop. Prefer the async client whenever possible.

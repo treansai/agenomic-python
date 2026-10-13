@@ -6,11 +6,12 @@ import asyncio
 import base64
 import logging
 import re
+import threading
 import uuid
-from collections.abc import Mapping
+from collections.abc import Coroutine, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, TypeVar
 
 import httpx
 import ulid
@@ -26,6 +27,7 @@ logger = logging.getLogger("agenomic.client")
 
 _RETRY_STATUS = {429, 502, 503, 504}
 _VERSION_IN_NAME = re.compile(r"-(\d+\.\d+\.\d+[0-9A-Za-z.+-]*?)\.bundle")
+_T = TypeVar("_T")
 
 
 def _is_uuid(value: str) -> bool:
@@ -313,15 +315,26 @@ class AgenomicClient:
 class SyncAgenomicClient:
     """Synchronous wrapper. Use only when async is not feasible.
 
+    Every call runs on one event loop owned by the client; :meth:`close` releases it.
+
     Example:
         >>> # SyncAgenomicClient("https://cloud.example", "k").whoami()  # doctest: +SKIP
     """
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self._inner = AgenomicClient(*args, **kwargs)
+        self._loop = asyncio.new_event_loop()
+        self._lock = threading.Lock()
+
+    def _run(self, call: Coroutine[Any, Any, _T]) -> _T:
+        with self._lock:
+            if self._loop.is_closed():
+                call.close()
+                raise RuntimeError("SyncAgenomicClient is closed")
+            return self._loop.run_until_complete(call)
 
     def whoami(self) -> dict[str, Any]:
-        return asyncio.run(self._inner.whoami())
+        return self._run(self._inner.whoami())
 
     def resolve_agent_id(self, agent: str) -> str:
         """Resolve an agent reference to the gateway UUID. See :meth:`AgenomicClient.resolve_agent_id`.
@@ -329,10 +342,10 @@ class SyncAgenomicClient:
         Example:
             >>> # SyncAgenomicClient("https://cloud.example", "k").resolve_agent_id("agent://o/a")  # doctest: +SKIP
         """
-        return asyncio.run(self._inner.resolve_agent_id(agent))
+        return self._run(self._inner.resolve_agent_id(agent))
 
     def upload_traces(self, envelopes: list[TraceEnvelope]) -> dict[str, Any]:
-        return asyncio.run(self._inner.upload_traces(envelopes))
+        return self._run(self._inner.upload_traces(envelopes))
 
     def upload_bundle(
         self,
@@ -342,18 +355,31 @@ class SyncAgenomicClient:
         version: Optional[str] = None,
         metadata: Optional[Mapping[str, JsonValue]] = None,
     ) -> dict[str, Any]:
-        return asyncio.run(
+        return self._run(
             self._inner.upload_bundle(agent_id, archive_path, version=version, metadata=metadata)
         )
 
     def upload_atep_segment(self, agent_id: str, segment_path: Path) -> dict[str, Any]:
-        return asyncio.run(self._inner.upload_atep_segment(agent_id, segment_path))
+        return self._run(self._inner.upload_atep_segment(agent_id, segment_path))
 
     def create_release(self, request: dict[str, Any]) -> dict[str, Any]:
-        return asyncio.run(self._inner.create_release(request))
+        return self._run(self._inner.create_release(request))
 
     def get_replay_report(self, job_id: str) -> dict[str, Any]:
-        return asyncio.run(self._inner.get_replay_report(job_id))
+        return self._run(self._inner.get_replay_report(job_id))
 
     def close(self) -> None:
-        asyncio.run(self._inner.aclose())
+        """Close the HTTP client and the event loop. Idempotent.
+
+        Example:
+            >>> SyncAgenomicClient("https://cloud.example", "k").close()
+        """
+        with self._lock:
+            if self._loop.is_closed():
+                return
+            try:
+                self._loop.run_until_complete(self._inner.aclose())
+                self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+                self._loop.run_until_complete(self._loop.shutdown_default_executor())
+            finally:
+                self._loop.close()

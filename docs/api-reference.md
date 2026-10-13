@@ -269,8 +269,9 @@ stamped `agenomic.rmp/v0.1`.
   Idempotency keys on every POST; retries on network errors and
   429/502/503/504; `Retry-After` honored; 401 →
   `AuthenticationError`, other errors → `CloudError`.
-- **`SyncAgenomicClient(...)`** — same surface, sync via `asyncio.run`;
-  `close()`. Not usable inside a running event loop.
+- **`SyncAgenomicClient(...)`**: same surface, sync on one event loop
+  owned by the client; `close()` releases it. Not usable inside a running
+  event loop.
 - **`RetryPolicy(max_retries=3, base_delay=0.2)`** — frozen dataclass;
   delay is `base_delay * 2**attempt`.
 - `agenomic.client.auth.bearer_header(api_key)` →

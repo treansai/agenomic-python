@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import pytest
 from pytest_httpx import HTTPXMock
 
-from agenomic.client.client import AgenomicClient
+from agenomic.client.client import AgenomicClient, SyncAgenomicClient
 from agenomic.client.retry import RetryPolicy
 from agenomic.exceptions import AuthenticationError, CloudError
 from agenomic.types.envelope import TraceEnvelope
@@ -124,3 +130,50 @@ async def test_user_agent_default() -> None:
     ua = client._client.headers["User-Agent"]
     assert __version__ in ua
     await client.aclose()
+
+
+@contextmanager
+def _keep_alive_gateway(body: dict[str, str]) -> Iterator[str]:
+    """Serve ``body`` over loopback HTTP/1.1 so the client pools one kept-alive connection."""
+    payload = json.dumps(body).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        timeout = 5
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_sync_client_serves_consecutive_calls_on_one_connection() -> None:
+    with _keep_alive_gateway({"id": "u1"}) as endpoint:
+        client = SyncAgenomicClient(endpoint, "k")
+        try:
+            assert [client.whoami() for _ in range(3)] == [{"id": "u1"}] * 3
+        finally:
+            client.close()
+
+
+def test_sync_client_close_is_idempotent_and_refuses_later_calls() -> None:
+    client = SyncAgenomicClient(ENDPOINT, "k")
+    client.close()
+    client.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        client.whoami()
