@@ -39,6 +39,8 @@ def _is_uuid(value: str) -> bool:
 def _envelope_to_gateway(envelope: TraceEnvelope, agent_uuid: str) -> dict[str, Any]:
     """Project a :class:`TraceEnvelope` onto the gateway ``CreateTraceRequest`` shape."""
     full = envelope.model_dump(mode="json", exclude_none=True)
+    status = "error" if envelope.error else full.get("status", "success")
+    full["status"] = status
     events: list[dict[str, Any]] = []
     for call in full.get("model_calls", []):
         events.append({"event_type": "model_call", "payload": call})
@@ -48,7 +50,7 @@ def _envelope_to_gateway(envelope: TraceEnvelope, agent_uuid: str) -> dict[str, 
         {
             "event_type": "run_completed",
             "payload": {
-                "status": "error" if envelope.error else "success",
+                "status": status,
                 "duration_ms": envelope.duration_ms,
                 "error": envelope.error,
             },
