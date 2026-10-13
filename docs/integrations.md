@@ -122,6 +122,14 @@ Build one handler per request and share the session. The mapping:
 | tool                      | `tool.call.*`                             |
 | retriever                 | `retrieval.*`                             |
 
+`model.model` names the model the run asked for: LangChain's `ls_model_name`,
+else the `model`, `model_name` or `model_id` of the invocation parameters or of
+the serialized model. The name the provider reports serving, such as a dated
+version, goes in `model["gen_ai.response.model"]`, so it never reads as a drift
+from the declared model. A model that names itself only in its response takes
+that name on `model.call.completed`; its `model.call.started` carries an empty
+`model.model` rather than a placeholder.
+
 Only the root chain and `graph:step:`-tagged nodes produce chain spans. Every
 other chain run is silent: LangChain's own plumbing (`RunnableSequence`,
 `ChannelWrite`, `seq:step:N`), but equally any sub-chain of your own that

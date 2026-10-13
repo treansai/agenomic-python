@@ -10,8 +10,9 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
-from langchain_core.outputs import ChatGeneration, LLMResult
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult, LLMResult
 
 from agenomic import Client
 from agenomic.exceptions import CloudError
@@ -487,3 +488,139 @@ async def test_rendered_hash_equals_vector() -> None:
     event = await _model_started(_pinned_metadata(agenomic_rendered_hash=rendered.rendered_hash))
     assert event["prompt_rendered_hash"] == expected["rendered_hash"]
     assert event["prompt_rendered_hash"] != event["input_hash"]
+
+
+class _ScriptedChat(BaseChatModel):
+    served: str = "scripted-gpt-4o"
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-chat"
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: Any = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        message = AIMessage(content="ok")
+        return ChatResult(
+            generations=[ChatGeneration(message=message)], llm_output={"model_name": self.served}
+        )
+
+
+class _DatedChat(_ScriptedChat):
+    model_name: str = "gpt-4o-mini"
+    served: str = "gpt-4o-mini-2024-07-18"
+
+
+async def _model_events(
+    serialized: dict[str, Any],
+    params: dict[str, Any],
+    served: str,
+    metadata: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    session = _session()
+    handler = TrackingCallbackHandler(session)
+    run = uuid4()
+    await handler.on_chat_model_start(
+        serialized,
+        [[HumanMessage(content="hi")]],
+        run_id=run,
+        metadata=metadata,
+        invocation_params=params,
+    )
+    await handler.on_llm_end(_llm_result(served), run_id=run)
+    assert flush(session)
+    started, completed = session.events
+    return started, completed
+
+
+async def test_a_dated_served_model_keeps_the_requested_model_id() -> None:
+    started, completed = await _model_events(
+        {"lc": 1, "type": "constructor", "kwargs": {"model_name": "gpt-4o-mini"}},
+        {"model": "gpt-4o-mini", "model_name": "gpt-4o-mini", "_type": "openai-chat"},
+        "gpt-4o-mini-2024-07-18",
+        {"ls_provider": "openai", "ls_model_name": "gpt-4o-mini"},
+    )
+    assert started["model"]["model"] == "gpt-4o-mini"
+    assert completed["model"] == {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "gen_ai.response.model": "gpt-4o-mini-2024-07-18",
+    }
+    assert completed["name"] == "gpt-4o-mini"
+
+
+@pytest.mark.parametrize(
+    ("serialized", "params", "expected"),
+    [
+        (
+            {"kwargs": {"model_id": "anthropic.claude-v2"}},
+            {"_type": "bedrock"},
+            "anthropic.claude-v2",
+        ),
+        ({"kwargs": {"model": "mistral-large"}}, {"_type": "mistral"}, "mistral-large"),
+        ({"type": "not_implemented"}, {"model_id": "llama-3-8b", "_type": "hf"}, "llama-3-8b"),
+    ],
+)
+async def test_the_model_id_is_read_from_invocation_params_and_serialized_kwargs(
+    serialized: dict[str, Any], params: dict[str, Any], expected: str
+) -> None:
+    started, completed = await _model_events(serialized, params, f"{expected}-served")
+    assert started["model"]["model"] == expected
+    assert completed["model"]["model"] == expected
+    assert completed["model"]["gen_ai.response.model"] == f"{expected}-served"
+
+
+async def test_an_unnamed_model_is_never_reported_as_unknown() -> None:
+    started, completed = await _model_events(
+        {"lc": 1, "type": "not_implemented", "id": ["tests", "Scripted"]},
+        {"_type": "scripted-chat", "stop": None},
+        "scripted-gpt-4o",
+        {"ls_provider": "scripted"},
+    )
+    assert started["model"] == {"provider": "scripted", "model": ""}
+    assert "name" not in started
+    assert completed["model"]["model"] == "scripted-gpt-4o"
+    assert completed["name"] == "scripted-gpt-4o"
+
+
+async def test_real_chat_models_report_a_stable_model_id() -> None:
+    session = _session()
+    handler = TrackingCallbackHandler(session)
+    for model in (_DatedChat(), _ScriptedChat()):
+        for _ in range(2):
+            await model.ainvoke([HumanMessage(content="hi")], config={"callbacks": [handler]})
+    assert flush(session)
+
+    reported = [(e["type"], e["model"]["model"]) for e in session.events]
+    assert reported == [
+        ("model.call.started", "gpt-4o-mini"),
+        ("model.call.completed", "gpt-4o-mini"),
+        ("model.call.started", "gpt-4o-mini"),
+        ("model.call.completed", "gpt-4o-mini"),
+        ("model.call.started", ""),
+        ("model.call.completed", "scripted-gpt-4o"),
+        ("model.call.started", ""),
+        ("model.call.completed", "scripted-gpt-4o"),
+    ]
+    assert session.events[1]["model"]["gen_ai.response.model"] == "gpt-4o-mini-2024-07-18"
+
+
+async def test_a_streamed_response_names_the_model_from_its_metadata() -> None:
+    session = _session()
+    handler = TrackingCallbackHandler(session)
+    run = uuid4()
+    await handler.on_chat_model_start(
+        {},
+        [[HumanMessage(content="hi")]],
+        run_id=run,
+        metadata={"ls_provider": "scripted"},
+        invocation_params={"_type": "scripted-chat"},
+    )
+    message = AIMessage(content="ok", response_metadata={"model_name": "scripted-gpt-4o"})
+    await handler.on_llm_end(LLMResult(generations=[[ChatGeneration(message=message)]]), run_id=run)
+    assert flush(session)
+    assert session.events[-1]["model"]["model"] == "scripted-gpt-4o"
