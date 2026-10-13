@@ -155,7 +155,7 @@ session.to_jsonl()                                 # local mode export
 ```
 
 RMP loop (all local-first, same `Client`): `client.rmp.start(...)`,
-`client.review.run(agent=...)`, `client.monitor.start(...)` →
+`client.review.run(agent=..., outcome=...)`, `client.monitor.start(...)` →
 `session.event({"type": "loop.detected"})` →
 `client.monitor.findings(id)`, `client.protect.action_plan(...)`,
 `client.review.approve_scenario_enrichment(proposal_id, reviewer=...)`.

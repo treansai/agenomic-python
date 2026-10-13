@@ -19,13 +19,15 @@ proposals → Review).
 from __future__ import annotations
 
 import threading
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import quote
 
 import ulid
 
-from agenomic.exceptions import CloudError
+from agenomic._transport import api_request
+from agenomic.exceptions import ApiError, CloudError
 
 #: Version stamped on every RMP wire type.
 RMP_SPEC_VERSION = "agenomic.rmp/v0.1"
@@ -44,6 +46,15 @@ _LOCAL_FINDING_KINDS = {
     "harness.violation": ("harness_violation", "high"),
     "agent.failed": ("failure", "high"),
 }
+
+
+class ReviewConflictError(ApiError):
+    """A review run refused with 409, such as on an RMP session holding an automatic review.
+
+    Example:
+        >>> ReviewConflictError("conflict", 409, "automatic review present").status
+        409
+    """
 
 
 def _now_iso() -> str:
@@ -234,28 +245,47 @@ class ReviewResource:
         self,
         *,
         agent: str,
+        outcome: Optional[Mapping[str, Any]] = None,
+        rmp_session_id: Optional[str] = None,
         scenarios: Optional[list[dict[str, Any]]] = None,
         risk_matrix: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """Run one Review pass over an agent.
+        """Record one Review pass over an agent.
 
-        Cloud mode submits the run to the Review engine; local mode returns a
-        stub outcome (scenario execution and risk scoring run in the CLI).
+        ``outcome`` is the JSON object your Review engine produced. Cloud mode
+        requires it and stores it as a review run, linked to ``rmp_session_id``
+        when given; a 409 raises :class:`ReviewConflictError`. The gateway runs no
+        scenario, so ``scenarios`` and ``risk_matrix`` are refused there and only
+        shape the local stub (scenario execution and risk scoring run in the CLI).
+
+        Example:
+            >>> from agenomic import Client
+            >>> Client().review.run(agent="agent://acme/demo", outcome={"result": "warn"})["result"]
+            'warn'
         """
         if getattr(self._client, "is_cloud", False):
-            body: dict[str, Any] = {
-                "spec_version": RMP_SPEC_VERSION,
-                "agent_id": agent,
-            }
-            if scenarios is not None:
-                body["scenarios"] = scenarios
-            if risk_matrix is not None:
-                body["risk_matrix"] = risk_matrix
-            response = self._client._post("/v1/review/runs", body)
-            return _unwrap(response, "run")
+            if not isinstance(outcome, Mapping):
+                raise ValueError("review.run in cloud mode requires outcome, a JSON object")
+            for name, value in (("scenarios", scenarios), ("risk_matrix", risk_matrix)):
+                if value is not None:
+                    raise ValueError(
+                        f"review.run in cloud mode stores outcome only; {name} is not sent"
+                    )
+            body: dict[str, Any] = {"agent_id": agent, "outcome": dict(outcome)}
+            if rmp_session_id:
+                body["rmp_session_id"] = rmp_session_id
+            try:
+                response = api_request(self._client, "POST", "/v1/review/runs", body)
+            except ApiError as error:
+                if error.status == 409:
+                    raise ReviewConflictError(
+                        error.code, error.status, error.message, error.details
+                    ) from error
+                raise
+            return _unwrap(response.body, "run")
         selected = scenarios if scenarios is not None else self.list_scenarios(agent=agent)
         now = _now_iso()
-        return {
+        record: dict[str, Any] = {
             "spec_version": RMP_SPEC_VERSION,
             "session_id": _new_id("rev"),
             "agent_id": agent,
@@ -266,6 +296,13 @@ class ReviewResource:
             "started_at": now,
             "ended_at": now,
         }
+        if outcome is not None:
+            record["outcome"] = dict(outcome)
+            if isinstance(outcome.get("result"), str):
+                record["result"] = outcome["result"]
+        if rmp_session_id:
+            record["rmp_session_id"] = rmp_session_id
+        return record
 
     def list_scenarios(self, agent: Optional[str] = None) -> list[dict[str, Any]]:
         """List test scenarios, optionally filtered by agent id."""

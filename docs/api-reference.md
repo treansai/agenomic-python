@@ -186,7 +186,9 @@ stamped `agenomic.rmp/v0.1`.
 - **`RmpResource`** — `start(*, agent, release_id=None,
   environment="production", ledger=False, genome_hash=None)`, `get(id)`,
   `list()`, `report(id)`.
-- **`ReviewResource`** — `run(*, agent, scenarios=None, risk_matrix=None)`,
+- **`ReviewResource`**: `run(*, agent, outcome=None, rmp_session_id=None,
+  scenarios=None, risk_matrix=None)` (cloud mode requires `outcome`; a 409
+  raises `ReviewConflictError`),
   `add_scenario(scenario)`, `list_scenarios(agent=None)`,
   `approve_scenario_enrichment(proposal_id, *, session_id=None,
   reviewer=None)`, `.proposals`.

@@ -379,3 +379,72 @@ def test_cloud_rmp_stop_posts_to_session_stop_route(httpx_mock) -> None:
     request = httpx_mock.get_requests()[0]
     assert request.url == "https://api.test/v1/rmp/sessions/rmp_1/stop"
     assert request.headers["Authorization"] == "Bearer key_123"
+
+
+def test_local_review_run_records_the_caller_outcome() -> None:
+    client = Client()
+    outcome = {"result": "fail", "findings": [{"kind": "refund_over_limit"}]}
+    run = client.review.run(agent="agent://acme/a", outcome=outcome, rmp_session_id="rmp_1")
+    assert run["outcome"] == outcome
+    assert run["result"] == "fail"
+    assert run["rmp_session_id"] == "rmp_1"
+
+
+def test_cloud_review_run_posts_the_caller_outcome(httpx_mock) -> None:
+    outcome = {"result": "fail", "findings": [{"kind": "refund_over_limit"}]}
+    run = {"run_id": "rev_1", "agent_id": "agent://treans/claims-agent", "outcome": outcome}
+    httpx_mock.add_response(
+        method="POST", url="https://api.test/v1/review/runs", status_code=201, json={"run": run}
+    )
+    client = Client(api_key="key_123", base_url="https://api.test")
+    recorded = client.review.run(
+        agent="agent://treans/claims-agent", outcome=outcome, rmp_session_id="rmp_1"
+    )
+    assert recorded == run
+
+    request = httpx_mock.get_requests()[0]
+    assert request.headers["Authorization"] == "Bearer key_123"
+    assert json.loads(request.content) == {
+        "agent_id": "agent://treans/claims-agent",
+        "outcome": outcome,
+        "rmp_session_id": "rmp_1",
+    }
+
+
+def test_cloud_review_run_conflict_raises_a_typed_error(httpx_mock) -> None:
+    from agenomic.exceptions import CloudError
+    from agenomic.rmp import ReviewConflictError
+
+    httpx_mock.add_response(
+        method="POST",
+        url="https://api.test/v1/review/runs",
+        status_code=409,
+        json={
+            "error": {
+                "code": "conflict",
+                "message": "the RMP session holds an automatic review",
+                "request_id": "req_1",
+            }
+        },
+    )
+    client = Client(base_url="https://api.test")
+    with pytest.raises(ReviewConflictError) as raised:
+        client.review.run(agent="agent://a/b", outcome={"result": "pass"}, rmp_session_id="rmp_2")
+    assert (raised.value.status, raised.value.code) == (409, "conflict")
+    assert raised.value.request_id == "req_1"
+    assert isinstance(raised.value, CloudError)
+
+
+def test_cloud_review_run_refuses_a_missing_outcome_before_any_request(httpx_mock) -> None:
+    client = Client(base_url="https://api.test")
+    with pytest.raises(ValueError, match="outcome"):
+        client.review.run(agent="agent://a/b")
+    with pytest.raises(ValueError, match="outcome"):
+        client.review.run(agent="agent://a/b", outcome="pass")
+    with pytest.raises(ValueError, match="scenarios"):
+        client.review.run(
+            agent="agent://a/b", outcome={"result": "pass"}, scenarios=[{"scenario_id": "sc_1"}]
+        )
+    with pytest.raises(ValueError, match="risk_matrix"):
+        client.review.run(agent="agent://a/b", outcome={"result": "pass"}, risk_matrix={})
+    assert httpx_mock.get_requests() == []
