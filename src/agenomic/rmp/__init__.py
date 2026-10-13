@@ -8,6 +8,7 @@ from agenomic.rmp.resources import (
     MonitorResource,
     MonitorSession,
     ProtectResource,
+    ReviewConflictError,
     ReviewResource,
     RmpResource,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "MonitorResource",
     "MonitorSession",
     "ProtectResource",
+    "ReviewConflictError",
     "ReviewResource",
     "RmpResource",
 ]

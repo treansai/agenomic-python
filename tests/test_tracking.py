@@ -170,3 +170,68 @@ def test_cloud_stop_stays_retryable_on_failure(httpx_mock) -> None:
         session.stop()
     # not marked stopped → retry issues another request and succeeds
     session.stop()
+
+
+def _cloud_session(httpx_mock, session_id: str = "s1") -> TrackingSession:
+    httpx_mock.add_response(
+        method="POST",
+        url="https://api.test/v1/tracking/sessions",
+        json={"session": {"session_id": session_id}},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url=f"https://api.test/v1/tracking/sessions/{session_id}/stop",
+        json={},
+    )
+    return Client(base_url="https://api.test").tracking.start(agent="agent://a/b")
+
+
+def _stop_body(httpx_mock) -> dict:
+    [request] = [r for r in httpx_mock.get_requests() if r.url.path.endswith("/stop")]
+    return json.loads(request.content)
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
+def test_cloud_stop_sends_the_terminal_status(httpx_mock, status: str) -> None:
+    _cloud_session(httpx_mock).stop(status=status)
+    assert _stop_body(httpx_mock) == {"status": status}
+
+
+def test_cloud_stop_defaults_to_completed(httpx_mock) -> None:
+    _cloud_session(httpx_mock).stop()
+    assert _stop_body(httpx_mock) == {"status": "completed"}
+
+
+def test_stop_refuses_a_non_terminal_status_before_any_side_effect(httpx_mock) -> None:
+    session = _cloud_session(httpx_mock)
+    drained: list[bool] = []
+    session.on_stop(lambda: drained.append(True))
+    for status in ("active", "bogus"):
+        with pytest.raises(ValueError, match="completed"):
+            session.stop(status=status)
+    assert drained == []
+    assert not session.stopped
+    assert [r.url.path for r in httpx_mock.get_requests()] == ["/v1/tracking/sessions"]
+    session.stop(status="failed")
+    assert drained == [True]
+    assert _stop_body(httpx_mock) == {"status": "failed"}
+
+
+def test_context_manager_stops_a_raising_run_as_failed(httpx_mock) -> None:
+    with pytest.raises(RuntimeError), _cloud_session(httpx_mock):
+        raise RuntimeError("model call failed")
+    assert _stop_body(httpx_mock) == {"status": "failed"}
+
+
+def test_context_manager_stops_an_interrupted_run_as_cancelled(httpx_mock) -> None:
+    import asyncio
+
+    with pytest.raises(asyncio.CancelledError), _cloud_session(httpx_mock):
+        raise asyncio.CancelledError
+    assert _stop_body(httpx_mock) == {"status": "cancelled"}
+
+
+def test_context_manager_stops_a_clean_run_as_completed(httpx_mock) -> None:
+    with _cloud_session(httpx_mock) as session:
+        assert not session.stopped
+    assert _stop_body(httpx_mock) == {"status": "completed"}

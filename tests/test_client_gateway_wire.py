@@ -64,6 +64,33 @@ async def test_upload_traces_matches_batch_create_trace_request(httpx_mock: HTTP
 
 
 @pytest.mark.asyncio
+async def test_upload_traces_carries_the_run_status_in_the_trace_payload(
+    httpx_mock: HTTPXMock,
+) -> None:
+    httpx_mock.add_response(url=f"{ENDPOINT}/v1/traces/batch", status_code=201, json={"traces": []})
+    failed = _env()
+    failed.error = "rep.escalate failed"
+    failed.tool_calls = [ToolCall(tool="rep.escalate", protocol="local", status="error")]
+    labelled_failed = TraceEnvelope.model_validate({**_env().model_dump(), "status": "error"})
+    error_wins = TraceEnvelope.model_validate(
+        {**_env().model_dump(), "status": "success", "error": "boom"}
+    )
+    client = AgenomicClient(ENDPOINT, "k", agent_ids={"agent://portab/portab-claims": AGENT_UUID})
+    await client.upload_traces([failed, _env(), labelled_failed, error_wins])
+    await client.aclose()
+
+    items = json.loads(httpx_mock.get_requests()[0].read())["items"]
+    statuses = [(i["payload"]["status"], i["events"][-1]["payload"]["status"]) for i in items]
+    assert statuses == [
+        ("error", "error"),
+        ("success", "success"),
+        ("error", "error"),
+        ("error", "error"),
+    ]
+    assert items[0]["events"][-1]["payload"]["error"] == "rep.escalate failed"
+
+
+@pytest.mark.asyncio
 async def test_unknown_agent_raises(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(url=f"{ENDPOINT}/v1/agents", json={"agents": []})
     client = AgenomicClient(ENDPOINT, "k")

@@ -108,6 +108,10 @@ await graph.ainvoke(state, config={"callbacks": [TrackingCallbackHandler(session
 session.stop()   # drains the emitter, then closes the session
 ```
 
+When the run raises, stop the session with `session.stop(status="failed")`.
+The handler emits `turn.failed` for the root run but never stops the session
+itself, because one session can span several turns.
+
 Build one handler per request and share the session. The mapping:
 
 | LangChain run             | tracking events                           |
@@ -117,6 +121,14 @@ Build one handler per request and share the session. The mapping:
 | chat model or LLM         | `model.call.*` with `usage`               |
 | tool                      | `tool.call.*`                             |
 | retriever                 | `retrieval.*`                             |
+
+`model.model` names the model the run asked for: LangChain's `ls_model_name`,
+else the `model`, `model_name` or `model_id` of the invocation parameters or of
+the serialized model. The name the provider reports serving, such as a dated
+version, goes in `model["gen_ai.response.model"]`, so it never reads as a drift
+from the declared model. A model that names itself only in its response takes
+that name on `model.call.completed`; its `model.call.started` carries an empty
+`model.model` rather than a placeholder.
 
 Only the root chain and `graph:step:`-tagged nodes produce chain spans. Every
 other chain run is silent: LangChain's own plumbing (`RunnableSequence`,

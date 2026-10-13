@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID
 
+from agenomic.canonical.otel import GEN_AI_RESPONSE_MODEL
 from agenomic.crypto.canonical import canonical_cbor
 from agenomic.crypto.hashing import blake3_hex
 from agenomic.tracking.session import TrackingSession
@@ -62,6 +63,7 @@ _SHA256 = re.compile(r"sha256:[0-9a-f]{64}", re.ASCII)
 _SCALAR = re.compile(r"[A-Za-z0-9_.:\-]{1,256}", re.ASCII)
 _SLOT = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+", re.ASCII)
 _REF = re.compile(r"prm_[a-z0-9]+(?:[_-][a-z0-9]+)*:[1-9][0-9]{0,9}", re.ASCII)
+_MODEL_KEYS = ("model", "model_name", "model_id")
 
 
 def _hash(data: Any) -> str:
@@ -459,25 +461,25 @@ class TrackingCallbackHandler(AsyncCallbackHandler):
         self,
         run_id: UUID,
         parent_run_id: UUID | None,
+        serialized: dict[str, Any] | None,
         metadata: dict[str, Any] | None,
         invocation_params: dict[str, Any] | None,
         prompt: Any,
     ) -> None:
         params = invocation_params or {}
         meta = metadata or {}
-        model = (
+        model = str(
             meta.get("ls_model_name")
-            or params.get("model")
-            or params.get("model_name")
-            or "unknown"
+            or _model_id(params)
+            or _model_id((serialized or {}).get("kwargs"))
         )
         provider = meta.get("ls_provider") or params.get("_type") or "unknown"
-        model_meta: dict[str, Any] = {"provider": str(provider), "model": str(model)}
+        model_meta: dict[str, Any] = {"provider": str(provider), "model": model}
         temperature = params.get("temperature", meta.get("ls_temperature"))
         if isinstance(temperature, (int, float)):
             model_meta["temperature"] = temperature
         run = self._open(
-            run_id, parent_run_id, kind="model", emitted=True, name=str(model), meta=model_meta
+            run_id, parent_run_id, kind="model", emitted=True, name=model, meta=model_meta
         )
         fields = self._span_fields(run)
         fields["model"] = model_meta
@@ -497,7 +499,9 @@ class TrackingCallbackHandler(AsyncCallbackHandler):
         **kwargs: Any,
     ) -> Any:
         prompt = [[_message_dump(m) for m in batch] for batch in messages]
-        self._model_start(run_id, parent_run_id, metadata, kwargs.get("invocation_params"), prompt)
+        self._model_start(
+            run_id, parent_run_id, serialized, metadata, kwargs.get("invocation_params"), prompt
+        )
 
     async def on_llm_start(
         self,
@@ -510,7 +514,9 @@ class TrackingCallbackHandler(AsyncCallbackHandler):
         metadata: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
-        self._model_start(run_id, parent_run_id, metadata, kwargs.get("invocation_params"), prompts)
+        self._model_start(
+            run_id, parent_run_id, serialized, metadata, kwargs.get("invocation_params"), prompts
+        )
 
     async def on_llm_end(
         self,
@@ -524,12 +530,14 @@ class TrackingCallbackHandler(AsyncCallbackHandler):
         run = self._close(run_id)
         if run is None:
             return
-        llm_output = response.llm_output or {}
         model_meta = dict(run.meta)
-        if llm_output.get("model_name"):
-            model_meta["model"] = str(llm_output["model_name"])
+        served = _model_id(response.llm_output) or _model_id(_response_metadata(response))
+        if served:
+            model_meta[GEN_AI_RESPONSE_MODEL] = served
+            model_meta["model"] = model_meta["model"] or served
         fields = self._end_fields(run)
-        fields["name"] = model_meta["model"]
+        if model_meta["model"]:
+            fields["name"] = model_meta["model"]
         fields["model"] = model_meta
         fields["output_hash"] = _hash(_result_dump(response))
         usage = _usage(response)
@@ -705,6 +713,22 @@ def _prompt_fields(meta: dict[str, Any]) -> dict[str, Any]:
     if refs:
         fields["prompt_refs"] = refs
     return fields
+
+
+def _model_id(source: Any) -> str:
+    if isinstance(source, dict):
+        for key in _MODEL_KEYS:
+            value = source.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return ""
+
+
+def _response_metadata(response: Any) -> Any:
+    for batch in getattr(response, "generations", None) or []:
+        for generation in batch:
+            return getattr(getattr(generation, "message", None), "response_metadata", None)
+    return None
 
 
 def _message_dump(message: Any) -> Any:

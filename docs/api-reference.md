@@ -174,9 +174,11 @@ All are context managers.
   -> TrackingSession`**
 - **`TrackingSession`** — `event(type, **fields)`, `step(name)` (context
   manager), `model_call(...)`, `tool_call(...)`, `intent(value)`,
-  `memory_write(...)`, `stop()`, `report()` (cloud), `to_jsonl()`
-  (local), `.events`, `.cloud`, `.session_id`. Context manager.
-- Constants: `SPEC_VERSION = "agenomic/v0.3"`, `TRACKING_EVENT_TYPES`.
+  `memory_write(...)`, `stop(status="completed")`, `report()` (cloud),
+  `to_jsonl()` (local), `.events`, `.cloud`, `.session_id`. Context manager.
+- Constants: `SPEC_VERSION = "agenomic/v0.3"`, `TRACKING_EVENT_TYPES`,
+  `STOP_STATUSES` (the `StopStatus` values `completed`, `failed`,
+  `cancelled`).
 
 ## RMP
 
@@ -186,7 +188,9 @@ stamped `agenomic.rmp/v0.1`.
 - **`RmpResource`** — `start(*, agent, release_id=None,
   environment="production", ledger=False, genome_hash=None)`, `get(id)`,
   `list()`, `report(id)`.
-- **`ReviewResource`** — `run(*, agent, scenarios=None, risk_matrix=None)`,
+- **`ReviewResource`**: `run(*, agent, outcome=None, rmp_session_id=None,
+  scenarios=None, risk_matrix=None)` (cloud mode requires `outcome`; a 409
+  raises `ReviewConflictError`),
   `add_scenario(scenario)`, `list_scenarios(agent=None)`,
   `approve_scenario_enrichment(proposal_id, *, session_id=None,
   reviewer=None)`, `.proposals`.
@@ -269,8 +273,9 @@ stamped `agenomic.rmp/v0.1`.
   Idempotency keys on every POST; retries on network errors and
   429/502/503/504; `Retry-After` honored; 401 →
   `AuthenticationError`, other errors → `CloudError`.
-- **`SyncAgenomicClient(...)`** — same surface, sync via `asyncio.run`;
-  `close()`. Not usable inside a running event loop.
+- **`SyncAgenomicClient(...)`**: same surface, sync on one event loop
+  owned by the client; `close()` releases it. Not usable inside a running
+  event loop.
 - **`RetryPolicy(max_retries=3, base_delay=0.2)`** — frozen dataclass;
   delay is `base_delay * 2**attempt`.
 - `agenomic.client.auth.bearer_header(api_key)` →

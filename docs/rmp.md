@@ -44,9 +44,19 @@ scenario = client.review.add_scenario(
 )
 client.review.list_scenarios(agent="agent://acme/claims-agent")
 
-outcome = client.review.run(agent="agent://acme/claims-agent")
-assert outcome["result"] in ("pass", "warn", "fail")
+run = client.review.run(
+    agent="agent://acme/claims-agent",
+    outcome={"result": "fail", "findings": [{"kind": "refund_over_limit"}]},
+    rmp_session_id=rmp["session_id"],
+)
 ```
+
+`review.run` records the outcome your Review engine produced; the gateway
+runs no scenario. In cloud mode `outcome` (a JSON object) is required,
+`scenarios` and `risk_matrix` are refused, and a 409, for example on an RMP
+session that holds an automatic review, raises
+`agenomic.rmp.ReviewConflictError`. In local mode `review.run(agent=...)`
+without an outcome still returns a `pass` stub listing the agent's scenarios.
 
 ## Monitor — in production
 

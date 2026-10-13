@@ -17,7 +17,8 @@ import contextlib
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterator, Optional, TypedDict
+from types import TracebackType
+from typing import Any, Callable, Iterator, Literal, Optional, TypedDict, get_args
 
 import ulid
 
@@ -41,6 +42,9 @@ class TrackingBaseline(TypedDict, total=False):
 logger = logging.getLogger("agenomic.tracking")
 
 SPEC_VERSION = "agenomic/v0.3"
+
+StopStatus = Literal["completed", "failed", "cancelled"]
+STOP_STATUSES: frozenset[str] = frozenset(get_args(StopStatus))
 
 #: The runtime event vocabulary (a superset of the v0.3 event-type registry).
 TRACKING_EVENT_TYPES = frozenset(
@@ -221,8 +225,15 @@ class TrackingSession:
         """
         self._on_stop.append(callback)
 
-    def stop(self) -> None:
-        """Finalize the session. Idempotent."""
+    def stop(self, status: StopStatus = "completed") -> None:
+        """Finalize the session with a terminal ``status``. Idempotent.
+
+        Example:
+            >>> session = Client().tracking.start(agent="agent://acme/support")  # doctest: +SKIP
+            >>> session.stop(status="failed")  # doctest: +SKIP
+        """
+        if status not in STOP_STATUSES:
+            raise ValueError(f"stop status must be one of {sorted(STOP_STATUSES)}, not {status!r}")
         if self._stopped:
             return
         while self._on_stop:
@@ -236,7 +247,7 @@ class TrackingSession:
         # Mark stopped only after a successful stop so a failed cloud POST stays
         # retryable and the remote session isn't orphaned.
         if self.cloud:
-            self._client._post(f"/v1/tracking/sessions/{self.session_id}/stop", {})
+            self._client._post(f"/v1/tracking/sessions/{self.session_id}/stop", {"status": status})
         self._stopped = True
 
     def report(self) -> dict[str, Any]:
@@ -258,8 +269,18 @@ class TrackingSession:
     def __enter__(self) -> TrackingSession:
         return self
 
-    def __exit__(self, *_exc: Any) -> None:
-        self.stop()
+    def __exit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc: Optional[BaseException],
+        tb: Optional[TracebackType],
+    ) -> None:
+        if exc_type is None:
+            self.stop()
+        elif issubclass(exc_type, Exception):
+            self.stop(status="failed")
+        else:
+            self.stop(status="cancelled")
 
 
 class TrackingResource:
