@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Optional, Sequence, Union
 from urllib.parse import urlencode
 
-from agenomic.protect.models import ProtectOverlay
+from agenomic.protect.models import ProtectExemption, ProtectOverlay, ProtectSettings
 from agenomic.rmp.resources import ProtectResource as _LoopProtectResource
 from agenomic.tools.models import ToolExecutionError
 from agenomic.tools.resources import atyped_request, typed_request
@@ -358,10 +358,80 @@ class RestrictionsResource(_Namespace):
         return await self._arequest("POST", f"/v1/protect/restrictions/{restriction_id}/lift", {})
 
 
+def _exemption_body(
+    scope_kind: str, reason: str, expires_at: str, scope_ref: Optional[str]
+) -> dict[str, Any]:
+    body: dict[str, Any] = {"scope_kind": scope_kind, "reason": reason, "expires_at": expires_at}
+    if scope_ref is not None:
+        body["scope_ref"] = scope_ref
+    return body
+
+
+Exemptions = list[ProtectExemption]
+
+
+class ExemptionsResource(_Namespace):
+    """``client.protect.exemptions``: time-boxed exemptions from mandatory protection.
+
+    Creating and lifting an exemption is reserved to organization owners.
+    """
+
+    def list(self, *, status: Optional[str] = None) -> Exemptions:
+        response = self._request("GET", "/v1/protect/exemptions" + _query(status=status))
+        return [ProtectExemption.model_validate(item) for item in _items(response, "exemptions")]
+
+    async def alist(self, *, status: Optional[str] = None) -> Exemptions:
+        response = await self._arequest("GET", "/v1/protect/exemptions" + _query(status=status))
+        return [ProtectExemption.model_validate(item) for item in _items(response, "exemptions")]
+
+    def create(
+        self,
+        *,
+        scope_kind: str,
+        reason: str,
+        expires_at: str,
+        scope_ref: Optional[str] = None,
+    ) -> ProtectExemption:
+        body = _exemption_body(scope_kind, reason, expires_at, scope_ref)
+        return ProtectExemption.model_validate(
+            self._request("POST", "/v1/protect/exemptions", body)
+        )
+
+    async def acreate(
+        self,
+        *,
+        scope_kind: str,
+        reason: str,
+        expires_at: str,
+        scope_ref: Optional[str] = None,
+    ) -> ProtectExemption:
+        body = _exemption_body(scope_kind, reason, expires_at, scope_ref)
+        return ProtectExemption.model_validate(
+            await self._arequest("POST", "/v1/protect/exemptions", body)
+        )
+
+    def lift(self, exemption_id: str) -> ProtectExemption:
+        return ProtectExemption.model_validate(
+            self._request("POST", f"/v1/protect/exemptions/{exemption_id}/lift", {})
+        )
+
+    async def alift(self, exemption_id: str) -> ProtectExemption:
+        return ProtectExemption.model_validate(
+            await self._arequest("POST", f"/v1/protect/exemptions/{exemption_id}/lift", {})
+        )
+
+
 def _kill_switch_body(scope_kind: str, scope_ref: Optional[str], reason: str) -> dict[str, Any]:
     body: dict[str, Any] = {"scope_kind": scope_kind, "reason": reason}
     if scope_ref is not None:
         body["scope_ref"] = scope_ref
+    return body
+
+
+def _settings_body(protect_mandatory: bool, expected_revision: Optional[int]) -> dict[str, Any]:
+    body: dict[str, Any] = {"protect_mandatory": protect_mandatory}
+    if expected_revision is not None:
+        body["expected_revision"] = expected_revision
     return body
 
 
@@ -402,6 +472,7 @@ class ProtectResource(_LoopProtectResource, _Namespace):
         self.policies = PoliciesResource(client)
         self.bindings = BindingsResource(client)
         self.restrictions = RestrictionsResource(client)
+        self.exemptions = ExemptionsResource(client)
 
     def overlay(self, run_id: str) -> ProtectOverlay:
         """Instruction overlay of a run, to inject as the first system message."""
@@ -461,8 +532,32 @@ class ProtectResource(_LoopProtectResource, _Namespace):
         body = _simulate_body(intents, policies, policy_refs, decisions_from_run)
         return await self._arequest("POST", "/v1/protect/simulate", body)
 
+    def settings(self) -> ProtectSettings:
+        """Organization protect settings (mandatory flag, entitlement, revision)."""
+        return ProtectSettings.model_validate(self._request("GET", "/v1/protect/settings"))
+
+    async def asettings(self) -> ProtectSettings:
+        """Async counterpart of :meth:`settings`."""
+        return ProtectSettings.model_validate(await self._arequest("GET", "/v1/protect/settings"))
+
+    def set_mandatory(
+        self, protect_mandatory: bool, *, expected_revision: Optional[int] = None
+    ) -> ProtectSettings:
+        """Turn mandatory protection on or off; ``expected_revision`` guards a concurrent edit."""
+        body = _settings_body(protect_mandatory, expected_revision)
+        return ProtectSettings.model_validate(self._request("PUT", "/v1/protect/settings", body))
+
+    async def aset_mandatory(
+        self, protect_mandatory: bool, *, expected_revision: Optional[int] = None
+    ) -> ProtectSettings:
+        """Async counterpart of :meth:`set_mandatory`."""
+        body = _settings_body(protect_mandatory, expected_revision)
+        return ProtectSettings.model_validate(
+            await self._arequest("PUT", "/v1/protect/settings", body)
+        )
+
     def coverage(self) -> dict[str, Any]:
-        """Static coverage matrix: interception point and mode per action family."""
+        """Coverage matrix per action family, plus the organization block (entitlement, exemptions)."""
         return self._request("GET", "/v1/protect/coverage")
 
     async def acoverage(self) -> dict[str, Any]:
@@ -482,6 +577,7 @@ __all__ = [
     "ApprovalsResource",
     "BindingsResource",
     "DecisionsResource",
+    "ExemptionsResource",
     "PoliciesResource",
     "ProtectResource",
     "RestrictionsResource",

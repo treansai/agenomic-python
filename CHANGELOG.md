@@ -136,6 +136,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/knowledge.md`, `docs/langgraph-matrix.md` and a LangGraph managed
   prompts section in `docs/integrations.md`; the `docs/README.md` index
   lists the new pages.
+- Mirror of the gateway P0 enforcement. `ToolCallUnresolved` (a
+  `ToolExecutionError`, code `conflict`, status 409) is raised with
+  `reason` `in_flight` or `ambiguous_outcome` by `invoke`, `authorize_local`
+  and the routers, and is never retried; `tools.get_invocation` and
+  `tools.resolve_invocation` read and close the call. `ToolCallResult.phase`,
+  `EffectiveProtection` (also returned under `protection` by the run calls;
+  `state` is `enforced`, `shadow`, `exempt`, `none`, `blocked`, `unknown` or
+  `not_applicable`, there is no `degraded`), `client.protect.settings()` and
+  `set_mandatory()` (`protect_mandatory`), and `client.protect.exemptions`
+  (list, create, lift) are new.
 
 ### Changed
 
@@ -216,6 +226,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Client._http` and `Client._ahttp` accept an optional `bearer` so a plane
   other than the API key plane (the vault runtime) carries its own credential.
 
+### Fixed
+
+- `instrument_openai` and `instrument_anthropic` no longer fail on request
+  options CBOR cannot encode (an `httpx.Timeout`); `trace_agent_run` with
+  redaction no longer raises when an argument cannot be copied (the capture is
+  replaced by `{"redacted": true}`); `benchmark serve` reads `AGENOMIC_ENDPOINT`
+  when `AGENOMIC_BASE_URL` is unset; the `HttpExporter` docstring no longer
+  promises a flush timer.
 
 ## [0.1.2] - 2026-09-20
 

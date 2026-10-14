@@ -551,8 +551,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument(
         "--base-url",
-        default=os.environ.get("AGENOMIC_BASE_URL"),
-        required="AGENOMIC_BASE_URL" not in os.environ,
+        default=os.environ.get("AGENOMIC_BASE_URL") or os.environ.get("AGENOMIC_ENDPOINT"),
+        required=not (os.environ.get("AGENOMIC_BASE_URL") or os.environ.get("AGENOMIC_ENDPOINT")),
     )
     serve.add_argument("--api-key", default=os.environ.get("AGENOMIC_API_KEY"))
     serve.add_argument("--max-turns", type=int, default=None)

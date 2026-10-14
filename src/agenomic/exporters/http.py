@@ -19,9 +19,9 @@ class HttpExporter(Exporter):
     """Asynchronous HTTP exporter with batching.
 
     Buffers envelopes and forwards via :class:`AgenomicClient.upload_traces`
-    when the buffer hits ``batch_size`` or ``batch_interval_ms`` elapses,
-    whichever comes first. ``close()`` flushes the queue and waits for
-    in-flight requests.
+    when the buffer hits ``batch_size``, on ``flush()`` and on ``close()``.
+    There is no background timer: ``batch_interval_ms`` is stored but no
+    flush is scheduled from it, so call ``flush()`` for a time-based upload.
 
     Example:
         >>> from agenomic.client.client import AgenomicClient  # doctest: +SKIP

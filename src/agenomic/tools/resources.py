@@ -21,11 +21,13 @@ from pydantic import JsonValue
 from agenomic.tools.local import LocalToolEngine
 from agenomic.tools.models import (
     TOOL_EXECUTION_SCHEMA_VERSION,
+    InvocationStatus,
     ProtectDecision,
     ToolApprovalPending,
     ToolCallDenied,
     ToolCallError,
     ToolCallResult,
+    ToolCallUnresolved,
     ToolExecutionError,
     ToolProvenance,
 )
@@ -42,7 +44,11 @@ BeforeAction = Callable[[dict[str, Any]], Any]
 
 def _unwrap_run(response: Mapping[str, Any]) -> dict[str, Any]:
     run = response.get("run")
-    return dict(run) if isinstance(run, dict) else {}
+    out = dict(run) if isinstance(run, dict) else {}
+    protection = response.get("protection")
+    if isinstance(protection, dict):
+        out["protection"] = dict(protection)
+    return out
 
 
 def _config_body(
@@ -199,7 +205,21 @@ async def atyped_request(
     )
 
 
+def _raise_if_unresolved(tool: str, response: httpx.Response) -> None:
+    if response.status_code != 409:
+        return
+    try:
+        body = response.json()
+    except ValueError:
+        return
+    if isinstance(body, dict):
+        unresolved = ToolCallUnresolved.from_body(tool, body)
+        if unresolved is not None:
+            raise unresolved
+
+
 def _parse_invoke(tool: str, method: str, path: str, response: httpx.Response) -> ToolCallResult:
+    _raise_if_unresolved(tool, response)
     if response.status_code == 403:
         try:
             body = response.json()
@@ -210,7 +230,8 @@ def _parse_invoke(tool: str, method: str, path: str, response: httpx.Response) -
     return ToolCallResult.from_response(_parse_response(method, path, response))
 
 
-def _parse_authorize(method: str, path: str, response: httpx.Response) -> dict[str, Any]:
+def _parse_authorize(tool: str, method: str, path: str, response: httpx.Response) -> dict[str, Any]:
+    _raise_if_unresolved(tool, response)
     if response.status_code == 403:
         try:
             body = response.json()
@@ -979,7 +1000,9 @@ class ToolsResource:
         )
         if self.is_cloud:
             path = f"/v1/tool-execution/runs/{run_id}/local/authorize"
-            return _parse_authorize("POST", path, send_request(self._client, "POST", path, body))
+            return _parse_authorize(
+                tool, "POST", path, send_request(self._client, "POST", path, body)
+            )
         return self.local.authorize_local(run_id, body)
 
     async def aauthorize_local(
@@ -1017,9 +1040,71 @@ class ToolsResource:
         if self.is_cloud:
             path = f"/v1/tool-execution/runs/{run_id}/local/authorize"
             return _parse_authorize(
-                "POST", path, await asend_request(self._client, "POST", path, body)
+                tool, "POST", path, await asend_request(self._client, "POST", path, body)
             )
         return self.local.authorize_local(run_id, body)
+
+    def _require_cloud(self) -> None:
+        if not self.is_cloud:
+            raise ToolExecutionError(
+                "cloud_required", "invocation status is kept by the Tool Gateway only", 0
+            )
+
+    def get_invocation(self, run_id: str, record_id: str) -> InvocationStatus:
+        """Durable phase of one call; read it after a 409 ``in_flight`` instead of retrying.
+
+        Example:
+            >>> from agenomic import Client
+            >>> Client().tools.get_invocation("run", "rec")
+            Traceback (most recent call last):
+            ...
+            agenomic.tools.models.ToolExecutionError: cloud_required: invocation status is kept by the Tool Gateway only
+        """
+        self._require_cloud()
+        path = f"/v1/tool-execution/runs/{run_id}/invocations/{record_id}"
+        return InvocationStatus.model_validate(self._request("GET", path))
+
+    async def aget_invocation(self, run_id: str, record_id: str) -> InvocationStatus:
+        """Async counterpart of :meth:`get_invocation`."""
+        self._require_cloud()
+        path = f"/v1/tool-execution/runs/{run_id}/invocations/{record_id}"
+        return InvocationStatus.model_validate(await self._arequest("GET", path))
+
+    def resolve_invocation(
+        self,
+        run_id: str,
+        record_id: str,
+        *,
+        resolution: Literal["succeeded", "failed", "not_executed"],
+        evidence: str,
+    ) -> InvocationStatus:
+        """Close a call whose outcome is unknown from operator evidence (owner only).
+
+        Example:
+            >>> from agenomic import Client
+            >>> Client().tools.resolve_invocation("run", "rec", resolution="failed", evidence="log")
+            Traceback (most recent call last):
+            ...
+            agenomic.tools.models.ToolExecutionError: cloud_required: invocation status is kept by the Tool Gateway only
+        """
+        self._require_cloud()
+        path = f"/v1/tool-execution/runs/{run_id}/invocations/{record_id}/resolve"
+        body = {"resolution": resolution, "evidence": evidence}
+        return InvocationStatus.model_validate(self._request("POST", path, body))
+
+    async def aresolve_invocation(
+        self,
+        run_id: str,
+        record_id: str,
+        *,
+        resolution: Literal["succeeded", "failed", "not_executed"],
+        evidence: str,
+    ) -> InvocationStatus:
+        """Async counterpart of :meth:`resolve_invocation`."""
+        self._require_cloud()
+        path = f"/v1/tool-execution/runs/{run_id}/invocations/{record_id}/resolve"
+        body = {"resolution": resolution, "evidence": evidence}
+        return InvocationStatus.model_validate(await self._arequest("POST", path, body))
 
     def _report_body(
         self,
@@ -1389,7 +1474,11 @@ class _RouterBase:
     def _replay_error(
         approval_id: str, pending: _PendingCall, status: str, error: ToolExecutionError
     ) -> ToolExecutionError:
-        if status == "consumed" and error.status == 409:
+        if (
+            status == "consumed"
+            and error.status == 409
+            and not isinstance(error, ToolCallUnresolved)
+        ):
             return ToolExecutionError(
                 "conflict",
                 f"approval {approval_id} is consumed and {pending.tool} already executed; "

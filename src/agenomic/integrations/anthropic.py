@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from agenomic.crypto.canonical import canonical_cbor
 from agenomic.crypto.hashing import blake3_hex
+from agenomic.integrations._hashing import hash_request
 from agenomic.protect.models import Overlay, overlay_text
 from agenomic.trace.context import current_recorder
 from agenomic.types.trace import CallStatus, ModelCall
@@ -43,7 +44,7 @@ def inject_anthropic_overlay(kwargs: dict[str, Any], text: Optional[str]) -> dic
 
 
 def _hash_request(payload: dict[str, Any]) -> str:
-    return blake3_hex(canonical_cbor(payload))
+    return hash_request(payload)
 
 
 def _hash_response(response: Any) -> str:
