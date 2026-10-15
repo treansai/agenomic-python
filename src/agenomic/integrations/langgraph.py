@@ -38,6 +38,86 @@ def _hash(data: Any) -> str:
     return blake3_hex(blob)
 
 
+def _record_call(name: str, input_hash: str, started: float, result: Any, failed: bool) -> None:
+    recorder = current_recorder()
+    if recorder is None:
+        return
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    if failed:
+        recorder.record_tool_call(
+            ToolCall(
+                tool=name,
+                protocol="local",
+                server="langgraph",
+                input_hash=input_hash,
+                latency_ms=latency_ms,
+                status=CallStatus.ERROR,
+            )
+        )
+        return
+    recorder.record_tool_call(
+        ToolCall(
+            tool=name,
+            protocol="local",
+            server="langgraph",
+            input_hash=input_hash,
+            output_hash=_hash(result),
+            latency_ms=latency_ms,
+        )
+    )
+
+
+def _traced_sync(name: str, original: Any) -> Any:
+    def wrapped(state: Any, *args: Any, **kwargs: Any) -> Any:
+        input_hash = _hash(state)
+        started = time.perf_counter()
+        try:
+            result = original(state, *args, **kwargs)
+        except Exception:
+            _record_call(name, input_hash, started, None, True)
+            raise
+        _record_call(name, input_hash, started, result, False)
+        return result
+
+    return wrapped
+
+
+def _traced_async(name: str, original: Any) -> Any:
+    async def wrapped(state: Any, *args: Any, **kwargs: Any) -> Any:
+        input_hash = _hash(state)
+        started = time.perf_counter()
+        try:
+            result = await original(state, *args, **kwargs)
+        except Exception:
+            _record_call(name, input_hash, started, None, True)
+            raise
+        _record_call(name, input_hash, started, result, False)
+        return result
+
+    return wrapped
+
+
+def _wrap_runnable_callable(name: str, node: Any) -> bool:
+    """Wrap the function held by a LangGraph ``RunnableCallable`` (``func`` and ``afunc``).
+
+    LangGraph keeps node functions inside a ``RunnableCallable`` that is not itself
+    callable, reachable as ``node.runnable`` (state graph spec) or ``node.bound``
+    (compiled graph). Replacing ``func`` keeps the signature LangGraph already
+    inspected, since the wrapper forwards every argument.
+    """
+    target: Any = getattr(node, "runnable", None) or getattr(node, "bound", None)
+    wrapped = False
+    func = getattr(target, "func", None)
+    if callable(func):
+        target.func = _traced_sync(name, func)
+        wrapped = True
+    afunc = getattr(target, "afunc", None)
+    if callable(afunc):
+        target.afunc = _traced_async(name, afunc)
+        wrapped = True
+    return wrapped
+
+
 def instrument_langgraph(graph: Any) -> Any:
     """Wrap each node in a LangGraph state graph so executions emit a ToolCall.
 
@@ -45,9 +125,9 @@ def instrument_langgraph(graph: Any) -> Any:
     if not installed.
 
     Each wrapped node, when invoked inside a ``@trace_agent_run``, records a
-    :class:`ToolCall` with input/output hashes and latency. Only nodes that are
-    plain callables are wrapped; a real LangGraph graph holds Runnable objects,
-    so nothing is wrapped and a warning is logged (use
+    :class:`ToolCall` with input/output hashes and latency. Plain callables and
+    function nodes of a real ``StateGraph`` (sync and async) are wrapped; other
+    Runnable nodes are not, and a warning is logged when nothing is wrapped (use
     ``TrackingCallbackHandler`` for those).
 
     Example:
@@ -67,46 +147,11 @@ def instrument_langgraph(graph: Any) -> Any:
     for name, node in list(nodes.items()):
         original = getattr(node, "runnable", None) or node
         if not callable(original):
+            if _wrap_runnable_callable(name, node):
+                count += 1
             continue
         count += 1
-
-        def wrapped(
-            state: Any,
-            *,
-            _name: str = name,
-            _original: Any = original,
-        ) -> Any:
-            recorder = current_recorder()
-            input_hash = _hash(state)
-            started = time.perf_counter()
-            try:
-                result = _original(state)
-            except Exception:
-                if recorder is not None:
-                    recorder.record_tool_call(
-                        ToolCall(
-                            tool=_name,
-                            protocol="local",
-                            server="langgraph",
-                            input_hash=input_hash,
-                            latency_ms=int((time.perf_counter() - started) * 1000),
-                            status=CallStatus.ERROR,
-                        )
-                    )
-                raise
-            if recorder is not None:
-                recorder.record_tool_call(
-                    ToolCall(
-                        tool=_name,
-                        protocol="local",
-                        server="langgraph",
-                        input_hash=input_hash,
-                        output_hash=_hash(result),
-                        latency_ms=int((time.perf_counter() - started) * 1000),
-                    )
-                )
-            return result
-
+        wrapped = _traced_sync(name, original)
         if hasattr(node, "runnable"):
             node.runnable = wrapped
         else:

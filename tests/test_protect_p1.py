@@ -7,9 +7,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from agenomic import Client
-from agenomic.protect import DelegationScope, SignedDelegation
+from agenomic.protect import DelegationScope, ProtectRunConfig, SignedDelegation
 from agenomic.tools import ToolCallUnresolved, ToolExecutionError
 
 BASE = "https://api.test"
@@ -202,3 +203,60 @@ def test_simulate_forwards_family_fields_untouched(httpx_mock: Any) -> None:
     assert response["decisions"][0]["reason_codes"] == ["family_default"]
     (request,) = httpx_mock.get_requests()
     assert json.loads(request.content)["intents"] == [intent]
+
+
+def test_protect_run_config_wire_form() -> None:
+    config = ProtectRunConfig(
+        agent_id="bot",
+        environment="prod",
+        mode="shadow",
+        policy_refs=["pol@1"],
+        policy_refs_mode="shadow",
+        delegation_id=LINK_ID,
+    )
+    assert config.to_wire() == {
+        "agent_id": "bot",
+        "environment": "prod",
+        "mode": "shadow",
+        "policy_refs": ["pol@1"],
+        "policy_refs_mode": "shadow",
+        "delegation_id": LINK_ID,
+    }
+    assert ProtectRunConfig(agent_id="bot", environment="prod").to_wire() == {
+        "agent_id": "bot",
+        "environment": "prod",
+        "mode": "enforce",
+    }
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{"delegation_id": "not-a-uuid"}, {"mode": "live"}, {"delegation": LINK_ID}],
+)
+def test_protect_run_config_rejects_what_the_gateway_rejects(fields: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        ProtectRunConfig(agent_id="bot", environment="prod", **fields)
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_create_run_sends_typed_protect_section(httpx_mock: Any, nested: bool) -> None:
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{BASE}/v1/tool-execution/runs",
+        json={"run": {"id": RUN, "status": "approved"}},
+    )
+    config: dict[str, Any] = {
+        "schema_version": "agenomic.tool_execution/v1",
+        "mode": "live",
+        "protect": ProtectRunConfig(agent_id="bot", environment="prod", delegation_id=LINK_ID),
+    }
+    _cloud().tools.create_run(config={"tool_execution": config} if nested else config)
+    sent = json.loads(httpx_mock.get_requests()[0].content)["config"]
+    sent = sent["tool_execution"] if nested else sent
+    assert sent["protect"] == {
+        "agent_id": "bot",
+        "environment": "prod",
+        "mode": "enforce",
+        "delegation_id": LINK_ID,
+    }
+    assert isinstance(config["protect"], ProtectRunConfig)

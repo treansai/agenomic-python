@@ -23,6 +23,7 @@ from agenomic.tools.models import (
     TOOL_EXECUTION_SCHEMA_VERSION,
     InvocationStatus,
     ProtectDecision,
+    ProtectRunConfig,
     ToolApprovalPending,
     ToolCallDenied,
     ToolCallError,
@@ -52,6 +53,17 @@ def _unwrap_run(response: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _plain_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy of ``config`` whose ``protect`` section, if a :class:`ProtectRunConfig`, is its wire form."""
+    plain = dict(config)
+    inner = plain.get("tool_execution")
+    if isinstance(inner, Mapping):
+        plain["tool_execution"] = _plain_config(inner)
+    if isinstance(plain.get("protect"), ProtectRunConfig):
+        plain["protect"] = plain["protect"].to_wire()
+    return plain
+
+
 def _config_body(
     config: Optional[Mapping[str, Any]],
     config_text: Optional[str],
@@ -61,7 +73,7 @@ def _config_body(
         raise ValueError("provide exactly one of config or config_text")
     body: dict[str, Any] = {"repetitions": repetitions}
     if config is not None:
-        body["config"] = dict(config)
+        body["config"] = _plain_config(config)
     else:
         body["config_text"] = config_text
     return body
@@ -71,7 +83,7 @@ def _config_value(
     config: Optional[Mapping[str, Any]], config_text: Optional[str]
 ) -> dict[str, Any]:
     if config is not None:
-        return dict(config)
+        return _plain_config(config)
     try:
         parsed = json.loads(config_text or "")
     except ValueError as error:

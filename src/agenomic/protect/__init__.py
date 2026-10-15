@@ -26,6 +26,7 @@ from agenomic.protect.resources import (
     ProtectResource,
     RestrictionsResource,
 )
+from agenomic.tools.models import ProtectRunConfig
 
 __all__ = [
     "ActionFamily",
@@ -46,6 +47,7 @@ __all__ = [
     "PoliciesResource",
     "ProtectExemption",
     "ProtectOverlay",
+    "ProtectRunConfig",
     "ProtectSettings",
     "ProtectResource",
     "RestrictionsResource",

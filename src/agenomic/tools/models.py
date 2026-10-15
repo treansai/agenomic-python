@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal, Mapping, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
@@ -381,3 +382,39 @@ class ToolCallUnresolved(ToolExecutionError):  # noqa: N818
             except ValidationError:
                 invocation = None
         return cls(tool, reason, message, invocation)
+
+
+ProtectMode = Literal["enforce", "shadow"]
+
+
+class ProtectRunConfig(BaseModel):
+    """The ``protect`` section of a tool execution run config.
+
+    Mirrors the gateway type, which rejects unknown fields. A run is admitted
+    by Protect only when this section is present, with ``mode`` ``live`` or
+    ``hybrid`` on the run. ``delegation_id`` is the last link of a delegation
+    chain; ``policy_refs_mode`` scopes the bindings that ``policy_refs`` creates
+    (``enforce`` when absent).
+
+    Example:
+        >>> ProtectRunConfig(agent_id="support-bot", environment="prod").to_wire()
+        {'agent_id': 'support-bot', 'environment': 'prod', 'mode': 'enforce'}
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str
+    environment: str
+    mode: ProtectMode = "enforce"
+    application_genome_digest: Optional[str] = None
+    task_mandate_ref: Optional[str] = None
+    policy_refs: list[str] = Field(default_factory=list)
+    policy_refs_mode: Optional[ProtectMode] = None
+    delegation_id: Optional[UUID] = None
+
+    def to_wire(self) -> dict[str, Any]:
+        """JSON body for ``config["protect"]``; unset fields are omitted."""
+        wire = self.model_dump(mode="json", exclude_none=True)
+        if not self.policy_refs:
+            wire.pop("policy_refs")
+        return wire
