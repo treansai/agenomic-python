@@ -33,7 +33,7 @@ ToolInvocationPhase = Literal[
     "failed",
     "outcome_unknown",
 ]
-UnresolvedReason = Literal["in_flight", "ambiguous_outcome"]
+UnresolvedReason = Literal["in_flight", "ambiguous_outcome", "attempt_in_flight"]
 
 
 class ToolExecutionError(CloudError):
@@ -305,11 +305,19 @@ class InvocationStatus(BaseModel):
 class ToolCallUnresolved(ToolExecutionError):  # noqa: N818
     """The gateway refused to run a call again because its identity is unresolved.
 
-    HTTP 409 with ``reason`` ``in_flight`` (the call is still being processed:
-    read :meth:`ToolsResource.get_invocation` instead of retrying) or
-    ``ambiguous_outcome`` (the call may have run and needs operator
-    reconciliation). The SDK never retries it: re-executing could repeat a
-    side effect.
+    HTTP 409 in two wire forms, both raised as this error and never retried
+    (re-executing could repeat a side effect):
+
+    - the identity itself is recorded: ``error.code`` is ``conflict``,
+      ``error.reason`` is ``in_flight`` (still being processed: read
+      :meth:`ToolsResource.get_invocation` instead of retrying) or
+      ``ambiguous_outcome`` (may have run, needs operator reconciliation), and
+      an ``agenomic`` block carries the :class:`InvocationStatus`;
+    - a new attempt of a logical call whose other attempt is unresolved:
+      ``error.code`` is ``attempt_in_flight`` (wait, it settles by itself) or
+      ``ambiguous_outcome`` (an operator must resolve the other attempt), with
+      no ``reason`` and no ``agenomic`` block, so :attr:`invocation` and
+      :attr:`record_id` are ``None`` and :attr:`other_attempt` is true.
 
     Example:
         >>> error = ToolCallUnresolved.from_body("crm.update", {
@@ -320,6 +328,10 @@ class ToolCallUnresolved(ToolExecutionError):  # noqa: N818
         ...         "requires_reconciliation": True, "started_at": "2026-10-15T00:00:00Z"}})
         >>> (error.reason, error.requires_reconciliation, error.record_id)
         ('ambiguous_outcome', True, 'r')
+        >>> other = ToolCallUnresolved.from_body("crm.update", {
+        ...     "error": {"code": "attempt_in_flight", "message": "m"}})
+        >>> (other.code, other.reason, other.other_attempt, other.record_id)
+        ('attempt_in_flight', 'attempt_in_flight', True, None)
     """
 
     def __init__(
@@ -328,11 +340,15 @@ class ToolCallUnresolved(ToolExecutionError):  # noqa: N818
         reason: UnresolvedReason,
         message: str,
         invocation: Optional[InvocationStatus] = None,
+        *,
+        other_attempt: bool = False,
     ) -> None:
-        super().__init__("conflict", f"{reason}: tool {tool}: {message}", 409)
+        code = reason if other_attempt else "conflict"
+        super().__init__(code, f"{reason}: tool {tool}: {message}", 409)
         self.tool = tool
         self.reason: UnresolvedReason = reason
         self.invocation = invocation
+        self.other_attempt = other_attempt
 
     @property
     def record_id(self) -> Optional[str]:
@@ -344,11 +360,17 @@ class ToolCallUnresolved(ToolExecutionError):  # noqa: N818
 
     @classmethod
     def from_body(cls, tool: str, body: Mapping[str, Any]) -> Optional[ToolCallUnresolved]:
-        """Build the error from a 409 body, or ``None`` for any other conflict."""
+        """Build the error from a 409 body of either form, or ``None`` for any other conflict."""
         error = body.get("error")
         if not isinstance(error, Mapping):
             return None
+        message = str(error.get("message", ""))
         reason = error.get("reason")
+        if reason is None:
+            code = error.get("code")
+            if code == "attempt_in_flight" or code == "ambiguous_outcome":
+                return cls(tool, code, message, other_attempt=True)
+            return None
         if reason not in ("in_flight", "ambiguous_outcome"):
             return None
         status = body.get("agenomic")
@@ -358,4 +380,4 @@ class ToolCallUnresolved(ToolExecutionError):  # noqa: N818
                 invocation = InvocationStatus.model_validate(status)
             except ValidationError:
                 invocation = None
-        return cls(tool, reason, str(error.get("message", "")), invocation)
+        return cls(tool, reason, message, invocation)

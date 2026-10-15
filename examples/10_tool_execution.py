@@ -2,7 +2,7 @@
 
 Runs against a live Agenomic Cloud. Set:
 
-    AGENOMIC_BASE_URL=http://localhost:8080
+    AGENOMIC_ENDPOINT=http://localhost:8080   (AGENOMIC_BASE_URL is also read)
     AGENOMIC_API_KEY=agm_...
     CRM_MCP_URL=http://crm-staging.internal/mcp   (value stored write-only)
     CRM_API_TOKEN=...                              (value stored write-only)
@@ -63,10 +63,10 @@ bindings:
 
 
 def main() -> int:
-    base_url = os.environ.get("AGENOMIC_BASE_URL")
+    base_url = os.environ.get("AGENOMIC_ENDPOINT") or os.environ.get("AGENOMIC_BASE_URL")
     api_key = os.environ.get("AGENOMIC_API_KEY")
     if not base_url or not api_key:
-        print("set AGENOMIC_BASE_URL and AGENOMIC_API_KEY to run this example")
+        print("set AGENOMIC_ENDPOINT and AGENOMIC_API_KEY to run this example")
         return 0
     client = Client(api_key=api_key, base_url=base_url)
     tools = client.tools

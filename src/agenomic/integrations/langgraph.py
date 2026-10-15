@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
@@ -13,6 +14,20 @@ from agenomic.types.trace import CallStatus, ToolCall
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from agenomic.canonical.recorder import CanonicalRun
+
+
+logger = logging.getLogger("agenomic.integrations.langgraph")
+
+
+def _warn_if_nothing_wrapped(function: str, total: int, wrapped: int) -> None:
+    if total and not wrapped:
+        logger.warning(
+            "%s wrapped 0 of %d nodes: a real LangGraph graph holds Runnable objects, "
+            "not plain callables, so nothing will be recorded; "
+            "use TrackingCallbackHandler to observe it",
+            function,
+            total,
+        )
 
 
 def _hash(data: Any) -> str:
@@ -30,7 +45,10 @@ def instrument_langgraph(graph: Any) -> Any:
     if not installed.
 
     Each wrapped node, when invoked inside a ``@trace_agent_run``, records a
-    :class:`ToolCall` with input/output hashes and latency.
+    :class:`ToolCall` with input/output hashes and latency. Only nodes that are
+    plain callables are wrapped; a real LangGraph graph holds Runnable objects,
+    so nothing is wrapped and a warning is logged (use
+    ``TrackingCallbackHandler`` for those).
 
     Example:
         >>> # graph = instrument_langgraph(StateGraph(MyState))  # doctest: +SKIP
@@ -45,10 +63,12 @@ def instrument_langgraph(graph: Any) -> Any:
     nodes = getattr(graph, "nodes", None)
     if not isinstance(nodes, dict):
         return graph
+    count = 0
     for name, node in list(nodes.items()):
         original = getattr(node, "runnable", None) or node
         if not callable(original):
             continue
+        count += 1
 
         def wrapped(
             state: Any,
@@ -91,6 +111,7 @@ def instrument_langgraph(graph: Any) -> Any:
             node.runnable = wrapped
         else:
             nodes[name] = wrapped
+    _warn_if_nothing_wrapped("instrument_langgraph", len(nodes), count)
     return graph
 
 
@@ -109,9 +130,10 @@ def instrument_langgraph_canonical(
     ``tool.call.executed`` (the deterministic *Workflow Graph*). A raising node
     emits ``error.raised`` and re-raises.
 
-    Works on the duck-typed ``graph.nodes`` mapping (each node's ``runnable`` or
-    the node itself), so it drives both real compiled LangGraph graphs and
-    lightweight test graphs.
+    Works on a duck-typed ``graph.nodes`` mapping whose nodes (or their
+    ``runnable``) are plain callables. A real LangGraph graph holds Runnable
+    objects, so nothing is wrapped and a warning is logged; use
+    ``TrackingCallbackHandler`` for those.
 
     Example:
         >>> # graph = instrument_langgraph_canonical(compiled, run, llm_nodes=["agent"])  # doctest: +SKIP
@@ -121,10 +143,12 @@ def instrument_langgraph_canonical(
         raise TypeError("graph has no `.nodes` mapping to instrument")
     llm_set = set(llm_nodes)
 
+    count = 0
     for name, node in list(nodes.items()):
         original = getattr(node, "runnable", None) or node
         if not callable(original):
             continue
+        count += 1
 
         def wrapped(
             state: Any,
@@ -148,6 +172,7 @@ def instrument_langgraph_canonical(
             node.runnable = wrapped
         else:
             nodes[name] = wrapped
+    _warn_if_nothing_wrapped("instrument_langgraph_canonical", len(nodes), count)
     return graph
 
 

@@ -8,7 +8,7 @@ and two distinct user owned API keys.
 
 Environment:
 
-    AGENOMIC_BASE_URL       gateway base URL
+    AGENOMIC_ENDPOINT       gateway base URL (AGENOMIC_BASE_URL is also read)
     AGENOMIC_API_KEY        caller, a user owned key with the write role
     AGENOMIC_REVIEWER_KEY   reviewer, a user owned key of a DIFFERENT user
     AGENOMIC_ADMIN_KEY      owner key (policy release, policy binding)
@@ -45,7 +45,7 @@ import uuid
 from agenomic import Client
 from agenomic.tools import ToolApprovalPending, ToolCallDenied, ToolExecutionError
 
-BASE = os.environ["AGENOMIC_BASE_URL"]
+BASE = os.environ.get("AGENOMIC_ENDPOINT") or os.environ["AGENOMIC_BASE_URL"]
 TOOL_URL = os.environ["AGENOMIC_TOOL_URL"]
 PROFILE = os.environ.get("AGENOMIC_ENV_PROFILE", "sdk-real")
 TTL = int(os.environ.get("AGENOMIC_APPROVAL_TTL_SECS", "45"))

@@ -51,3 +51,27 @@ def test_instrument_no_recorder_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_graph = SimpleNamespace(nodes={"f": lambda s: s})
     instrument_langgraph(fake_graph)
     assert fake_graph.nodes["f"]({"x": 1}) == {"x": 1}
+
+
+def test_instrument_warns_when_no_node_is_wrapped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setitem(sys.modules, "langgraph", SimpleNamespace(graph=SimpleNamespace()))
+    runnable_like = SimpleNamespace(invoke=lambda state: state)
+    graph = SimpleNamespace(
+        nodes={"a": runnable_like, "b": SimpleNamespace(runnable=runnable_like)}
+    )
+    with caplog.at_level("WARNING", logger="agenomic.integrations.langgraph"):
+        instrument_langgraph(graph)
+    assert "wrapped 0 of 2 nodes" in caplog.text
+    assert graph.nodes["a"] is runnable_like
+
+
+def test_instrument_does_not_warn_when_nodes_are_wrapped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setitem(sys.modules, "langgraph", SimpleNamespace(graph=SimpleNamespace()))
+    with caplog.at_level("WARNING", logger="agenomic.integrations.langgraph"):
+        instrument_langgraph(SimpleNamespace(nodes={"f": lambda s: s}))
+        instrument_langgraph(SimpleNamespace(nodes={}))
+    assert caplog.text == ""

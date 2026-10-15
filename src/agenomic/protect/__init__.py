@@ -1,16 +1,26 @@
 """Protect: proactive policy enforcement (approvals, decisions, policies, bindings)."""
 
 from agenomic.protect.models import (
+    ActionFamily,
+    DelegationBudget,
+    DelegationLink,
+    DelegationScope,
+    EffectClass,
     EffectiveProtection,
     ExemptionRef,
+    FamilyRiskTier,
+    Party,
+    PartyKind,
     ProtectExemption,
     ProtectOverlay,
     ProtectSettings,
+    SignedDelegation,
 )
 from agenomic.protect.resources import (
     ApprovalsResource,
     BindingsResource,
     DecisionsResource,
+    DelegationsResource,
     ExemptionsResource,
     PoliciesResource,
     ProtectResource,
@@ -18,16 +28,26 @@ from agenomic.protect.resources import (
 )
 
 __all__ = [
+    "ActionFamily",
     "ApprovalsResource",
     "BindingsResource",
     "DecisionsResource",
+    "DelegationBudget",
+    "DelegationLink",
+    "DelegationScope",
+    "DelegationsResource",
+    "EffectClass",
     "EffectiveProtection",
     "ExemptionRef",
     "ExemptionsResource",
+    "FamilyRiskTier",
+    "Party",
+    "PartyKind",
     "PoliciesResource",
     "ProtectExemption",
     "ProtectOverlay",
     "ProtectSettings",
     "ProtectResource",
     "RestrictionsResource",
+    "SignedDelegation",
 ]

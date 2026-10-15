@@ -7,10 +7,18 @@ the server error code. Nothing here evaluates a policy locally.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Mapping, Optional, Sequence, Union
 from urllib.parse import urlencode
 
-from agenomic.protect.models import ProtectExemption, ProtectOverlay, ProtectSettings
+from agenomic.protect.models import (
+    DelegationBudget,
+    DelegationScope,
+    ProtectExemption,
+    ProtectOverlay,
+    ProtectSettings,
+    SignedDelegation,
+)
 from agenomic.rmp.resources import ProtectResource as _LoopProtectResource
 from agenomic.tools.models import ToolExecutionError
 from agenomic.tools.resources import atyped_request, typed_request
@@ -451,6 +459,78 @@ def _simulate_body(
     return body
 
 
+def _delegation_body(
+    delegate_agent_id: str,
+    scope: Union[DelegationScope, Mapping[str, Any]],
+    budget: Union[DelegationBudget, Mapping[str, Any]],
+    expires_at: Union[datetime, str],
+    parent_id: Optional[str],
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "delegate_agent_id": delegate_agent_id,
+        "scope": scope.model_dump() if isinstance(scope, DelegationScope) else dict(scope),
+        "budget": budget.model_dump() if isinstance(budget, DelegationBudget) else dict(budget),
+        "expires_at": expires_at.isoformat() if isinstance(expires_at, datetime) else expires_at,
+    }
+    if parent_id is not None:
+        body["parent_id"] = parent_id
+    return body
+
+
+class DelegationsResource(_Namespace):
+    """Signed delegation links: user or API key, then agent, then sub-agent.
+
+    A link can only narrow its parent (tools, families, effect ceiling, action
+    budget, expiry); the gateway checks this at issuance and again at every
+    admission. ``issued_by`` comes from the credential, never from the body.
+    A run opts in with ``protect.delegation_id`` (the last link of the chain) in
+    its run config; a run that does not declare it is not attenuated. There is
+    no revocation, only expiry and the kill switch.
+    """
+
+    def issue(
+        self,
+        delegate_agent_id: str,
+        *,
+        scope: Union[DelegationScope, Mapping[str, Any]],
+        budget: Union[DelegationBudget, Mapping[str, Any]],
+        expires_at: Union[datetime, str],
+        parent_id: Optional[str] = None,
+    ) -> SignedDelegation:
+        """Issue a link (write role); the root is opened by the caller, a child names ``parent_id``."""
+        body = _delegation_body(delegate_agent_id, scope, budget, expires_at, parent_id)
+        return SignedDelegation.model_validate(
+            self._request("POST", "/v1/protect/delegations", body)
+        )
+
+    async def aissue(
+        self,
+        delegate_agent_id: str,
+        *,
+        scope: Union[DelegationScope, Mapping[str, Any]],
+        budget: Union[DelegationBudget, Mapping[str, Any]],
+        expires_at: Union[datetime, str],
+        parent_id: Optional[str] = None,
+    ) -> SignedDelegation:
+        """Async counterpart of :meth:`issue`."""
+        body = _delegation_body(delegate_agent_id, scope, budget, expires_at, parent_id)
+        return SignedDelegation.model_validate(
+            await self._arequest("POST", "/v1/protect/delegations", body)
+        )
+
+    def get(self, delegation_id: str) -> SignedDelegation:
+        """Read one signed link."""
+        return SignedDelegation.model_validate(
+            self._request("GET", f"/v1/protect/delegations/{delegation_id}")
+        )
+
+    async def aget(self, delegation_id: str) -> SignedDelegation:
+        """Async counterpart of :meth:`get`."""
+        return SignedDelegation.model_validate(
+            await self._arequest("GET", f"/v1/protect/delegations/{delegation_id}")
+        )
+
+
 class ProtectResource(_LoopProtectResource, _Namespace):
     """The ``client.protect`` namespace: RMP Protect stage plus policy enforcement.
 
@@ -473,6 +553,7 @@ class ProtectResource(_LoopProtectResource, _Namespace):
         self.bindings = BindingsResource(client)
         self.restrictions = RestrictionsResource(client)
         self.exemptions = ExemptionsResource(client)
+        self.delegations = DelegationsResource(client)
 
     def overlay(self, run_id: str) -> ProtectOverlay:
         """Instruction overlay of a run, to inject as the first system message."""
@@ -516,7 +597,14 @@ class ProtectResource(_LoopProtectResource, _Namespace):
         policy_refs: Optional[Sequence[str]] = None,
         decisions_from_run: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Evaluate intents against documents or released refs; no permit, no side effect."""
+        """Evaluate intents against documents or released refs; no permit, no side effect.
+
+        Intents are posted as given, including ``families``, ``family_tiers`` and
+        ``delegation_chain``; the gateway re-derives the action families from
+        the intent and can only add one, so posting an empty ``families`` list
+        does not drop a family. A classified call that no rule names the family
+        of gets the family default (``family_default`` in ``reason_codes``).
+        """
         body = _simulate_body(intents, policies, policy_refs, decisions_from_run)
         return self._request("POST", "/v1/protect/simulate", body)
 
@@ -577,6 +665,7 @@ __all__ = [
     "ApprovalsResource",
     "BindingsResource",
     "DecisionsResource",
+    "DelegationsResource",
     "ExemptionsResource",
     "PoliciesResource",
     "ProtectResource",

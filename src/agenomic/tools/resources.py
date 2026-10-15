@@ -33,6 +33,7 @@ from agenomic.tools.models import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from agenomic.tools.model_calls import ModelCallsResource
     from agenomic.vault.models import ExecuteResult, ExecutionStatus
 
 _IDEMPOTENCY_NAMESPACE = uuid.UUID("6b1f7a2e-9c44-4d0e-8f1a-2e7c0d9b5a31")
@@ -260,6 +261,7 @@ class ToolsResource:
     def __init__(self, client: Any) -> None:
         self._client = client
         self._local: Optional[LocalToolEngine] = None
+        self._model_calls: Optional[ModelCallsResource] = None
 
     # ── transport ─────────────────────────────────────────────────────
 
@@ -273,6 +275,21 @@ class ToolsResource:
             False
         """
         return bool(getattr(self._client, "is_cloud", False))
+
+    @property
+    def model_calls(self) -> ModelCallsResource:
+        """Model call admission (cooperative, cloud mode, protect runs).
+
+        Example:
+            >>> from agenomic import Client
+            >>> type(Client().tools.model_calls).__name__
+            'ModelCallsResource'
+        """
+        if self._model_calls is None:
+            from agenomic.tools.model_calls import ModelCallsResource
+
+            self._model_calls = ModelCallsResource(self)
+        return self._model_calls
 
     @property
     def local(self) -> LocalToolEngine:

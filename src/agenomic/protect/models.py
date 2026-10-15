@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -119,6 +119,116 @@ class ProtectExemption(BaseModel):
     lifted_at: Optional[str] = None
 
 
+ActionFamily = Literal[
+    "data_egress",
+    "financial",
+    "identity_change",
+    "code_deploy",
+    "destructive_write",
+    "external_message",
+]
+FamilyRiskTier = Literal["elevated", "high", "critical"]
+EffectClass = Literal["read", "reversible_write", "irreversible_write", "unknown"]
+PartyKind = Literal["user", "api_key", "agent"]
+
+
+class Party(BaseModel):
+    """A principal in a delegation chain: a user or API key at the root, agents below.
+
+    Example:
+        >>> Party(kind="agent", id="support-bot").kind
+        'agent'
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    kind: PartyKind
+    id: str
+
+
+class DelegationScope(BaseModel):
+    """What a delegation lets the delegate do; it can only narrow along a chain.
+
+    ``tools`` are exact ids or a trailing ``*`` pattern (``model:openai/*``
+    covers model calls). An empty ``families`` list delegates no classified
+    call at all. ``effect_ceiling`` ``unknown`` is refused.
+
+    Example:
+        >>> DelegationScope(tools=["crm.*"], families=["financial"],
+        ...     effect_ceiling="reversible_write").families
+        ['financial']
+    """
+
+    tools: list[str]
+    families: list[ActionFamily] = Field(default_factory=list)
+    effect_ceiling: EffectClass
+
+
+class DelegationBudget(BaseModel):
+    """Action budget of one link, shared by every run that declares it.
+
+    Example:
+        >>> DelegationBudget(max_actions=20).max_actions
+        20
+    """
+
+    max_actions: int
+
+
+class DelegationLink(BaseModel):
+    """The signed document of one delegation link.
+
+    Example:
+        >>> link = DelegationLink.model_validate({
+        ...     "schema_version": "agenomic.protect.delegation/v1", "id": "d1", "org_id": "o",
+        ...     "issued_by": {"kind": "user", "id": "u"}, "delegator": {"kind": "user", "id": "u"},
+        ...     "delegate": {"kind": "agent", "id": "a"},
+        ...     "scope": {"tools": ["*"], "effect_ceiling": "read"}, "budget": {"max_actions": 1},
+        ...     "issued_at": "2026-10-15T00:00:00Z", "expires_at": "2026-10-16T00:00:00Z",
+        ...     "issuer": {"key_id": "k", "algorithm": "ed25519"}})
+        >>> (link.parent_id, link.delegate.id)
+        (None, 'a')
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    schema_version: str
+    id: str
+    org_id: str
+    parent_id: Optional[str] = None
+    parent_ref: Optional[str] = None
+    issued_by: Party
+    delegator: Party
+    delegate: Party
+    scope: DelegationScope
+    budget: DelegationBudget
+    issued_at: str
+    expires_at: str
+    issuer: dict[str, Any]
+
+
+class SignedDelegation(BaseModel):
+    """A delegation link with the organization signature; the SDK never verifies it.
+
+    The gateway verifies every signature of the chain at each admission. A run
+    opts in with ``protect.delegation_id`` (the last link) in its run config;
+    a run that does not declare it is not attenuated.
+
+    Example:
+        >>> SignedDelegation.model_validate({"document": {
+        ...     "schema_version": "v", "id": "d1", "org_id": "o",
+        ...     "issued_by": {"kind": "user", "id": "u"}, "delegator": {"kind": "user", "id": "u"},
+        ...     "delegate": {"kind": "agent", "id": "a"},
+        ...     "scope": {"tools": ["*"], "effect_ceiling": "read"}, "budget": {"max_actions": 1},
+        ...     "issued_at": "t", "expires_at": "t", "issuer": {}},
+        ...     "signature": {"algorithm": "ed25519", "value": "s"}}).document.id
+        'd1'
+    """
+
+    document: DelegationLink
+    signature: dict[str, Any]
+
+
 Overlay = Optional[Union[str, ProtectOverlay]]
 
 
@@ -138,7 +248,16 @@ def overlay_text(overlay: Overlay) -> Optional[str]:
 
 
 __all__ = [
+    "ActionFamily",
+    "DelegationBudget",
+    "DelegationLink",
+    "DelegationScope",
+    "EffectClass",
     "EffectiveProtection",
+    "FamilyRiskTier",
+    "Party",
+    "PartyKind",
+    "SignedDelegation",
     "ExemptionRef",
     "Overlay",
     "ProtectExemption",

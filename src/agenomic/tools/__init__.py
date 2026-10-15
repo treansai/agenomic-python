@@ -9,6 +9,16 @@ receives the tool's native result plus a typed technical envelope.
 """
 
 from agenomic.tools.local import LocalToolEngine
+from agenomic.tools.model_calls import (
+    ModelCallDecision,
+    ModelCallHandle,
+    ModelCallReportResult,
+    ModelCallRequest,
+    ModelCallsResource,
+    ModelCost,
+    ModelUsage,
+    usage_from_response,
+)
 from agenomic.tools.models import (
     TOOL_EXECUTION_SCHEMA_VERSION,
     InvocationStatus,
@@ -34,6 +44,13 @@ __all__ = [
     "AsyncToolRouter",
     "InvocationStatus",
     "LocalToolEngine",
+    "ModelCallDecision",
+    "ModelCallHandle",
+    "ModelCallReportResult",
+    "ModelCallRequest",
+    "ModelCallsResource",
+    "ModelCost",
+    "ModelUsage",
     "ProtectDecision",
     "SignedPermit",
     "ToolApprovalPending",
@@ -51,4 +68,5 @@ __all__ = [
     "ToolRouter",
     "ToolsResource",
     "dumps_config",
+    "usage_from_response",
 ]

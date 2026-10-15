@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Mirror of the P1 and P2 gateway routes, which live on unmerged branches of
+  agenomic-cloud (`feat/p1-model-call-admission`,
+  `feat/p1-action-families-delegation`, `feat/p2-correction-loop`); a gateway
+  without them answers 404:
+  - `client.tools.model_calls`: `authorize` and `report` (with `a*` twins) for
+    `model-calls/authorize` and `/report`, a typed `ModelCallDecision`
+    (`allow`, `pending`, `denied`; the signed permit is forwarded verbatim),
+    `admit`, `wait_for_approval` (re-posts the identical request once the
+    reviewer decided) and the `guard`/`aguard` context managers that authorize
+    before the provider call and report usage and duration on exit. This is
+    cooperative: the gateway decides on what the runtime declares and never
+    sees the prompt or the provider call.
+  - `client.protect.delegations` (`issue`, `get`) and the action family,
+    effect class and delegation models; a run opts in with
+    `protect.delegation_id` in its run config.
+  - `client.correction`: incidents (open, list, get, scenario, dismiss),
+    candidates (create, list, get, transitions, replay, verify, review,
+    approve, reject, promote, enforce, rollback), settings and trigger sweep.
+    Roles and verdicts are decided by the gateway.
 - Managed prompts (`agenomic.prompts`, RFC 0012 of agenomic-spec, whose
   conformance vectors run in the test suite): references (`prm_x:7`,
   `prm_x@alias`, `agenomic://` URIs) with no implicit latest version,
@@ -148,6 +167,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (list, create, lift) are new.
 
 ### Changed
+
+- `ToolCallUnresolved` also covers the 409 that a new attempt of an unresolved
+  call gets (`error.code` `attempt_in_flight` or `ambiguous_outcome`, no
+  `reason`, no `agenomic` block): `other_attempt` is true, `invocation` and
+  `record_id` are `None`, `code` is the server code. It is never retried.
+- `instrument_langgraph` and `instrument_langgraph_canonical` log a warning
+  when they wrap none of the nodes of a graph (a real LangGraph graph holds
+  Runnable objects); they still record nothing on such a graph.
+- Examples 10, 11 and 12_vault_langgraph read `AGENOMIC_ENDPOINT` first and
+  `AGENOMIC_BASE_URL` as a fallback, like `Client.from_env`.
 
 - The `langgraph` extra requires `langgraph>=1.0.10,<2` and
   `langchain-core>=1.6.3,<2` instead of `langgraph>=0.2`, the range of the
