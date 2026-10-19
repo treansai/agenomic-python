@@ -41,3 +41,21 @@ def test_example_runs(script: str) -> None:
     assert result.returncode == 0, (
         f"{script} exited {result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
+
+
+@pytest.mark.parametrize("variable", ["AGENOMIC_ENDPOINT", "AGENOMIC_BASE_URL"])
+def test_tool_execution_example_reads_either_endpoint_variable(variable: str) -> None:
+    import os
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("AGENOMIC_")}
+    env[variable] = "http://127.0.0.1:9"
+    env["AGENOMIC_API_KEY"] = "key"
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, str(EXAMPLES_DIR / "10_tool_execution.py")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
+    )
+    assert "to run this example" not in result.stdout
+    assert "transport_error" in result.stderr

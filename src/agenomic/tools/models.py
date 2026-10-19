@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal, Mapping, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
@@ -22,6 +23,18 @@ ToolResultSource = Literal[
 ]
 ToolCallStatus = Literal["success", "error", "aborted", "timeout", "pending", "denied"]
 ToolExternalState = Literal["none", "confirmed", "indeterminate"]
+ToolInvocationPhase = Literal[
+    "received",
+    "admission_pending",
+    "approval_pending",
+    "denied",
+    "authorized",
+    "dispatching",
+    "succeeded",
+    "failed",
+    "outcome_unknown",
+]
+UnresolvedReason = Literal["in_flight", "ambiguous_outcome", "attempt_in_flight"]
 
 
 class ToolExecutionError(CloudError):
@@ -147,6 +160,7 @@ class ToolCallResult(BaseModel):
     #: False when a runtime-local function ran but its report never reached
     #: the gateway; the pending record stays indeterminate server-side.
     reported: bool = True
+    phase: Optional[ToolInvocationPhase] = None
 
     @property
     def source(self) -> ToolResultSource:
@@ -251,3 +265,156 @@ class ToolApprovalPending(ToolExecutionError):  # noqa: N818
         self.record_id = record_id
         self.envelope = envelope
         self.decision = envelope.protect
+
+
+class InvocationStatus(BaseModel):
+    """Durable state of one invocation as read from the Tool Gateway.
+
+    ``requires_reconciliation`` is true while the outcome is unknown and an
+    operator has not resolved it.
+
+    Example:
+        >>> status = InvocationStatus(
+        ...     record_id="r", run_id="u", phase="outcome_unknown", status="error",
+        ...     external_state="indeterminate", tool="crm.update", logical_call_id="c1",
+        ...     repetition=1, attempt=1, requires_reconciliation=True,
+        ...     started_at="2026-10-15T00:00:00Z")
+        >>> (status.phase, status.requires_reconciliation)
+        ('outcome_unknown', True)
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    record_id: str
+    run_id: str
+    phase: ToolInvocationPhase
+    status: ToolCallStatus
+    external_state: ToolExternalState
+    tool: str
+    logical_call_id: str
+    repetition: int
+    attempt: int
+    error_code: Optional[str] = None
+    requires_reconciliation: bool = False
+    protect: Optional[ProtectDecision] = None
+    approval_id: Optional[str] = None
+    reconciliation: Optional[dict[str, Any]] = None
+    started_at: str
+    phase_at: Optional[str] = None
+
+
+class ToolCallUnresolved(ToolExecutionError):  # noqa: N818
+    """The gateway refused to run a call again because its identity is unresolved.
+
+    HTTP 409 in two wire forms, both raised as this error and never retried
+    (re-executing could repeat a side effect):
+
+    - the identity itself is recorded: ``error.code`` is ``conflict``,
+      ``error.reason`` is ``in_flight`` (still being processed: read
+      :meth:`ToolsResource.get_invocation` instead of retrying) or
+      ``ambiguous_outcome`` (may have run, needs operator reconciliation), and
+      an ``agenomic`` block carries the :class:`InvocationStatus`;
+    - a new attempt of a logical call whose other attempt is unresolved:
+      ``error.code`` is ``attempt_in_flight`` (wait, it settles by itself) or
+      ``ambiguous_outcome`` (an operator must resolve the other attempt), with
+      no ``reason`` and no ``agenomic`` block, so :attr:`invocation` and
+      :attr:`record_id` are ``None`` and :attr:`other_attempt` is true.
+
+    Example:
+        >>> error = ToolCallUnresolved.from_body("crm.update", {
+        ...     "error": {"code": "conflict", "reason": "ambiguous_outcome", "message": "m"},
+        ...     "agenomic": {"record_id": "r", "run_id": "u", "phase": "outcome_unknown",
+        ...         "status": "error", "external_state": "indeterminate", "tool": "crm.update",
+        ...         "logical_call_id": "c1", "repetition": 1, "attempt": 1,
+        ...         "requires_reconciliation": True, "started_at": "2026-10-15T00:00:00Z"}})
+        >>> (error.reason, error.requires_reconciliation, error.record_id)
+        ('ambiguous_outcome', True, 'r')
+        >>> other = ToolCallUnresolved.from_body("crm.update", {
+        ...     "error": {"code": "attempt_in_flight", "message": "m"}})
+        >>> (other.code, other.reason, other.other_attempt, other.record_id)
+        ('attempt_in_flight', 'attempt_in_flight', True, None)
+    """
+
+    def __init__(
+        self,
+        tool: str,
+        reason: UnresolvedReason,
+        message: str,
+        invocation: Optional[InvocationStatus] = None,
+        *,
+        other_attempt: bool = False,
+    ) -> None:
+        code = reason if other_attempt else "conflict"
+        super().__init__(code, f"{reason}: tool {tool}: {message}", 409)
+        self.tool = tool
+        self.reason: UnresolvedReason = reason
+        self.invocation = invocation
+        self.other_attempt = other_attempt
+
+    @property
+    def record_id(self) -> Optional[str]:
+        return self.invocation.record_id if self.invocation else None
+
+    @property
+    def requires_reconciliation(self) -> bool:
+        return self.reason == "ambiguous_outcome"
+
+    @classmethod
+    def from_body(cls, tool: str, body: Mapping[str, Any]) -> Optional[ToolCallUnresolved]:
+        """Build the error from a 409 body of either form, or ``None`` for any other conflict."""
+        error = body.get("error")
+        if not isinstance(error, Mapping):
+            return None
+        message = str(error.get("message", ""))
+        reason = error.get("reason")
+        if reason is None:
+            code = error.get("code")
+            if code == "attempt_in_flight" or code == "ambiguous_outcome":
+                return cls(tool, code, message, other_attempt=True)
+            return None
+        if reason not in ("in_flight", "ambiguous_outcome"):
+            return None
+        status = body.get("agenomic")
+        invocation: Optional[InvocationStatus] = None
+        if isinstance(status, Mapping):
+            try:
+                invocation = InvocationStatus.model_validate(status)
+            except ValidationError:
+                invocation = None
+        return cls(tool, reason, message, invocation)
+
+
+ProtectMode = Literal["enforce", "shadow"]
+
+
+class ProtectRunConfig(BaseModel):
+    """The ``protect`` section of a tool execution run config.
+
+    Mirrors the gateway type, which rejects unknown fields. A run is admitted
+    by Protect only when this section is present, with ``mode`` ``live`` or
+    ``hybrid`` on the run. ``delegation_id`` is the last link of a delegation
+    chain; ``policy_refs_mode`` scopes the bindings that ``policy_refs`` creates
+    (``enforce`` when absent).
+
+    Example:
+        >>> ProtectRunConfig(agent_id="support-bot", environment="prod").to_wire()
+        {'agent_id': 'support-bot', 'environment': 'prod', 'mode': 'enforce'}
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_id: str
+    environment: str
+    mode: ProtectMode = "enforce"
+    application_genome_digest: Optional[str] = None
+    task_mandate_ref: Optional[str] = None
+    policy_refs: list[str] = Field(default_factory=list)
+    policy_refs_mode: Optional[ProtectMode] = None
+    delegation_id: Optional[UUID] = None
+
+    def to_wire(self) -> dict[str, Any]:
+        """JSON body for ``config["protect"]``; unset fields are omitted."""
+        wire = self.model_dump(mode="json", exclude_none=True)
+        if not self.policy_refs:
+            wire.pop("policy_refs")
+        return wire

@@ -290,7 +290,7 @@ are configured server side.
 
 `examples/12_vault_langgraph.py` runs offline from replay fixtures
 (`python examples/12_vault_langgraph.py`) and against a real workspace when
-`AGENOMIC_BASE_URL` and `AGENOMIC_VAULT_RUNTIME_TOKEN` are set. The rules it
+`AGENOMIC_ENDPOINT` (or `AGENOMIC_BASE_URL`) and `AGENOMIC_VAULT_RUNTIME_TOKEN` are set. The rules it
 follows:
 
 - the state, and so every checkpoint, carries **opaque references only**: the

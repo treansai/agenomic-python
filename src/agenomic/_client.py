@@ -21,6 +21,7 @@ from agenomic.agent import AgentResource
 from agenomic.benchmarks.resources import BenchmarksResource
 from agenomic.client.auth import bearer_header
 from agenomic.client.retry import RetryPolicy
+from agenomic.correction import CorrectionResource
 from agenomic.exceptions import ApiError, CloudError
 from agenomic.experiments.resources import ExperimentsResource
 from agenomic.knowledge.resources import KnowledgeResource
@@ -113,6 +114,8 @@ class Client:
         self.review = ReviewResource(self)
         self.monitor = MonitorResource(self)
         self.protect = ProtectResource(self)
+        #: Correction loop (cloud only): incidents, scenarios, reviewed candidate fixes.
+        self.correction = CorrectionResource(self)
         #: RMP benchmarks (cloud only): catalogue, plans, launches, runs, policies.
         self.benchmarks = BenchmarksResource(self)
         #: Replay tool execution: Tool Gateway (real calls) and Tool Mock Engine.

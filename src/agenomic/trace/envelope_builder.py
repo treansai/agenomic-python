@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -9,6 +10,15 @@ from agenomic.redaction.engine import RedactionEngine
 from agenomic.trace.recorder import TraceRecorder
 from agenomic.types.envelope import TraceEnvelope
 from agenomic.types.trace import TraceInput, TraceOutput
+
+
+def _redacted(engine: Optional[RedactionEngine], value: Any) -> Any:
+    if engine is None:
+        return value
+    try:
+        return engine.apply(value)
+    except (TypeError, copy.Error):
+        return {"redacted": True}
 
 
 def build_envelope(
@@ -24,13 +34,13 @@ def build_envelope(
 ) -> TraceEnvelope:
     """Materialize a TraceEnvelope, applying redaction and capture flags last."""
     if capture_input:
-        payload_in = redaction.apply(raw_input) if redaction is not None else raw_input
+        payload_in = _redacted(redaction, raw_input)
         trace_input = TraceInput(payload_inline=payload_in)
     else:
         trace_input = TraceInput(payload_inline={"redacted": True})
 
     if capture_output:
-        payload_out = redaction.apply(raw_output) if redaction is not None else raw_output
+        payload_out = _redacted(redaction, raw_output)
         trace_output = TraceOutput(payload_inline=payload_out)
     else:
         trace_output = TraceOutput(payload_inline={"redacted": True})

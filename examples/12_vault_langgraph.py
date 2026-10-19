@@ -12,7 +12,7 @@ result by ``action_id`` instead of keeping it in the state.
 Offline by default: executions are answered from replay fixtures and nothing
 reaches the network. To run against a real workspace set
 
-    AGENOMIC_BASE_URL=https://cloud.example
+    AGENOMIC_ENDPOINT=https://cloud.example     (AGENOMIC_BASE_URL is also read)
     AGENOMIC_VAULT_RUNTIME_TOKEN=vrt_...        (enrolled with client.vault.runtime_identities.issue)
     AGENOMIC_VAULT_BINDING=crm-read              (an active binding for the tool crm.get_customer)
 """
@@ -152,7 +152,7 @@ def main() -> int:
     except ImportError as error:
         print(f"langgraph not installed: {error}")
         return 0
-    base_url = os.environ.get("AGENOMIC_BASE_URL")
+    base_url = os.environ.get("AGENOMIC_ENDPOINT") or os.environ.get("AGENOMIC_BASE_URL")
     token = os.environ.get("AGENOMIC_VAULT_RUNTIME_TOKEN")
     if base_url and token:
         binding = os.environ.get("AGENOMIC_VAULT_BINDING", "crm-read")

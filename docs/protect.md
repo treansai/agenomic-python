@@ -109,7 +109,43 @@ server error code on refusal; async variants carry the `a` prefix
 | `restrictions.list(status=)`, `restrictions.create(scope_kind=, kind=, reason=, ...)`, `restrictions.lift(id)` | `/v1/protect/restrictions` |
 | `kill_switch(scope_kind, scope_ref=None, reason=)` | `POST /v1/protect/kill-switch` |
 | `simulate(intents, policies=, policy_refs=, decisions_from_run=)` | `POST /v1/protect/simulate` |
+| `delegations.issue(delegate_agent_id, scope=, budget=, expires_at=, parent_id=None)`, `delegations.get(id)` | `POST /v1/protect/delegations`, `GET /v1/protect/delegations/{id}` |
 | `coverage()`, `metrics_summary()` | `GET /v1/protect/coverage`, `/metrics/summary` |
 
 The RMP Protect stage (`alerts`, `action_plan`, `recommendations`,
 `notify`) stays on the same namespace.
+
+## Model calls (cooperative)
+
+`client.tools.model_calls` asks the gateway before the runtime calls a model
+provider (cloud, protect runs, routes
+`POST /v1/tool-execution/runs/{run_id}/model-calls/authorize` and `/report`).
+The gateway decides on what the runtime declares (provider, model, token and
+cost estimates, data classification, destination host). It never sees the
+prompt and never makes or observes the provider call, so a runtime that skips
+the check, declares other values than it uses, or reaches a provider
+directly is not stopped.
+
+```python
+from agenomic.tools import ModelCallRequest
+
+request = ModelCallRequest(provider="openai", model="gpt-5",
+                           max_output_tokens=512, estimated_input_tokens=300,
+                           data_classification=["internal"])
+with client.tools.model_calls.guard(run_id, request, wait=True) as call:
+    response = provider.chat(...)
+    call.set_usage_from(response)
+```
+
+`guard` authorizes on entry (`ToolCallDenied` or `ToolApprovalPending` before
+the provider is called; `wait=True` polls the approval and re-posts the
+identical request), and reports usage and duration on exit, with
+`is_error=True` when the body raised. `authorize` and `report` give the typed
+decision (`allow`, `pending`, `denied`) and the single use permit directly.
+Policies address the call as the tool `model:{provider}/{model}`; a model no
+bound policy lists is denied. Budgets count the requested tokens, not the
+reported ones.
+
+A 409 for a recorded identity, or for a new attempt of a logical call whose
+other attempt is unresolved (`attempt_in_flight`, `ambiguous_outcome`), raises
+`ToolCallUnresolved` and is never retried.
